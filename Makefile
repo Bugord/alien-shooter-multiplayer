@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 .PHONY: asmp-dll asmp-server test build test clean format help
+=======
+.PHONY: asmp-dll asmp-server asmp-exe-patcher test build test clean help
+>>>>>>> 8a8d623 (Implement patcher for game executable)
 
 asmp-dll:
 	$(MAKE) -C asmp-dll $(filter-out $@,$(MAKECMDGOALS))
@@ -6,12 +10,16 @@ asmp-dll:
 asmp-server:
 	$(MAKE) -C asmp-server $(filter-out $@,$(MAKECMDGOALS))
 
+asmp-exe-patcher:
+	$(MAKE) -C asmp-exe-patcher $(filter-out $@,$(MAKECMDGOALS))
+
 test:
 	$(MAKE) -C test $(filter-out $@,$(MAKECMDGOALS))
 
 all:
 	$(MAKE) -C asmp-dll $(filter-out $@,$(MAKECMDGOALS))
 	$(MAKE) -C asmp-server $(filter-out $@,$(MAKECMDGOALS))
+	$(MAKE) -C asmp-exe-patcher $(filter-out $@,$(MAKECMDGOALS))
 	$(MAKE) -C test $(filter-out $@,$(MAKECMDGOALS))
 
 format:
@@ -23,10 +31,11 @@ help:
 	@echo "Usage: make [COMPONENT] [TARGET] [VARIABLES]"
 	@echo ""
 	@echo "Components:"
-	@echo "  asmp-dll    - client (asmp.dll)"
-	@echo "  asmp-server - server (asmp-server.exe)"
-	@echo "  test        - tests"
-	@echo "  all         - all components"
+	@echo "  asmp-dll         - client (asmp.dll)"
+	@echo "  asmp-server      - server (asmp-server.exe)"
+	@echo "  asmp-exe-patcher - game executable patcher (asmp-exe-patcher.exe)"
+	@echo "  test             - tests"
+	@echo "  all              - all components"
 	@echo ""
 	@echo "Targets:"
 	@echo "  build  - build a component of the project"
