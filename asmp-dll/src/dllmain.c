@@ -8,6 +8,7 @@
 #include "utils/console/console.h"
 #include "utils/hook/hook.h"
 #include "multiplayer.h"
+#include "gameutils.h"
 
 static HINSTANCE instance_handle = 0;
 static Multiplayer* multiplayer_ = 0;
@@ -80,6 +81,11 @@ static void dllmain_loop(void)
     while (1)
     {
         Sleep(100);
+        if (GetAsyncKeyState(VK_F6) & 0x8000)
+        {
+            gameutils_spawn_weapons();
+            Sleep(1000);
+        }
         if (GetAsyncKeyState(VK_F12) & 0x8000)
         {
             break;
