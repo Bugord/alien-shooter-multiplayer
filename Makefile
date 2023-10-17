@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-.PHONY: asmp-dll asmp-server test build test clean format help
-=======
-.PHONY: asmp-dll asmp-server asmp-exe-patcher test build test clean help
->>>>>>> 8a8d623 (Implement patcher for game executable)
+.PHONY: asmp-dll asmp-server asmp-exe-patcher test build test clean format help
 
 asmp-dll:
 	$(MAKE) -C asmp-dll $(filter-out $@,$(MAKECMDGOALS))
@@ -26,6 +22,9 @@ format:
 	find . -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
 		| xargs clang-format -i
 
+documentation:
+	doxygen Doxyfile
+
 help:
 	@echo "This is the global Makefile for all components of the project."
 	@echo "Usage: make [COMPONENT] [TARGET] [VARIABLES]"
@@ -46,3 +45,6 @@ help:
 	@echo "Variables:"
 	@echo "  Avaliable variables are component-specific. Call 'help' for"
 	@echo "  a specific component for more information."
+	@echo ""
+	@echo "To generate documentation, run Makefile with the given parameter:"
+	@echo "  documentation"
