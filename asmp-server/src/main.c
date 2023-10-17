@@ -1,20 +1,26 @@
-#include <windows.h>
 #include "server.h"
+#include <stdio.h>
+#include <stdlib.h>
 
 #ifndef EZTEST
 
 int main(int argc, char* argv[])
 {
-    (void)argc;
-    (void)argv;
-    MpServer* server = mp_server_create(8888, 4);
-    if (server)
+    if (argc == 2)
     {
-        while (1)
+        MpServer* server = mp_server_create(atoi(argv[1]), 4);
+        if (server)
         {
-            mp_server_tick(server);
+            while (1)
+            {
+                mp_server_tick(server);
+            }
+            mp_server_destroy(server);
         }
-        mp_server_destroy(server);
+    }
+    else
+    {
+        printf("Usage: %s <port>\n", argv[0]);
     }
     return 0;
 }
