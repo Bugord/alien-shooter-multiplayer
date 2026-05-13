@@ -1,7 +1,7 @@
 # SETTINGS #####################################################################
 APP_NAME = test_$(ENTRY)
 BUILD_DIR := build
-SRC_DIRS := src ../common/src ../asmp-dll/src
+SRC_DIRS := src ../common/src ../asmp-dll/src ../common/ehook/src
 CC:=i686-w64-mingw32-gcc
 CXX:=i686-w64-mingw32-g++
 LINKER := $(CXX)

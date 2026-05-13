@@ -1,6 +1,5 @@
 #include "../eztest/eztest.h"
-#include "utils/hook/hook.h"
-#include "utils/mem/mem.h"
+#include "ehook.h"
 
 typedef int (*sum_t)(int, int);
 static sum_t orig_caller_;
@@ -31,22 +30,19 @@ int sum_hook(int a, int b)
 
 TEST_BEGIN(test_01)
 {
-    int allocs = mem_debug_get_diff();
-
-    EXPECT(hook_init(), true);
     EXPECT(sum_naked(4, 3), 7);
-    orig_caller_ = (sum_t)hook_set(sum_naked, sum_hook, 5);
+    orig_caller_ = (sum_t)eh_set_trampoline_hook(sum_naked, sum_hook, 5,
+                                                 EH_TT_TRAMPOLINE_JMP);
     EXPECT_NOT_ZERO(orig_caller_);
     EXPECT(sum_naked(4, 3), 10);
-    hook_unset(sum_naked);
+    eh_unset_trampoline_hook(sum_naked, orig_caller_, 5, EH_TT_TRAMPOLINE_JMP);
     EXPECT(sum_naked(4, 3), 7);
-    orig_caller_ = (sum_t)hook_set(sum_naked, sum_hook, 5);
+    orig_caller_ = (sum_t)eh_set_trampoline_hook(sum_naked, sum_hook, 5,
+                                                 EH_TT_TRAMPOLINE_JMP);
     EXPECT_NOT_ZERO(orig_caller_);
     EXPECT(sum_naked(4, 3), 10);
-    hook_destroy();
+    eh_unset_trampoline_hook(sum_naked, orig_caller_, 5, EH_TT_TRAMPOLINE_JMP);
     EXPECT(sum_naked(4, 3), 7);
-
-    EXPECT(mem_debug_get_diff(), allocs);
 }
 TEST_END
 

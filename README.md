@@ -17,7 +17,7 @@ Alien Shooter is a single-player isometric top-down shooter released in 2003. Th
   - [/asmp-dll/src/multiplayer](/asmp-dll/src/multiplayer) - Top-level client implementation and multiplayer logic.
     - [/asmp-dll/src/multiplayer/client](/asmp-dll/src/multiplayer/client) - Top-level client implementation.
   - [/asmp-dll/src/dllmain.c](/asmp-dll/src/dllmain.c) - Entry point. Everything starts here.
-  - [/asmp-dll/src/utils/hook](/asmp-dll/src/utils/hook) - Component for function hooking.
+  - [/common/ehook](/common/ehook) - Function hooking library (submodule).
 - [/asmp-server](/asmp-server) - Server source code. The server is a 32-bit Windows executable file.
 - [/asmp-exe-patcher](/asmp-exe-patcher) - Patcher source code. The patcher modifies the original AlienShooter.exe so that it automatically injects the network play client (asmp.dll) when launched. See the ["Injection in game process"](#Injection-in-game-process) section for details.
 - [/common](/common) - Common components and header files (containers, mutexes, network protocol headers, etc.) used by both the server and the client. To avoid code duplication and simplify makefiles logic for building specific project parts (server / client / patcher / tests), general logic is placed in this directory.
@@ -52,7 +52,7 @@ apt-get install mingw-w64
 ## Build
 1. Clone the repository:
 ```bash
-git clone https://github.com/ep1h/alien-shooter-multiplayer
+git clone --recursive https://github.com/ep1h/alien-shooter-multiplayer
 ```
 
 2. Navigate to the root directory of the project.
