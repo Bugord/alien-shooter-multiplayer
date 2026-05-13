@@ -8,7 +8,7 @@
 #include "multiplayer.h"
 #include "client/client.h"
 #include "utils/mem/mem.h"
-#include "utils/hook/hook.h"
+#include "ehook.h"
 #include "game/api.h"
 #include "gameutils.h"
 #include "utils/console/console.h" // TODO: Remove later.
@@ -451,42 +451,46 @@ static void on_actor_shoot(MpClient* client, int id, float x, float y)
 static bool set_hooks_(void)
 {
     /* Game::wndproc hook */
-    if (hook_set_vmt((void**)&game_globals_get_game()->__vftable->wnd_proc,
-                     Game__wnd_proc_hook_))
+    if (eh_set_vmt_hook(&game_globals_get_game()->__vftable->wnd_proc, 0,
+                        Game__wnd_proc_hook_))
     {
         /* Game::load_menu hook */
         mp_->Game__load_menu_trampoline =
-            hook_set((void*)FUNC_LOAD_MENU, Game__load_menu_hook_, 8);
+            eh_set_trampoline_hook((void*)FUNC_LOAD_MENU, Game__load_menu_hook_,
+                                   8, EH_TT_TRAMPOLINE_JMP);
         if (mp_->Game__load_menu_trampoline)
         {
             /* Game::tick hook */
-            if (hook_set_vmt((void**)&game_globals_get_game()->__vftable->tick,
-                             Game__tick_hook_))
+            if (eh_set_vmt_hook(&game_globals_get_game()->__vftable->tick, 0,
+                                Game__tick_hook_))
             {
                 /* EntPlayer::set_armed_weapon hook */
                 mp_->EntPlayer__set_armed_weapon_trampoline =
-                    hook_set((void*)FUNC_ENT_PLAYER_SET_ARMED_WEAPON,
-                             EntPlayer__set_armed_weapon_hook_, 5);
+                    eh_set_trampoline_hook(
+                        (void*)FUNC_ENT_PLAYER_SET_ARMED_WEAPON,
+                        EntPlayer__set_armed_weapon_hook_, 5,
+                        EH_TT_TRAMPOLINE_JMP);
                 if (mp_->EntPlayer__set_armed_weapon_trampoline)
                 {
                     /* EntPlayer::action hook */
-                    if (hook_set_vmt(
-                            (void**)&((Entity_vtbl*)ENT_PLAYER_VTBL)->action,
+                    if (eh_set_vmt_hook(
+                            &((Entity_vtbl*)ENT_PLAYER_VTBL)->action, 0,
                             &EntPlayer__action_hook_))
                     {
                         mp_->Entity__set_anim_trampoline =
-                            hook_set((void*)FUNC_ENTITY_SET_ANIM,
-                                     Entity__set_anim_hook_, 8);
+                            eh_set_trampoline_hook((void*)FUNC_ENTITY_SET_ANIM,
+                                                   Entity__set_anim_hook_, 8,
+                                                   EH_TT_TRAMPOLINE_JMP);
                         /* Entity::set_anim hook */
                         if (mp_->Entity__set_anim_trampoline)
                         {
                             /* IDirect3DDevice8::EndScene hook */
                             mp_->IDirect3DDevice8__end_scene_orig =
-                                hook_set_vmt(
+                                eh_set_vmt_hook(
                                     *(void***)(game_globals_get_render()
                                                    ->IDirect3DDevice8) +
                                         35,
-                                    IDirect3DDevice8__end_scene_hook_);
+                                    0, IDirect3DDevice8__end_scene_hook_);
                             if (mp_->IDirect3DDevice8__end_scene_orig)
                             {
                                 return true;

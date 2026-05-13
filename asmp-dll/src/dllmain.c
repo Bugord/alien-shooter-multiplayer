@@ -6,7 +6,6 @@
 #include <stdbool.h>
 #include <windows.h>
 #include "utils/console/console.h"
-#include "utils/hook/hook.h"
 #include "multiplayer.h"
 #include "gameutils.h"
 #include "game/api.h"
@@ -57,13 +56,9 @@ static bool dllmain_init(void)
 {
     if (console_init())
     {
-        if (hook_init())
+        if (multiplayer_init())
         {
-            if (multiplayer_init())
-            {
-                return true;
-            }
-            hook_destroy();
+            return true;
         }
         console_destroy();
     }
@@ -73,7 +68,6 @@ static bool dllmain_init(void)
 static void dllmain_destroy(void)
 {
     multiplayer_destroy();
-    hook_destroy();
     console_destroy();
 }
 

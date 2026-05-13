@@ -1,3 +1,6 @@
 [submodule "asmp-dll/test/src/eztest"]
 	path = test/eztest
 	url = https://github.com/ep1h/eztest
+[submodule "common/ehook"]
+	path = common/ehook
+	url = https://github.com/ep1h/ehook.git
