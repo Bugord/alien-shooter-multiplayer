@@ -1,7 +1,7 @@
 # SETTINGS #####################################################################
 APP_NAME := asmp
 BUILD_DIR := build
-SRC_DIRS := src ../common/src ../common/ehook/src
+SRC_DIRS := src ../common/src ../common/ehook/src ../common/epnet/src/client ../common/epnet/src/common
 CC:=i686-w64-mingw32-gcc
 CXX:=i686-w64-mingw32-g++
 LINKER := $(CXX)
@@ -48,7 +48,7 @@ H_DIRS:=$(sort $(dir $(H_FILES)))
 HPP_DIRS:=$(sort $(dir $(HPP_FILES)))
 H_INCLUDES:=$(addprefix -I, $(H_DIRS))
 HPP_INCLUDES:=$(addprefix -I, $(HPP_DIRS))
-INCLUDES:=$(addprefix -I, $(SRC_DIRS)) $(H_INCLUDES) $(HPP_INCLUDES)
+INCLUDES:=$(addprefix -I, $(SRC_DIRS)) $(H_INCLUDES) $(HPP_INCLUDES) -I../common/epnet/include
 
 # compile .c files
 $(OBJ_DIR)/%.c.o: %.c

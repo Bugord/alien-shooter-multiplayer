@@ -4,3 +4,6 @@
 [submodule "common/ehook"]
 	path = common/ehook
 	url = https://github.com/ep1h/ehook.git
+[submodule "common/epnet"]
+	path = common/epnet
+	url = https://github.com/ep1h/epnet.git

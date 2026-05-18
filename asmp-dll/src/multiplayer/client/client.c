@@ -6,9 +6,10 @@
 #include <string.h>
 #include "client.h"
 #include "utils/mem/mem.h"
-#include "net/client/client.h"
 #include "utils/time/time.h"
 #include "utils/console/console.h" // TODO: Remove.
+#include "epnet.h"
+#include "epnet_client.h"
 
 
 /**
@@ -17,8 +18,8 @@
 typedef enum MpClientStateConnectedSubstate
 {
     STATE_CONNECTING_SUBSTATE_IDLE = 0,
-    STATE_CONNECTING_SUBSTATE_LOW_LEVEL_CONNECTING,
-    STATE_CONNECTING_SUBSTATE_LOW_LEVEL_JUST_CONNECTED,
+    STATE_CONNECTING_SUBSTATE_CONNECTING,
+    STATE_CONNECTING_SUBSTATE_CONNECTED,
     STATE_CONNECTING_SUBSTATE_TOP_LEVEL_CONNECTING,
     STATE_CONNECTING_SUBSTATE_TOP_LEVEL_JUST_CONNECTED,
 } MpClientStateConnectedSubstate;
@@ -27,15 +28,16 @@ typedef enum MpClientStateConnectedSubstate
 typedef struct Player
 {
     MpPlayer mp_player;
-    NetTime user_sync_updated_time_ms;
-    NetTime actor_sync_updated_time_ms;
+    unsigned long user_sync_updated_time_ms;
+    unsigned long actor_sync_updated_time_ms;
 } Player;
 
 typedef struct MpClient
 {
     MpClientState state;
-    NetClient* nc;
-    NetTime tick_time_ms;
+    epnet_client_t* nc;
+    unsigned long tick_time_ms;
+    unsigned long prev_tick_time_ms;
     MpServerConfiguration server_configuration;
     Player local_player;
     void (*user_sync_callback)(MpClient* client, int id, MpUser* user);
@@ -50,8 +52,7 @@ typedef struct MpClient
  *
  * @param client Pointer to client instance.
  */
-static bool handle_state_connecting_substate_low_level_just_connected_(
-    MpClient* client);
+static void handle_state_connecting_substate_connected_(MpClient* client);
 
 /**
  * @brief Waits for top-level connection response.
@@ -76,72 +77,48 @@ static void handle_state_connecting_(MpClient* client);
 static void handle_state_connected_(MpClient* client);
 
 /**
- * @brief Dequeues and processes all packets received since last tick.
+ * @brief Processes events received since last tick.
  *
  * @param client Pointer to client instance.
  */
 static void process_received_packets_(MpClient* client);
 
 
-static bool handle_state_connecting_substate_low_level_just_connected_(
-    MpClient* client)
+static void handle_state_connecting_substate_connected_(MpClient* client)
 {
-    // /* Low level client is connected, so now it is possible to get maximum
-    //  * possible number of players to build players structures array */
-    // if (client->remote_players)
-    // {
-    //     /* Clean players array from previous session */
-    //     mem_free(client->remote_players);
-    //     client->remote_players = 0;
-    // }
-    // client->remote_players =
-    //     mem_alloc(sizeof(*client->remote_players) *
-    //               net_client_get_server_info(client->nc)->max_clients);
-    // if (!client->remote_players)
-    // {
-    //     return false;
-    // }
-    // mem_set(client->remote_players, 0,
-    //         sizeof(*client->remote_players) *
-    //             net_client_get_server_info(client->nc)->max_clients);
-
     /* Build top-level client connection request */
     uint8_t buf[sizeof(MpCPacketConnectionRequest) + MP_MAX_NAME_LEN];
     MpCPacketConnectionRequest* packet = (MpCPacketConnectionRequest*)buf;
-    packet->head.type = MPT_C_CONNECTION_REQUEST;
     packet->name_len = strlen(client->local_player.mp_player.mp_user.name);
     strncpy_s(packet->name, MP_MAX_NAME_LEN,
               client->local_player.mp_player.mp_user.name, MP_MAX_NAME_LEN);
-    net_client_send(client->nc, buf, sizeof(*packet) + packet->name_len, 100);
-    return true;
+    epnet_client_send(client->nc, MPT_C_CONNECTION_REQUEST, buf,
+                      sizeof(*packet) + packet->name_len);
 }
 
 static bool handle_state_connecting_substate_top_level_connecting_(
     MpClient* client)
 {
-    char buf[sizeof(MpSPacketConnectionResponse) + sizeof(NetSPacket)];
-    NetSPacket* packet = (NetSPacket*)buf;
-    int size = 0;
-    while ((size = net_client_dequeue_packet(client->nc, packet)) > 0)
+    epnet_event_t ev;
+    while (epnet_client_poll_events(client->nc, &ev))
     {
-        if (size != sizeof(*packet) + sizeof(MpSPacketConnectionResponse))
+        if (ev.type == EPNET_EVENT_PACKET &&
+            ev.data.packet.pkt_type == MPT_S_CONNECTION_RESPONSE)
         {
-            continue;
+            if (ev.data.packet.len != (int)sizeof(MpSPacketConnectionResponse))
+            {
+                continue;
+            }
+            MpSPacketConnectionResponse* response =
+                (MpSPacketConnectionResponse*)ev.data.packet.data;
+            client->server_configuration = response->server_configuration;
+            return true;
         }
-        if (packet->shead.net_head.type != NPT_S_DATA)
+        if (ev.type == EPNET_EVENT_DISCONNECTED)
         {
-            continue;
+            client->state = MP_CLIENT_STATE_CONNECTION_FAILED;
+            return false;
         }
-        MpPacketHead* head = (MpPacketHead*)packet->payload;
-        if (head->type != MPT_S_CONENCTION_RESPONSE)
-        {
-            continue;
-        }
-        MpSPacketConnectionResponse* mp_packet =
-            (MpSPacketConnectionResponse*)packet->payload;
-        /* Store server configuration */
-        client->server_configuration = mp_packet->server_configuration;
-        return true;
     }
     return false;
 }
@@ -153,48 +130,34 @@ static void handle_state_connecting_(MpClient* client)
 
     switch (connecting_substate)
     {
-    case STATE_CONNECTING_SUBSTATE_IDLE: // TODO: Remove this state.
+    case STATE_CONNECTING_SUBSTATE_IDLE:
     {
-        connecting_substate = STATE_CONNECTING_SUBSTATE_LOW_LEVEL_CONNECTING;
+        connecting_substate = STATE_CONNECTING_SUBSTATE_CONNECTING;
         break;
     }
-    case STATE_CONNECTING_SUBSTATE_LOW_LEVEL_CONNECTING:
+    case STATE_CONNECTING_SUBSTATE_CONNECTING:
     {
-        NetClientState nc_state = net_client_get_state(client->nc);
-        switch (nc_state)
+        epnet_event_t ev;
+        while (epnet_client_poll_events(client->nc, &ev))
         {
-        case NCS_CONNECTING:
-        {
-            /* Low level client is still connecting, just wait... */
-            break;
-        }
-        case NCS_CONNECTED:
-        {
-            /* Low level client has just connected */
-            /* Change substate */
-            connecting_substate =
-                STATE_CONNECTING_SUBSTATE_LOW_LEVEL_JUST_CONNECTED;
-            break;
-        }
-        default:
-        {
-            /* Something wrong */
-            /* Reset substate */
-            connecting_substate = STATE_CONNECTING_SUBSTATE_IDLE;
-            /* Transit to connection failed state */
-            client->state = MP_CLIENT_STATE_CONNECTION_FAILED;
-            break;
-        }
+            if (ev.type == EPNET_EVENT_CONNECTED)
+            {
+                connecting_substate = STATE_CONNECTING_SUBSTATE_CONNECTED;
+                return;
+            }
+            if (ev.type == EPNET_EVENT_DISCONNECTED)
+            {
+                connecting_substate = STATE_CONNECTING_SUBSTATE_IDLE;
+                client->state = MP_CLIENT_STATE_CONNECTION_FAILED;
+                return;
+            }
         }
         break;
     }
-    case STATE_CONNECTING_SUBSTATE_LOW_LEVEL_JUST_CONNECTED:
+    case STATE_CONNECTING_SUBSTATE_CONNECTED:
     {
         /* Send top level connection request */
-        // TODO: Switch state to connection failed if this function returns
-        //       false.
-        handle_state_connecting_substate_low_level_just_connected_(client);
-        /* Change substate */
+        handle_state_connecting_substate_connected_(client);
         connecting_substate = STATE_CONNECTING_SUBSTATE_TOP_LEVEL_CONNECTING;
         break;
     }
@@ -203,7 +166,6 @@ static void handle_state_connecting_(MpClient* client)
         /* Wait for top level connection response */
         if (handle_state_connecting_substate_top_level_connecting_(client))
         {
-            /* Change substate */
             connecting_substate =
                 STATE_CONNECTING_SUBSTATE_TOP_LEVEL_JUST_CONNECTED;
         }
@@ -228,9 +190,9 @@ static void handle_state_connected_(MpClient* client)
     {
         /* Send actual user info */
         MpCPacketUserSync packet;
-        packet.head.type = MPT_C_USER_SYNC;
         packet.mp_user = client->local_player.mp_player.mp_user;
-        net_client_send(client->nc, &packet, sizeof(packet), 0);
+        epnet_client_send(client->nc, MPT_C_USER_SYNC, &packet,
+                          sizeof(packet));
         client->local_player.user_sync_updated_time_ms = client->tick_time_ms;
     }
 
@@ -240,10 +202,10 @@ static void handle_state_connected_(MpClient* client)
     {
         /* Send actual actor info */
         MpCPacketActorSync packet;
-        packet.head.type = MPT_C_ACTOR_SYNC;
         mem_copy(&packet.mp_actor, &client->local_player.mp_player.mp_actor,
                  sizeof(packet.mp_actor));
-        net_client_send(client->nc, &packet, sizeof(packet), 0);
+        epnet_client_send(client->nc, MPT_C_ACTOR_SYNC, &packet,
+                          sizeof(packet));
         client->local_player.actor_sync_updated_time_ms = client->tick_time_ms;
     }
     process_received_packets_(client);
@@ -251,27 +213,25 @@ static void handle_state_connected_(MpClient* client)
 
 static void process_received_packets_(MpClient* client)
 {
-    uint8_t buf[1024]; // TODO: Use precalculated size.
-    NetSPacket* packet = (NetSPacket*)buf;
-    int size = 0;
-    while ((size = net_client_dequeue_packet(client->nc, packet)) > 0)
+    epnet_event_t ev;
+    while (epnet_client_poll_events(client->nc, &ev))
     {
-        if (size < (int)sizeof(*packet))
+        if (ev.type == EPNET_EVENT_DISCONNECTED)
+        {
+            client->state = MP_CLIENT_STATE_INITED;
+            return;
+        }
+        if (ev.type != EPNET_EVENT_PACKET)
         {
             continue;
         }
-        if (packet->shead.net_head.type != NPT_S_DATA)
-        {
-            continue;
-        }
-        MpPacketHead* head = (MpPacketHead*)packet->payload;
-        switch (head->type)
+        switch (ev.data.packet.pkt_type)
         {
         case MPT_S_USERS_SYNC:
         {
             MpSPacketUsersSync* mp_packet =
-                (MpSPacketUsersSync*)packet->payload;
-            for (NetClientId i = 0; i < mp_packet->num_items; ++i)
+                (MpSPacketUsersSync*)ev.data.packet.data;
+            for (uint8_t i = 0; i < mp_packet->num_items; ++i)
             {
                 client->user_sync_callback(client, mp_packet->items[i].id,
                                            &mp_packet->items[i].mp_user);
@@ -281,26 +241,19 @@ static void process_received_packets_(MpClient* client)
         case MPT_S_ACTORS_SYNC:
         {
             MpSPacketActorsSync* mp_packet =
-                (MpSPacketActorsSync*)packet->payload;
-            // console_log("MPT_S_ACTORS_SYNC. Items: %d\n",
-            // mp_packet->num_items);
-            for (NetClientId i = 0; i < mp_packet->num_items; ++i)
+                (MpSPacketActorsSync*)ev.data.packet.data;
+            for (uint8_t i = 0; i < mp_packet->num_items; ++i)
             {
                 client->actor_sync_callback(client, mp_packet->items[i].id,
                                             &mp_packet->items[i].mp_actor);
-                // console_log("  actor %d: %.2f %.2f\n",
-                // mp_packet->items[i].id,
-                //             mp_packet->items[i].mp_actor.x,
-                //             mp_packet->items[i].mp_actor.y);
             }
             break;
         }
         case MPT_S_SHOOT:
         {
-            client->actor_shoot_callback(
-                client, ((MpSPacketShoot*)packet->payload)->player_id,
-                ((MpSPacketShoot*)packet->payload)->x,
-                ((MpSPacketShoot*)packet->payload)->y);
+            MpSPacketShoot* shoot = (MpSPacketShoot*)ev.data.packet.data;
+            client->actor_shoot_callback(client, shoot->player_id, shoot->x,
+                                         shoot->y);
             break;
         }
         default:
@@ -317,11 +270,14 @@ MpClient* mp_client_create(void)
     if (client)
     {
         mem_set(client, 0, sizeof(*client));
-        client->nc = net_client_create();
+        epnet_init();
+        client->nc = epnet_client_create();
         if (client->nc)
         {
+            client->prev_tick_time_ms = time_get_ms();
             return client;
         }
+        epnet_shutdown();
         mem_free(client);
     }
     return 0;
@@ -333,8 +289,9 @@ void mp_client_destroy(MpClient* client)
     {
         if (client->nc)
         {
-            net_client_destroy(client->nc);
+            epnet_client_destroy(client->nc);
         }
+        epnet_shutdown();
         mem_free(client);
     }
 }
@@ -346,14 +303,15 @@ void mp_client_tick(MpClient* client)
         return;
     }
     client->tick_time_ms = time_get_ms();
-    net_client_tick(client->nc); // TODO: Should tick only in certain states.
+    double dt = (client->tick_time_ms - client->prev_tick_time_ms) / 1000.0;
+    client->prev_tick_time_ms = client->tick_time_ms;
+    epnet_client_update(client->nc, dt);
     switch (client->state)
     {
     case MP_CLIENT_STATE_UNINITED:
-    {
-        break;
-    }
     case MP_CLIENT_STATE_INITED:
+    case MP_CLIENT_STATE_CONNECTION_FAILED:
+    case MP_CLIENT_STATE_DISCONNECTING:
     {
         break;
     }
@@ -365,14 +323,6 @@ void mp_client_tick(MpClient* client)
     case MP_CLIENT_STATE_CONNECTED:
     {
         handle_state_connected_(client);
-        break;
-    }
-    case MP_CLIENT_STATE_CONNECTION_FAILED:
-    {
-        break;
-    }
-    case MP_CLIENT_STATE_DISCONNECTING:
-    {
         break;
     }
     }
@@ -398,8 +348,8 @@ bool mp_client_connection_request(MpClient* client, const char* ip,
     {
         return false;
     }
-    /* Send low-level client connection request */
-    if (!net_client_connection_request(client->nc, ip, port))
+    /* Send connection request */
+    if (epnet_client_connect(client->nc, ip, port) != 0)
     {
         return false;
     }
@@ -413,8 +363,7 @@ void mp_client_disconnect(MpClient* client)
     {
         return;
     }
-    net_client_disconnect(client->nc);
-    // TODO: Clear players data.
+    epnet_client_disconnect(client->nc);
     client->state = MP_CLIENT_STATE_INITED;
 }
 
@@ -454,10 +403,9 @@ void mp_client_send_shoot(MpClient* client, float x, float y)
     if (client)
     {
         MpCPacketShoot packet;
-        packet.head.type = MPT_C_SHOOT;
         packet.x = x;
         packet.y = y;
-        net_client_send(client->nc, &packet, sizeof(packet), 100);
+        epnet_client_send(client->nc, MPT_C_SHOOT, &packet, sizeof(packet));
     }
 }
 
@@ -486,7 +434,7 @@ int mp_client_get_max_players_number(MpClient* client)
     {
         return 0;
     }
-    return net_client_get_server_info(client->nc)->max_clients;
+    return client->server_configuration.max_clients;
 }
 
 MpPlayer* mp_client_get_local_player(MpClient* client)
@@ -497,18 +445,3 @@ MpPlayer* mp_client_get_local_player(MpClient* client)
     }
     return &client->local_player.mp_player;
 }
-
-// const MpPlayer* mp_client_get_remote_player(MpClient* client, int id)
-// {
-//     if (client)
-//     {
-//         if (id >= 0 && id <
-//         net_client_get_server_info(client->nc)->max_clients)
-//         {
-//             if (client->remote_players[id].is_connected)
-//             {
-//                 return &client->remote_players[id].mp_player;
-//             }
-//         }
-//     }
-// }
