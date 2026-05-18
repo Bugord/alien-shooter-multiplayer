@@ -12,6 +12,7 @@
 
 typedef struct MpServerConfiguration
 {
+    uint8_t max_clients;
     uint16_t user_sync_update_rate_ms;
     uint16_t actor_sync_update_rate_ms;
     char map_name[MP_MAX_MAP_NAME_LEN];
@@ -42,9 +43,8 @@ typedef struct MpPlayer
 
 typedef enum MpPacketType
 {
-    MPT_EMPTY = 0,
-    MPT_C_CONNECTION_REQUEST,
-    MPT_S_CONENCTION_RESPONSE,
+    MPT_C_CONNECTION_REQUEST = 0x10,
+    MPT_S_CONNECTION_RESPONSE,
     MPT_C_USER_SYNC,
     MPT_S_USERS_SYNC,
     MPT_C_ACTOR_SYNC,
@@ -53,27 +53,19 @@ typedef enum MpPacketType
     MPT_S_SHOOT,
 } MpPacketType;
 
-typedef struct MpPacketHead
-{
-    MpPacketType type;
-} MpPacketHead;
-
 typedef struct MpCPacketConnectionRequest
 {
-    MpPacketHead head;
     uint8_t name_len;
     char name[];
 } MpCPacketConnectionRequest;
 
 typedef struct MpSPacketConnectionResponse
 {
-    MpPacketHead head;
     MpServerConfiguration server_configuration;
 } MpSPacketConnectionResponse;
 
 typedef struct MpCPacketUserSync
 {
-    MpPacketHead head;
     MpUser mp_user;
 } MpCPacketUserSync;
 
@@ -85,14 +77,12 @@ typedef struct MpSPacketUsersSyncItem
 
 typedef struct MpSPacketUsersSync
 {
-    MpPacketHead head;
     uint8_t num_items;
     MpSPacketUsersSyncItem items[];
 } MpSPacketUsersSync;
 
 typedef struct MpCPacketActorSync
 {
-    MpPacketHead head;
     MpActor mp_actor;
 } MpCPacketActorSync;
 
@@ -104,24 +94,19 @@ typedef struct MpSPacketActorSyncItem
 
 typedef struct MpSPacketActorsSync
 {
-    MpPacketHead head;
     uint8_t num_items;
     MpSPacketActorSyncItem items[];
 } MpSPacketActorsSync;
 
 typedef struct MpCPacketShoot
 {
-    MpPacketHead head;
-    // TODO: Add weapon id for additional syncing?
     float x;
     float y;
 } MpCPacketShoot;
 
 typedef struct MpSPacketShoot
 {
-    MpPacketHead head;
     uint8_t player_id;
-    // TODO: Add weapon id for additional syncing?
     float x;
     float y;
 } MpSPacketShoot;

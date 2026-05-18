@@ -21,7 +21,7 @@ Alien Shooter is a single-player isometric top-down shooter released in 2003. Th
 - [/asmp-server](/asmp-server) - Server source code. The server is a 32-bit Windows executable file.
 - [/asmp-exe-patcher](/asmp-exe-patcher) - Patcher source code. The patcher modifies the original AlienShooter.exe so that it automatically injects the network play client (asmp.dll) when launched. See the ["Injection in game process"](#Injection-in-game-process) section for details.
 - [/common](/common) - Common components and header files (containers, mutexes, network protocol headers, etc.) used by both the server and the client. To avoid code duplication and simplify makefiles logic for building specific project parts (server / client / patcher / tests), general logic is placed in this directory.
-  - [/common/src/net](/common/src/net) - Low-level client-server source code.
+  - [/common/epnet](/common/epnet) - Networking library (submodule).
   - [/common/src/utils/containers](/common/src/utils/containers) - Standard container implementations ([list](/common/src/utils/containers/list), [map](/common/src/utils/containers/map), [FIFO/LIFO priority queue](/common/src/utils/containers/pqueue), [FIFO/LIFO queue](/common/src/utils/containers/queue)).
   - [/common/src/utils/mem](/common/src/utils/mem) - Memory allocator.
 - [/game](/game) - Modified game files. Currently, these include menu markup files (.men) and menu logic description files (.lgc).
