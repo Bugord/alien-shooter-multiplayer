@@ -16,6 +16,7 @@ The client for the original 2003 executable (GCC/MinGW build, EXE patcher,
 for example `git show 1a0cf25:asmp-dll/src/multiplayer/multiplayer.c`.
 
 ## Navigation
+- [Documentation index](docs/README.md) - every guide and reference in one list.
 - [Repository navigation](#Repository-navigation)
 - [Build and test](#Build-and-test)
 - [Server-client architecture](#Server-client-architecture)
@@ -30,6 +31,7 @@ for example `git show 1a0cf25:asmp-dll/src/multiplayer/multiplayer.c`.
   - [/common/epnet](/common/epnet) - Networking library (submodule).
   - [/common/src/protocol.h](/common/src/protocol.h) - State and shot packet codecs.
   - [/common/src/multiplayer_protocol.h](/common/src/multiplayer_protocol.h) - Join and player-name packets.
+- [/docs](/docs) - [Architecture and behavior](docs/architecture.md) and the [documentation index](docs/README.md).
 - [/diagnostics](/diagnostics) - Build script, test launcher, unit tests and a headless test peer.
 - [/game](/game) - Modified game files: menu markup (.men) and menu logic (.lgc).
 

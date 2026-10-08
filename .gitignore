@@ -5,6 +5,10 @@
 !/.clang-format
 !/README.md
 
+!/docs/
+/docs/*
+!/docs/*.md
+
 !/asmp-dll/
 /asmp-dll/*
 

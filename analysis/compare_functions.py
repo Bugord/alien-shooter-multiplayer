@@ -52,7 +52,7 @@ def main():
     parser.add_argument("exe", type=Path)
     parser.add_argument("--idb", type=Path, default=Path("AlienShooter.exe.idb"))
     parser.add_argument("--addresses", type=Path, default=Path("asmp-dll/src/game/addresses.h"))
-    parser.add_argument("--output", type=Path, default=Path("analysis/comparison.json"))
+    parser.add_argument("--output", type=Path, default=Path("analysis/data/comparison.json"))
     args = parser.parse_args()
     pe = pefile.PE(str(args.exe))
     image_base = pe.OPTIONAL_HEADER.ImageBase
