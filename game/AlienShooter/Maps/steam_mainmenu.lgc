@@ -115,6 +115,12 @@ main()
         MenuAction(705,5,ANI_MENUDISABLE);
       }
     }
+    // The runtime requests this only after losing a live connection.
+    if( !StartEffectTime && Action(MenuFind(705,MENU_ASMP_VIRTUAL),ACT_GET_HP)==SPMS_CONNECTION_LOST )
+    {
+      asmpReturnStatus = SPMS_CONNECTION_LOST;
+      ChangeMenuState(MENU_ASMP);
+    }
     if( MenuLClick() && MenuNVidUnderCursor()==705 )
     {
       // не переходим к CONTINUE если save нет
@@ -271,9 +277,9 @@ main()
     {
       StartEffectTime = 0;
       MenuRelease();
-      DrawFame();
+      LoadFame();
     }
-    if( GetKey() || (GetInputState()&(INPUT_LCLICK|INPUT_RCLICK)) )
+    if( FameTact() )
       ChangeMenuState(MENU_MAIN);
   }
   else if( MenuState==3 )//Credits

@@ -3,6 +3,7 @@
 #include "steam_actor.h"
 /* Version-specific native UI and map bindings. All calls are game-thread only. */
 int steam_ui_bind(uintptr_t base);
+void steam_ui_stop(void);
 uintptr_t steam_ui_menu_item(uintptr_t game, unsigned int vid, unsigned int direction);
 int steam_ui_text(uintptr_t entity, char* out, unsigned int capacity);
 void steam_ui_menu_status(uintptr_t entity, int status);

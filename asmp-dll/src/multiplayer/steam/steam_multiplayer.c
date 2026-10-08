@@ -15,7 +15,7 @@ typedef struct Remote {
 } Remote;
 typedef struct PendingShot { SteamShotEvent event; DWORD received; } PendingShot;
 static uintptr_t base, local_game, local_player;
-static uint32_t local_low, local_high, world_epoch, map_started;
+static uint32_t local_low, local_high, world_epoch, map_started, world_load;
 static ActorEngine engine;
 static int enabled;
 static volatile LONG stop_requested, stopped = 1;
@@ -39,7 +39,7 @@ int steam_multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
     for (unsigned int i = 0; i < STEAM_MAX_PEERS; ++i) {
         steam_actor_init(&remote[i].actor, &engine); remote[i].last_weapon = -1;
     }
-    local_game = local_player = 0; local_low = local_high = world_epoch = map_started = 0;
+    local_game = local_player = 0; local_low = local_high = world_epoch = map_started = world_load = 0;
     memset(incoming, 0, sizeof(incoming)); memset(current, 0, sizeof(current));
     published_at = current_at = received_count = pending_count = outgoing_head = outgoing_count = 0;
     InterlockedExchange(&stop_requested, 0); InterlockedExchange(&game_thread, 0); InterlockedExchange(&event_drops, 0);
@@ -131,9 +131,10 @@ SteamMultiplayerFrame steam_multiplayer_tick(const Snapshot* local, enum ProbeRe
     if (!gameplay) {
         local_game = local_player = 0; local_low = local_high = 0;
     }
-    if (gameplay && (local->world_low != local_low || local->world_high != local_high || local->map_started != map_started)) {
+    if (gameplay && (local->world_low != local_low || local->world_high != local_high || local->map_started != map_started || local->world_load != world_load)) {
         if (!++world_epoch) ++world_epoch;
         map_started = local->map_started;
+        world_load = local->world_load;
         local_low = local->world_low; local_high = local->world_high;
     }
     if (gameplay) { local_game = local->game; local_player = state == PROBE_OK && local->health > 0 ? local->player : 0; }
@@ -279,11 +280,21 @@ void steam_multiplayer_draw(void) {
                 steam_ui_health_bar(local_game, remote[i].actor.entity, current[i].state.health);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
-void steam_multiplayer_request_stop(void) { InterlockedExchange(&stop_requested, 1); }
+void steam_multiplayer_request_stop(void) {
+    InterlockedExchange(&stop_requested, 1);
+    /* Startup rollback before the first tick cannot own any native entity. */
+    if (!InterlockedCompareExchange(&game_thread, 0, 0)) InterlockedExchange(&stopped, 1);
+}
 int steam_multiplayer_stopped(void) { return InterlockedCompareExchange(&stopped, 0, 0) != 0; }
 int steam_multiplayer_stop(void) {
     if (!steam_multiplayer_stopped()) return 0;
-    enabled = 0; base = local_game = local_player = 0; InterlockedExchange(&game_thread, 0); return 1;
+    enabled = 0; base = local_game = local_player = 0; InterlockedExchange(&game_thread, 0);
+    AcquireSRWLockExclusive(&incoming_lock);
+    memset(incoming, 0, sizeof(incoming)); memset(current, 0, sizeof(current));
+    received_count = pending_count = 0; published_at = current_at = 0;
+    ReleaseSRWLockExclusive(&incoming_lock);
+    AcquireSRWLockExclusive(&outgoing_lock); outgoing_count = outgoing_head = 0; ReleaseSRWLockExclusive(&outgoing_lock);
+    return 1;
 }
 enum SteamRemoteState steam_multiplayer_remote_state(unsigned int id) { return id < STEAM_MAX_PEERS ? remote[id].state : RS_IDLE; }
 #endif

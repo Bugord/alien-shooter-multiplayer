@@ -25,12 +25,14 @@ $netCommon = @(Get-ChildItem "$repo\common\epnet\src\common\*.c" | ForEach-Objec
 $netClient = @("$repo\common\epnet\src\client\epnet_client.c")
 $steamActorSources = @("$repo\asmp-dll\src\game\steam\steam_actor.c", "$repo\asmp-dll\src\game\steam\steam_actor_api.c")
 $steamMultiplayerSources = @("$repo\asmp-dll\src\multiplayer\steam\steam_multiplayer.c", "$repo\asmp-dll\src\game\steam\steam_action_hook.c", "$repo\asmp-dll\src\game\steam\steam_ui.c", "$repo\asmp-dll\src\game\steam\steam_display_hook.c", "$repo\asmp-dll\src\multiplayer\steam\steam_session.c")
+$steamHookSources = @("$repo\asmp-dll\src\game\steam\steam_slot_hook.c", "$repo\asmp-dll\src\game\steam\steam_tick_hook.c", "$repo\asmp-dll\src\game\steam\steam_world_hook.c")
+$steamRuntimeSource = "$repo\asmp-dll\src\multiplayer\steam\steam_runtime.c"
 Push-Location $build
 try {
     # Compile the existing networking library separately with its warning level.
     Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $netCommon + $netClient)
     $netObjects = @($netCommon + $netClient | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
-    Compile ($flags + $steamActorSources + $steamMultiplayerSources + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\steam_state_client.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", "$root\src\tick_hook.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-steam-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
+    Compile ($flags + $steamActorSources + $steamMultiplayerSources + $steamHookSources + @($steamRuntimeSource) + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\steam_state_client.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", "$root\src\tick_hook.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-steam-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     Compile ($flags + $netIncludes + @("$root\src\state_peer.c", "$repo\asmp-dll\src\multiplayer\client\steam_state_client.c", '/Fe:state-peer.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
     Compile ($flags + @("$root\src\launcher.c", "$root\src\window_mode.c", "$root\src\hash.c", '/Fe:asmp-diag-launch.exe', '/link', 'bcrypt.lib', 'user32.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     if (!$SkipTests) {
@@ -45,9 +47,18 @@ try {
         if ($LASTEXITCODE) { throw 'State sync checks failed.' }
         Compile ($flags + @("$root\tests\probe_test.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", '/Fe:probe-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + @("$root\tests\dll_load_test.c", '/Fe:dll-load-test.exe', '/link', '/MACHINE:X86'))
-        Compile ($flags + $steamActorSources + $steamMultiplayerSources + @("$root\tests\tick_hook_test.c", "$root\src\tick_hook.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", "$root\src\dummy_actor.c", '/Fe:tick-hook-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + $steamActorSources + $steamMultiplayerSources + $steamHookSources + @("$root\tests\tick_hook_test.c", "$root\src\tick_hook.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", "$root\src\dummy_actor.c", '/Fe:tick-hook-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $steamActorSources + @("$root\tests\dummy_actor_test.c", "$root\src\dummy_actor.c", '/Fe:dummy-actor-test.exe', '/link', '/MACHINE:X86'))
-        Compile ($flags + $steamActorSources + $steamMultiplayerSources + @("$root\tests\steam_multiplayer_test.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", '/Fe:steam-multiplayer-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + $steamActorSources + $steamMultiplayerSources + $steamHookSources + @("$root\tests\steam_multiplayer_test.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", '/Fe:steam-multiplayer-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + $steamActorSources + $steamMultiplayerSources + $steamHookSources + @("$root\tests\steam_session_test.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", '/Fe:steam-session-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + $steamActorSources + $steamMultiplayerSources + $steamHookSources + $netIncludes + @($steamRuntimeSource, "$root\tests\steam_runtime_test.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", "$repo\asmp-dll\src\multiplayer\client\steam_state_client.c", '/Fe:steam-runtime-test.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        Compile ($flags + $steamActorSources + $steamMultiplayerSources + $steamHookSources + @("$root\tests\steam_hooks_test.c", "$repo\asmp-dll\src\game\steam\steam_probe.c", '/Fe:steam-hooks-test.exe', '/link', '/MACHINE:X86'))
+        & .\steam-hooks-test.exe
+        if ($LASTEXITCODE) { throw 'Steam hook lifecycle checks failed.' }
+        & .\steam-runtime-test.exe
+        if ($LASTEXITCODE) { throw 'Steam runtime checks failed.' }
+        & .\steam-session-test.exe
+        if ($LASTEXITCODE) { throw 'Steam session checks failed.' }
         & .\steam-multiplayer-test.exe
         if ($LASTEXITCODE) { throw 'Steam multiplayer coordinator checks failed.' }
         & .\dummy-actor-test.exe

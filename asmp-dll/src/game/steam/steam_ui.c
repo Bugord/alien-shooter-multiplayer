@@ -10,6 +10,7 @@ typedef void (__fastcall* SetAnimation)(void*, void*, unsigned int);
 typedef void (__fastcall* DrawRect)(void*, void*, float, float, float, float, uint32_t);
 int steam_ui_bind(uintptr_t image)
 {
+    if (base) return 0;
     /* Steam strings own their allocation: load_map consumes a string by value.
        STEXT text is at +0x74, not the old +0x70; assign with the game's allocator. */
     static const struct { unsigned int rva; unsigned char bytes[5]; } signatures[] = {
@@ -31,6 +32,7 @@ int steam_ui_bind(uintptr_t image)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     base = image; return 1;
 }
+void steam_ui_stop(void) { base = 0; }
 uintptr_t steam_ui_menu_item(uintptr_t game, unsigned int vid, unsigned int direction)
 {
     __try {
@@ -67,7 +69,9 @@ int steam_ui_load_map(uintptr_t game, const char* map)
     __try {
         char* owned = NULL;
         ((StringCreate)(base + 0x25EA0))(&owned, NULL, map);
-        ((LoadMap)(base + 0x3C7D0))((void*)game, NULL, owned);
+        /* Use the validated MAP slot so the production load observer also sees
+           direct connections and return-to-menu loads. The callee owns owned. */
+        ((LoadMap)(*(uintptr_t*)(base + STEAM_GAME_VTABLE_RVA + STEAM_LOAD_MAP_SLOT * sizeof(uintptr_t))))((void*)game, NULL, owned);
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }

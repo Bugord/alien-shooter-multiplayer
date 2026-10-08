@@ -1,15 +1,16 @@
 # Steam port: build and review
 
-The x86 `build/asmp-steam-diag.dll` now hosts the Steam adaptation of the existing
-multiplayer mod. The diagnostic launcher and log worker remain the entry point
-for this review stage. Starting without multiplayer options only reads player
+The x86 `build/asmp-steam-diag.dll` hosts the Steam multiplayer runtime. The
+diagnostic launcher configures it and the harness logs its frame observations.
+Starting without multiplayer options only reads player
 state; `-Multiplayer` or `-ServerAddress` enables native multiplayer behavior.
 
 Only Steam EXE SHA256
 `4DD960458D6FFFCC9D00E9E7BA492739FB6D530D4C0B302F1C6BAA8B55D9B142`
 is supported. Addresses use RVAs and bindings check method signatures and
 vtables. Native faults are contained with Windows SEH and disable further
-updates to the affected replica. The original Steam directory is only read.
+updates to the affected replica after one guarded removal attempt. A failed
+removal is reported and abandoned until the world changes. The original Steam directory is only read.
 The launcher runs an ignored copy with separate saves and changes hooks and the
 windowed width operand in process memory. The EXE on disk remains unchanged.
 
@@ -70,7 +71,9 @@ The menu accepts a nickname of 1..15 bytes and an IPv4:port address. Its existin
 connect/status workflow requests the connection on the worker, releases the menu
 and loads the server map on the game thread. Returning to the main menu queues
 disconnection. Campaign/shop menus send inactive state and remove replicas.
-Reconnect through the multiplayer menu after a failed or lost connection.
+Losing the connection in a level loads the main menu, opens Multiplayer and
+shows `Connection lost!`; the connect button allows retry. Connect and map-load
+confirmation each have a ten-second timeout.
 Allow UDP to the server through the host firewall/network as needed.
 
 The test launcher installs the original mod's menu assets in the copied game
@@ -88,26 +91,33 @@ validate latency or shared gameplay across machines.
 
 | Layer | Responsibilities |
 | --- | --- |
-| `asmp-dll/src/game/steam/` | Verified Steam layout/probe, actor factory/destructor, movement/combat API, map/text/menu bindings, MAN action and D3D9/display hooks |
+| `asmp-dll/src/game/steam/` | Verified Steam layout/probe, actor factory/destructor, movement/combat API, map/text/menu bindings, shared slot helper, MAP tick/load, MAN action and D3D9/display hooks |
 | `asmp-dll/src/multiplayer/client/steam_state_client.*` | Original epnet connection/handshake, packet validation, peer state/names and shot queues; no native entities |
-| `asmp-dll/src/multiplayer/steam/` | Session commands/map loading and remote-player lifecycle, game-thread application, bounded worker handoff |
+| `asmp-dll/src/multiplayer/steam/` | Production startup/rollback/shutdown and worker loop, session and remote-player state machines, game-thread application, bounded worker handoff |
 | `common/src/steam_state_protocol.h` | Explicit Steam state/shot codecs and normalized map keys |
 | `common/epnet/`, `asmp-server/` | Existing transport and server, with validated Steam relays |
-| `steam-diagnostics/src/` | Test DLL entry point, post-update hook/queue, logging worker, launcher and optional test peer/dummy |
+| `steam-diagnostics/src/` | Test DLL configuration and logging, frame observer/queue, read-only/dummy harness, launcher and optional test peer |
 
-The port follows `multiplayer.c`'s wait-for-player/torso, private VID, native
-factory, prepare-weapons/name and spawned-state flow. It applies velocity,
+Remote replicas have explicit idle, waiting, spawning, spawned, backoff and
+abandoned states. The native factory owns the created MAN; its child chain owns
+the attached name text and destroys it with the MAN. Private VIDs stay owned by
+the coordinator until native removal succeeds or the old world unloads. Replicas
+use the local player's army and receive weapons on demand. Factory failures and
+torso timeouts remove and retry with a two-second delay doubling to thirty
+seconds. It applies velocity,
 movement intent, position and independent leg/torso directions. Native MAN logic
 selects idle/run and advances animation. Frames and timers are never replicated;
 the animation ID in snapshots is only diagnostic. Weapon application precedes
 torso lookup because the engine can replace the attachment.
 
-Shots follow the original action-hook approach: aim is captured from action
+Aim is captured from native action
 0x25 and ammo-consuming attacks from action 0x5D, then queued separately from
 snapshots. Incoming events invoke native action 0x25 on the replica. The game
 thread never performs socket or file I/O. Names use native owned strings and are
 positioned again after weapon changes. Health bars use native rectangles through
-D3D9 EndScene; installation waits for the renderer to create its device.
+D3D9 EndScene; installation waits for the renderer to create its device. Pending
+display installation retries at most every thirty ticks; failure is latched
+and logged once.
 
 State packets are version 3, 112 bytes: explicit big-endian words, IEEE 754
 coordinates/velocity, signed 32-bit health/live ammo/weapon slot, tick,
@@ -121,7 +131,10 @@ The relay rejects invalid lengths, versions, field ranges and duplicate/older
 sequences, including wraparound. Peers expire after one second without state;
 menus, dead players and snapshots older than 250 ms are inactive. Session/map
 changes discard stale attacks and remove replicas after checking native list
-ownership. Native entity operations and UI drawing stay on the game thread.
+ownership. The probe's map key, native map-start marker and observed load
+generation identify the world; a reused GAME pointer does not. Local death
+publishes inactive state but preserves the current world and its living peers.
+Native entity operations and UI drawing stay on the game thread.
 Bounded queues drop work rather than blocking that thread.
 
 Health belongs to each player's local owner. Local damage to its replica is
@@ -151,12 +164,15 @@ and removes it after sixty seconds; it is mutually exclusive with multiplayer.
 This earlier lifecycle test does not replicate network combat.
 
 Create `build/asmp-diag.stop` to stop the mod while keeping the game open. Cleanup
-waits for the next game tick, removes owned replicas and restores action,
-display/window and update hooks. A paused game must resume. Expected footer:
-`hook_restore_result=0`, `# HOOK_RESTORE action=1 display=1`, and installed=0.
-Foreign hooks are left untouched and reported as restore errors. The DLL stays
-loaded until process exit because a caller may have fetched a callback before
-restoration. A new capture session requires restarting the game.
+waits up to five seconds for game-thread replica removal, then restores display,
+action, map-load and tick hooks. Startup failures use this same cleanup path in
+reverse order. Expected footer: `cleanup=1` and
+`# HOOK_RESTORE action=1 display=1 world=1 tick=0`. A paused game must resume;
+timeout keeps the runtime stopping and retains hooks, so cleanup can be retried.
+Foreign hooks are preserved and reported. The DLL is pinned before publishing
+hooks or private VIDs and stays loaded until process exit, including when a
+caller has already fetched a callback. A new diagnostic capture session requires
+restarting the game.
 
 ## Validation and Gitflow
 
@@ -167,10 +183,15 @@ Coordinator checks exercise torso readiness, combat state, event ordering,
 map/session generations, stale captures, expiry and rejected-actor cleanup.
 Real UDP tests exercise two clients through the server, malformed packets,
 signed fields, state/shot sequence wrap, no self-echo, stale/dead/menu shot
-rejection and reconnect with a reused client ID. These checks do not prove the
+rejection and reconnect with a reused client ID. Runtime/session checks cover
+rollback at every startup stage, active-replica rollback, paused cleanup,
+foreign-hook preservation, reinstall, display throttling, menu validation,
+connection loss/retry and stale generations. Native hook checks exercise the
+load-map and EndScene calling conventions and restored page permissions.
+These checks do not prove the
 native game's rendering or every menu/input path; use the manual review above.
 
-Work stays on `feature/steam-remote-player` for review. Reviewed features can be
+Refactor work stays on `feature/steam-runtime-refactor` for review. Reviewed features can be
 merged into `develop`; `master` remains the release branch, with `release/*` and
 `hotfix/*` following Gitflow. Track code, tests, scripts and usage instructions.
 Builds, test copies, logs, reports, analysis tools, IDA databases and local history

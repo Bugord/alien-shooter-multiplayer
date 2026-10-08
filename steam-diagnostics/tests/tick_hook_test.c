@@ -137,6 +137,12 @@ int main(int argc, char** argv)
         check(hook.tick(game, NULL) == 0, "previously fetched callback remains callable after stop");
         check(tick_hook_drain(&frame, 1) == 0, "capture disabled after stop");
     }
+    if (strcmp(argv[1], "foreign")) {
+        check(tick_hook_install(slot, original.pointer, base) == TICK_HOOK_OK, "retry after failed install or reinstall after stop");
+        hook.pointer = *slot; hook.tick(game, NULL);
+        check(tick_hook_stats().captured == 1, "reinstall clears old queue/counters");
+        check(tick_hook_stop() == TICK_HOOK_OK, "reinstalled stop");
+    }
     VirtualFree((void*)slot, 0, MEM_RELEASE);
     VirtualFree(image, 0, MEM_RELEASE);
     HeapFree(GetProcessHeap(), 0, game);
