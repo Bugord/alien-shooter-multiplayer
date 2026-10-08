@@ -7,7 +7,7 @@
 #include <string.h>
 #include "server.h"
 #include "multiplayer_protocol.h"
-#include "steam_state_protocol.h"
+#include "protocol.h"
 #include "utils/mem/mem.h"
 #include "utils/time/time.h"
 #include "epnet.h"
@@ -18,8 +18,8 @@ typedef struct Player
 {
     MpUser user;
     bool is_connected;
-    uint32_t steam_session, steam_sequence;
-    bool steam_received;
+    uint32_t session, state_sequence;
+    bool state_received;
     uint32_t shot_sequence;
     bool shot_received;
     unsigned long user_sync_updatd_time_ms;
@@ -90,9 +90,9 @@ static void process_received_packets_(MpServer* server)
         {
             if (ev.client_id < server->server_configuration.max_clients) {
                 Player* p = &server->players[ev.client_id];
-                uint32_t session = p->steam_session + 1;
+                uint32_t session = p->session + 1;
                 memset(p, 0, sizeof(*p));
-                p->steam_session = session ? session : 1;
+                p->session = session ? session : 1;
             }
             printf("Client %d joined (low-level)\n", ev.client_id);
             break;
@@ -134,36 +134,36 @@ static void process_received_packets_(MpServer* server)
                     server->tick_time_ms;
                 break;
             }
-            case MPT_C_STEAM_STATE:
+            case MPT_C_STATE:
             {
-                MpSteamState state;
+                MpState state;
                 Player* p = &server->players[sender];
-                if (!mp_steam_decode(ev.data.packet.data, length, &state) ||
-                    (p->steam_received && !mp_steam_newer(state.sequence, p->steam_sequence))) break;
-                p->steam_sequence = state.sequence;
-                p->steam_received = true;
-                uint8_t relay[MP_STEAM_RELAY_SIZE];
-                mp_steam_put(relay, sender);
-                mp_steam_put(relay + 4, p->steam_session);
-                memcpy(relay + 8, ev.data.packet.data, MP_STEAM_STATE_SIZE);
+                if (!mp_state_decode(ev.data.packet.data, length, &state) ||
+                    (p->state_received && !mp_sequence_newer(state.sequence, p->state_sequence))) break;
+                p->state_sequence = state.sequence;
+                p->state_received = true;
+                uint8_t relay[MP_STATE_RELAY_SIZE];
+                mp_put_u32(relay, sender);
+                mp_put_u32(relay + 4, p->session);
+                memcpy(relay + 8, ev.data.packet.data, MP_STATE_SIZE);
                 for (uint8_t i = 0; i < server->server_configuration.max_clients; ++i)
                     if (i != sender && server->players[i].is_connected)
-                        epnet_server_send(server->ns, i, MPT_S_STEAM_STATE, relay, sizeof(relay));
+                        epnet_server_send(server->ns, i, MPT_S_STATE, relay, sizeof(relay));
                 break;
             }
-            case MPT_C_STEAM_SHOT:
+            case MPT_C_SHOT:
             {
-                MpSteamShot shot;
+                MpShot shot;
                 Player* p = &server->players[sender];
-                if (!mp_steam_shot_decode(ev.data.packet.data, length, &shot) ||
-                    (p->shot_received && !mp_steam_newer(shot.sequence, p->shot_sequence))) break;
+                if (!mp_shot_decode(ev.data.packet.data, length, &shot) ||
+                    (p->shot_received && !mp_sequence_newer(shot.sequence, p->shot_sequence))) break;
                 p->shot_sequence = shot.sequence; p->shot_received = true;
-                uint8_t relay[MP_STEAM_SHOT_RELAY_SIZE];
-                mp_steam_put(relay, sender); mp_steam_put(relay + 4, p->steam_session);
-                memcpy(relay + 8, ev.data.packet.data, MP_STEAM_SHOT_SIZE);
+                uint8_t relay[MP_SHOT_RELAY_SIZE];
+                mp_put_u32(relay, sender); mp_put_u32(relay + 4, p->session);
+                memcpy(relay + 8, ev.data.packet.data, MP_SHOT_SIZE);
                 for (uint8_t i = 0; i < server->server_configuration.max_clients; ++i)
                     if (i != sender && server->players[i].is_connected)
-                        epnet_server_send(server->ns, i, MPT_S_STEAM_SHOT, relay, sizeof(relay));
+                        epnet_server_send(server->ns, i, MPT_S_SHOT, relay, sizeof(relay));
                 break;
             }
             default:
