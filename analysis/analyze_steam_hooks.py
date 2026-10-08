@@ -22,7 +22,7 @@ EXPECTED_SHA256 = "4dd960458d6fffcc9d00e9e7ba492739fb6d530d4c0b302f1c6baa8b55d9b
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exe", type=Path)
-    parser.add_argument("--output", type=Path, default=Path("analysis/steam-hooks.json"))
+    parser.add_argument("--output", type=Path, default=Path("analysis/data/steam-hooks.json"))
     args = parser.parse_args()
     raw = args.exe.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
