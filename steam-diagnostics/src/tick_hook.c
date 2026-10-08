@@ -86,7 +86,7 @@ static int __fastcall on_tick(void* game, void* unused)
             } else if (frame.actor.event == ACTOR_REJECTED) {
                 InterlockedExchange(&dummy_stop, 1);
             }
-            if (stopping && !dummy.entity) InterlockedExchange(&dummy_done, 1);
+            if (stopping && !dummy.native.entity) InterlockedExchange(&dummy_done, 1);
         }
         /* Never wait on the logging thread from the game thread. */
         if (TryAcquireSRWLockExclusive(&queue_lock)) {

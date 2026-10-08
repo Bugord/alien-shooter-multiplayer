@@ -42,14 +42,11 @@ typedef struct ActorResult {
 typedef struct SteamActor {
     ActorEngine engine;
     uintptr_t game, player, entity;
-    char map[128];
     /* Private VID persists for the lifetime of its engine-owned entity.
        The engine never owns this descriptor through its VID registry. */
     unsigned char vid[0x490];
     unsigned int category, updates;
-    DWORD ready_since, spawned_at, last_pose;
-    int attempted, waiting;
-    int prepared, armed_weapon;
+    int armed_weapon;
 } SteamActor;
 
 /* Production binding validates Steam code and vtable before publishing calls.
@@ -58,8 +55,16 @@ int actor_engine_bind(uintptr_t base, ActorEngine* output);
 void steam_actor_init(SteamActor* actor, const ActorEngine* engine);
 /* All lifecycle and engine operations run on the game thread, after its tick.
    Stop removes only a live entity still registered with this private VID. */
-ActorResult steam_actor_tick(SteamActor* actor, uintptr_t base,
-    const Snapshot* local, enum ProbeResult state, const Snapshot* target, DWORD now, int stop, int combat, float offset, DWORD lifetime);
+ActorResult steam_actor_spawn(SteamActor*, uintptr_t base, const Snapshot* local, const Snapshot* target);
+int steam_actor_torso_ready(const SteamActor*);
+int steam_actor_set_army(SteamActor*, unsigned int army);
+/* 1 success, 0 rejected (keep previous weapon), -1 native exception. */
+int steam_actor_arm(SteamActor*, int slot);
+ActorResult steam_actor_apply(SteamActor*, const Snapshot* target);
+/* The native destructor cascades through the child chain, including name STEXT.
+   Map owns MAN, child entities and their strings. VID remains in the pinned DLL.
+   Removal reports ACTOR_FAULT and retains the pointer for truthful stop reporting. */
+ActorResult steam_actor_remove(SteamActor*, uintptr_t game);
 int steam_actor_live(const SteamActor* actor, uintptr_t game);
 int steam_actor_shoot(SteamActor* actor, uintptr_t game, int x, int y, int weapon);
 #endif

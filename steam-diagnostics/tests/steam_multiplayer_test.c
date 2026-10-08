@@ -8,11 +8,13 @@ static unsigned char game[0x2300], army[0x30], player[0xBC], vid[0x490];
 static unsigned char entity[0xBC], torso[0x74], weapons[10][8];
 static uintptr_t entries[16], base;
 static unsigned int created, destroyed, shots, selected;
-static int shot_x, shot_y, health, armed, fail_weapon;
+static int shot_x, shot_y, health, armed, fail_weapon, fail_factory, fault_apply, fault_remove, missing_weapon;
+static unsigned int granted;
 static SteamPeerState peers[STEAM_MAX_PEERS];
 static Snapshot local;
 static void* __fastcall create(void* g, void* u, void* v, float x, float y, float z, int dir, void* parent) {
     (void)u; (void)parent; CHECK(g == game);
+    if (fail_factory) return NULL;
     memset(entity, 0, sizeof(entity));
     *(uintptr_t*)entity = base + STEAM_MAN_VTABLE_RVA;
     *(uintptr_t*)(entity + 0x1C) = (uintptr_t)v;
@@ -23,6 +25,7 @@ static void* __fastcall create(void* g, void* u, void* v, float x, float y, floa
 }
 static void* __fastcall destroy(void* e, void* u, int release) {
     (void)u; CHECK(e == entity && release == 1 && entries[1] == (uintptr_t)e);
+    if (fault_remove) RaiseException(0xE0000001u, 0, 0, NULL);
     entries[1] = 0; ++destroyed; return e;
 }
 static void __fastcall move(void* e, void* u, float x, float y, float z) {
@@ -34,8 +37,9 @@ static unsigned char __fastcall rotate(void* e, void* u, unsigned int dir) {
 }
 static int __fastcall action(void* e, void* u, unsigned int kind, intptr_t a, intptr_t b, intptr_t c) {
     (void)u; (void)c; CHECK(e == entity);
-    if (kind == 0x61) { CHECK(a == 1); return 0; }
-    if (kind == 0x38) return 1;
+    if (kind == 0x61) { CHECK(a == 0); return 0; }
+    if (kind == 0x38) return !missing_weapon;
+    if (kind == 0x36) { CHECK(a >= 260 && a < 270); ++granted; return 0; }
     if (kind == 0x5C) return *(int*)(entity + 0x84) / 64;
     if (kind == 0x5D) { *(int*)(entity + 0x84) += (int)a * 64; return 0; }
     if (kind == 0x25) { CHECK(*(int*)(entity + 0x84) >= 2 * 64); ++shots; shot_x = (int)a; shot_y = (int)b; return 0; }
@@ -50,7 +54,9 @@ static int __fastcall weapon(void* e, void* u, int slot) {
     armed = slot; ++selected; return 1;
 }
 static void __fastcall set_health(void* e, void* u, int value) {
-    (void)u; CHECK(e == entity); health = value;
+    (void)u; CHECK(e == entity);
+    if (fault_apply) RaiseException(0xE0000001u, 0, 0, NULL);
+    health = value;
 }
 static SteamMultiplayerFrame step(DWORD now) {
     steam_multiplayer_publish(peers, now);
@@ -116,8 +122,34 @@ int main(void) {
     steam_multiplayer_tick(&local, PROBE_OK, 5400); CHECK(destroyed == 2); /* Expired worker data. */
     step(5420); step(5440); step(7440); attach_torso(); step(7460); CHECK(created == 3);
     s->weapon_slot = 5; fail_weapon = 1; step(7480); step(7500);
-    CHECK(destroyed == 3); /* Ordinary rejection must still release its entity. */
+    CHECK(destroyed == 2 && steam_multiplayer_remote_state(0) == RS_SPAWNED && armed == 2);
+    fail_weapon = 0; s->weapon_slot = 6; step(7510); CHECK(armed == 6);
     steam_multiplayer_request_stop(); step(7520); CHECK(steam_multiplayer_stopped());
+    CHECK(steam_multiplayer_stop());
+    /* Reinitialization clears old queues, stop flags and world identity. */
+    CHECK(steam_multiplayer_initialize(base, &api));
+    fail_factory = 1; step(10000); step(12000);
+    CHECK(steam_multiplayer_remote_state(0) == RS_BACKOFF && created == 3);
+    step(13999); CHECK(created == 3);
+    fail_factory = 0; step(14000); CHECK(created == 4);
+    step(16999); CHECK(destroyed == 3);
+    step(17000); CHECK(destroyed == 4 && steam_multiplayer_remote_state(0) == RS_BACKOFF);
+    step(21000); attach_torso(); missing_weapon = 1; step(21020);
+    CHECK(created == 5 && granted == 1 && steam_multiplayer_remote_state(0) == RS_SPAWNED);
+    missing_weapon = 0; fault_apply = 1; step(21040); fault_apply = 0;
+    CHECK(destroyed == 5 && steam_multiplayer_remote_state(0) == RS_ABANDONED);
+    step(22000); CHECK(created == 5); /* No writes in the faulting world. */
+    mp_steam_world_key("maps/Level_02.map", &local.world_low, &local.world_high);
+    s->world_low = local.world_low; s->world_high = local.world_high;
+    step(22020); step(24020); attach_torso(); step(24040);
+    CHECK(created == 6 && steam_multiplayer_remote_state(0) == RS_SPAWNED); /* Same GAME, different key. */
+    fault_apply = fault_remove = 1;
+    SteamMultiplayerFrame fault = step(24060);
+    CHECK(fault.count == 1 && fault.remote[0].cleanup_failed && steam_multiplayer_remote_state(0) == RS_ABANDONED);
+    fault_apply = 0; steam_multiplayer_request_stop(); fault = step(24080);
+    CHECK(!steam_multiplayer_stopped() && !steam_multiplayer_stop() && fault.remote[0].cleanup_failed);
+    entries[1] = 0; fault_remove = 0; /* Native map unload owns remaining storage. */
+    step(24100); CHECK(steam_multiplayer_stopped() && steam_multiplayer_stop());
     VirtualFree((void*)base, 0, MEM_RELEASE);
     puts("Steam multiplayer checks passed: native torso wait, combat, shots, generation/world checks, stale captures, expiry, rejected-actor cleanup.");
     return 0;

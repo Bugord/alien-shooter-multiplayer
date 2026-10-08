@@ -17,7 +17,7 @@ static void* __fastcall create_actor(void* g, void* unused, void* descriptor,
     float x, float y, float z, int direction, void* parent)
 {
     (void)unused; (void)parent;
-    check(g == game && descriptor == actor.vid, "factory object and private descriptor");
+    check(g == game && descriptor == actor.native.vid, "factory object and private descriptor");
     check(*(int32_t*)((unsigned char*)descriptor + 0x440) == -1 &&
         *(int32_t*)((unsigned char*)descriptor + 0x44C) == -1, "disable local creation/deletion scripts");
     check(*(unsigned int*)((unsigned char*)descriptor + 0x3A8) == 0, "private counters start empty");
@@ -58,6 +58,9 @@ static unsigned char __fastcall rotate_actor(void* e, void* unused, unsigned int
 }
 static ActorResult step(DWORD time, int stop)
 {
+    const char* path = *(const char**)(game + 0x20);
+    local.world_low = local.world_high = 0;
+    if (strstr(path, "Level_")) local.world_low = 1;
     return dummy_actor_tick(&actor, image_base, &local, PROBE_OK, time, stop);
 }
 static void reset(void)

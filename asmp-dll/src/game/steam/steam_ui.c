@@ -84,7 +84,7 @@ static uintptr_t find_name(const SteamActor* actor)
 int steam_ui_name(SteamActor* actor, const char* name)
 {
     __try {
-        if (!actor->entity || !actor->prepared) return 0;
+        if (!actor->entity || steam_actor_torso_ready(actor) != 1) return 0;
         uintptr_t text = find_name(actor);
         if (!text) {
             uintptr_t font = *(uintptr_t*)(actor->game + 0x2BC + 4 * 4);
