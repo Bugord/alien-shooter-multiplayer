@@ -20,14 +20,12 @@ $game = Join-Path $gameDirectory 'AlienShooter.exe'
 $runtime = $build
 if ($RuntimeDirectory) {
     if ($Instance -eq 'default') { throw 'RuntimeDirectory is reserved for pair instances.' }
-    $runtime = Assert-TestDirectory $RuntimeDirectory (Join-Path $build 'two-client')
-    if ([IO.Path]::GetFileName($runtime) -ine $Instance) { throw 'Runtime directory must end with the selected instance name.' }
-    if (!(Test-Path -LiteralPath (Join-Path $runtime 'asmp-runtime.marker'))) { throw 'Runtime marker missing.' }
-    if ((Get-FileHash -LiteralPath (Join-Path $runtime 'asmp-diag.dll')).Hash -ne (Get-FileHash -LiteralPath (Join-Path $build 'asmp-diag.dll')).Hash) { throw 'Runtime DLL differs from current build.' }
+    $runtime = Assert-TestRuntime $RuntimeDirectory $Instance
 }
-if (!(Test-Path -LiteralPath $game)) { throw 'Run prepare-test-game.ps1 first.' }
-if (!(Test-Path -LiteralPath (Join-Path $gameDirectory 'asmp-diag-test.marker'))) { throw 'Test-copy marker missing.' }
+Assert-TestGameReady $gameDirectory
 if (!(Test-Path -LiteralPath (Join-Path $runtime 'asmp-diag.dll'))) { throw 'Run build.ps1 first.' }
+$launcher = Join-Path $build 'asmp-diag-launch.exe'
+if (!(Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Run build.ps1 first: launcher missing.' }
 $otherGame = ''
 if ($Instance -ne 'default') {
     $otherInstance = if ($Instance -eq 'client-a') { 'client-b' } else { 'client-a' }
@@ -96,8 +94,7 @@ try {
     $env:ASMP_DIAG_DUMMY = if ($DummyActor) { '1' } else { '' }
     $launchArguments = @($game, (Join-Path $runtime 'asmp-diag.dll'))
     if (!$Fullscreen) { $launchArguments += @("$Width", "$Height") }
-    & (Join-Path $build 'asmp-diag-launch.exe') @launchArguments
-    if ($LASTEXITCODE) { throw "Diagnostic launcher failed ($LASTEXITCODE)." }
+    Invoke-TestLauncher $launcher $launchArguments
 } finally {
     $env:ASMP_DIAG_SERVER = $previousServer
     $env:ASMP_DIAG_PORT = $previousPort

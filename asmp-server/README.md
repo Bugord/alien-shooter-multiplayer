@@ -8,6 +8,11 @@ Relay server, a 32-bit Windows executable built by
 .\diagnostics\build\asmp-server.exe 27020
 ```
 
+For a foreground relay in Git Bash, run `bash diagnostics/start-server.sh`
+from the repository root (optional port argument, default 27020). Run
+`bash diagnostics/start-clients.sh` in a second Git Bash terminal to launch both
+prepared copies. See [quick launch](../diagnostics/README.md#quick-launch-from-git-bash).
+
 The only argument is the UDP port. The server accepts up to four clients over
 [epnet](../common/epnet/README.md), prefixes each relayed state and shot packet
 with the sender ID and connection generation, and rejects invalid lengths,

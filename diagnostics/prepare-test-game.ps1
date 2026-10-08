@@ -9,14 +9,17 @@ $target = Get-TestGameDirectory $Instance
 $target = Assert-TestDirectory $target $PSScriptRoot
 Assert-TestGameIdle $target
 if ($sourcePath -ieq $target -or $sourcePath.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase) -or $target.StartsWith($sourcePath + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Source overlaps the diagnostic destination.' }
-$expectedHash = '4DD960458D6FFFCC9D00E9E7BA492739FB6D530D4C0B302F1C6BAA8B55D9B142'
+$expectedHash = Get-TestExeHash
 $exe = Join-Path $sourcePath 'AlienShooter.exe'
 if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $expectedHash) { throw 'Unsupported game EXE.' }
 $bytes = (Get-ChildItem -LiteralPath $sourcePath -File -Recurse | Measure-Object Length -Sum).Sum
-$drive = Get-PSDrive -Name ([IO.Path]::GetPathRoot($target).Substring(0, 1))
-if ($null -ne $drive.Free -and $drive.Free -lt $bytes + 64MB) { throw 'Not enough free space for a separate test copy.' }
+Assert-TestFreeSpace $target $bytes
+Assert-TestTree $sourcePath
 if (Test-Path -LiteralPath $target) {
-    if (!(Test-Path -LiteralPath (Join-Path $target 'asmp-diag-test.marker'))) { throw 'Existing destination is not a diagnostic copy.' }
+    Assert-TestTree $target
+    $marker = Join-Path $target 'asmp-diag-test.marker'
+    if (!(Test-Path -LiteralPath $marker -PathType Leaf)) { throw 'Existing destination is not a diagnostic copy.' }
+    if ((Get-Content -LiteralPath $marker -Raw).Trim() -ne 'ASMP diagnostic copy') { throw 'Invalid test-copy marker.' }
 } else {
     New-Item -ItemType Directory -Path $target | Out-Null
     Set-Content -LiteralPath (Join-Path $target 'asmp-diag-test.marker') -Value 'ASMP diagnostic copy' -Encoding ascii

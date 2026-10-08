@@ -61,48 +61,111 @@ Helper logs are in `build/logs/observer-<timestamp>.log`; game logs are in
 
 ## Two game copies on one PC: launch verification
 
-The first implementation checkpoint supports preparing and manually launching
-two isolated copies. Both Steam processes have been launched together; the user
-confirmed both windows and closed them. A shared-server launch/stop scenario and
-bidirectional gameplay checks are subsequent checkpoints.
+The first two implementation checkpoints support preparing and manually launching
+two isolated copies, with a new pair of DLL directories for each test. Both Steam
+processes have been launched together; the user confirmed both windows and closed
+them. A shared-server launch/stop scenario and bidirectional gameplay checks are
+subsequent checkpoints.
 
 Each copy has its own CFG, saves, menu backup, DLL directory, logs and stop file.
 The default `test-game` and the Mirror commands above retain their paths.
-Exit both pair windows before recreating the runtime directories below. Leave
+Exit both pair windows before preparing new runtime directories below. Leave
 games belonging to another test session open and defer this test until they exit.
 
 ```powershell
 .\diagnostics\prepare-test-game.ps1 -Instance client-a
 .\diagnostics\prepare-test-game.ps1 -Instance client-b
 # Run after building and with Steam open. This probe starts read-only clients.
-foreach ($instance in @('client-a', 'client-b')) {
-    $runtime = Join-Path $PWD "diagnostics\build\two-client\probe\$instance"
-    New-Item -ItemType Directory -Path $runtime -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $runtime 'asmp-runtime.marker') -Value 'ASMP isolated runtime'
-    Copy-Item -LiteralPath '.\diagnostics\build\asmp-diag.dll' -Destination (Join-Path $runtime 'asmp-diag.dll') -Force
-    .\diagnostics\start-test.ps1 -Instance $instance -RuntimeDirectory $runtime
-}
+$pair = .\diagnostics\prepare-test-runtimes.ps1
+$pair | Format-List
+.\diagnostics\start-test.ps1 -Instance client-a -RuntimeDirectory $pair.ClientA -Name LocalA
+.\diagnostics\start-test.ps1 -Instance client-b -RuntimeDirectory $pair.ClientB -Name LocalB
 ```
 
 The launcher preserves the engine's actual render size (720×480 in the verified
 run, with an 800×600 requested bound). Use Alt+Tab to switch windows. Close them
-normally after the probe. Each `probe/client-a` or `probe/client-b` directory
-contains `logs/asmp-diag-<PID>.log`; an `asmp-diag.stop` beside that client's DLL
+normally after the probe. Each `build/two-client/<unique-id>/client-a` or
+`client-b` directory contains `logs/asmp-diag-<PID>.log`; an `asmp-diag.stop` beside that client's DLL
 stops only its diagnostic hooks. The old `build/asmp-diag.stop` does not affect
 these isolated DLLs.
+
+`prepare-test-runtimes.ps1` validates both game copies, checks space for both DLLs
+and copies/verifies them before returning `ClientA`, `ClientB`, `Directory` and
+`DllSha256`. It creates fresh directories and preserves previous DLLs and logs.
+It prepares files only; the two launch commands above run sequentially.
+Game preparation checks space for each full physical copy.
 
 Preparation and launch share an exclusive file lock. Preparing an active copy
 and relaunching the same copy are refused. A pair launch permits only the other
 pair copy to be open; unknown process paths are refused. Use a shell with the
 same permissions as the games. Pair DLL directories must end with the selected
 instance name, carry the runtime marker and contain the current build's DLL.
+Game EXE/marker and runtime DLL/marker validation happen before settings/menu or
+stop-file writes. Junctions and symlinks in the copies are refused. Each launch
+restores its caller's environment variables, including on launcher failure.
 Do not rebuild while a game or helper is using the build output.
 
 The script checks run as part of `build.ps1` and can also run independently:
 
 ```powershell
 .\diagnostics\tests\test_instance_scripts_test.ps1
+.\diagnostics\tests\test_resource_isolation_test.ps1
 ```
+
+The resource tests use temporary game files and a substituted launcher. They
+check separate settings, saves, menus and stop files, restored environments,
+hash/marker rejection, active-copy protection and disk-capacity failures. They
+also create a temporary junction, which requires a shell allowed to create it.
+These checks do not prove native save writes or live independent hook shutdown.
+
+## Quick launch from Git Bash
+
+Requires Git Bash on Windows and the compiled Windows binaries. Prepare
+`client-a` and `client-b` once with the commands above, keep Steam open, and close
+the previous game windows before launching again. The Bash scripts resolve all
+project paths relative to themselves and call the existing PowerShell checks.
+
+In one Git Bash terminal, from the repository root:
+
+```bash
+bash diagnostics/start-server.sh
+```
+
+The relay runs in that terminal on UDP 27020; Ctrl+C stops it. An occupied port
+is reported without replacing or stopping its owner. If the matching relay is
+already running, use it and proceed directly to the clients command.
+
+In another Git Bash terminal, from the repository root:
+
+```bash
+bash diagnostics/start-clients.sh
+```
+
+This prepares two fresh DLL directories, then launches `LocalA` and `LocalB`
+sequentially with automatic connection/map loading at `127.0.0.1:27020`.
+Logs are printed before launch. For localhost, the port owner must be this
+checkout's relay; a running diagnostic peer is refused. Successful launchers
+still require checking the windows/logs for completed connection and map loading.
+If B fails, A remains open and both diagnostic directories are preserved.
+
+Optional positional arguments:
+
+```bash
+bash diagnostics/start-server.sh 27021
+bash diagnostics/start-clients.sh 127.0.0.1 27021 Alice Bob
+# A server on another PC:
+bash diagnostics/start-clients.sh 192.168.1.10 27020 Alice Bob
+```
+
+Use `--help` on either script. From another directory, pass the full script path,
+for example `bash /d/Projects/Mods/alien-shooter-multiplayer/diagnostics/start-clients.sh`.
+Close the games normally when finished. These are manual launch conveniences;
+they do not add a session manifest, per-client restart or managed pair shutdown.
+
+`tests/bash_wrappers_test.ps1` checks Bash syntax and real Bash-to-PowerShell
+argument forwarding with temporary stubs, including paths with spaces, literal
+names, invalid ports and propagated exit codes. It runs in `build.ps1` when Git
+Bash is installed. No games or relay are started by that test.
 
 ## Multiplayer menu and two PCs
 
