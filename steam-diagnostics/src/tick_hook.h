@@ -3,14 +3,17 @@
 #include <windows.h>
 #include "probe.h"
 #include "dummy_actor.h"
+#include "../../asmp-dll/src/multiplayer/steam/steam_multiplayer.h"
 
 #define FRAME_QUEUE_CAPACITY 1024u
 typedef struct FrameSample {
     DWORD milliseconds;
     LONG tick;
+    int session_result;
     enum ProbeResult result;
     Snapshot snapshot;
     ActorResult actor;
+    SteamMultiplayerFrame multiplayer;
 } FrameSample;
 typedef struct TickStats {
     LONG calls, captured, dropped, installed;

@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include "tick_hook.h"
+#include "../../asmp-dll/src/multiplayer/steam/steam_session.h"
 
 /* MAP_STEAM::tick has this in ECX, no stack arguments, and an int return.
    __fastcall supplies the same ECX; the unused EDX argument is ignored. */
@@ -71,7 +72,9 @@ static int __fastcall on_tick(void* game, void* unused)
         FrameSample frame = {0};
         frame.milliseconds = GetTickCount();
         frame.tick = tick;
+        frame.session_result = steam_session_tick();
         frame.result = probe_read(base, &frame.snapshot);
+        frame.multiplayer = steam_multiplayer_tick(&frame.snapshot, frame.result, frame.milliseconds);
         if (dummy_enabled && !InterlockedCompareExchange(&dummy_done, 0, 0)) {
             int stopping = InterlockedCompareExchange(&dummy_stop, 0, 0) != 0;
             frame.actor = dummy_actor_tick(&dummy, base, &frame.snapshot,

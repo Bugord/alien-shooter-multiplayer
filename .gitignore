@@ -72,3 +72,7 @@
 *.log
 *.idb
 *.i64
+
+# Source scripts for the existing multiplayer menu on Steam.
+!/game/AlienShooter/Maps/steam_mainmenu.lgc
+!/game/AlienShooter/Maps/steam_asmp_play.lgc

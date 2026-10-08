@@ -1,8 +1,10 @@
+#if defined(ASMP_STEAM_BUILD)
 #include <windows.h>
 #include <float.h>
 #include <string.h>
-#include "profile.h"
-#include "probe.h"
+#include "steam_profile.h"
+#include "steam_probe.h"
+#include "../../../../common/src/steam_state_protocol.h"
 
 enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output)
 {
@@ -16,6 +18,17 @@ enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output)
         if (!s.game) result = PROBE_NO_GAME;
         else if (*(uintptr_t*)s.game != image_base + STEAM_GAME_VTABLE_RVA) result = PROBE_GAME_TYPE;
         else {
+            const char* map = *(const char**)(s.game + 0x20u);
+            if (map) {
+                unsigned int i;
+                for (i = 0; i < sizeof(s.map) - 1 && map[i]; ++i) s.map[i] = map[i];
+                s.map[i] = 0;
+                const char* file = strrchr(s.map, '\\');
+                if (!file) file = strrchr(s.map, '/');
+                file = file ? file + 1 : s.map;
+                if (i < sizeof(s.map) - 1 && (!_strnicmp(file, "level_", 6) || !_strnicmp(file, "survive_", 8)))
+                    mp_steam_world_key(s.map, &s.world_low, &s.world_high);
+            }
             s.army_index = *(uint32_t*)(s.game + STEAM_ARMY_INDEX_OFFSET) & 3u;
             s.army = *(uintptr_t*)(s.game + STEAM_ARMY_ARRAY_OFFSET + s.army_index * sizeof(uintptr_t));
             if (!s.army) result = PROBE_NO_ARMY;
@@ -71,3 +84,5 @@ const char* probe_result_name(enum ProbeResult result)
                                   "no-player", "unexpected-player-type", "invalid-coordinates", "read-fault"};
     return names[result];
 }
+
+#endif

@@ -62,7 +62,7 @@ static ActorResult step(DWORD time, int stop)
 }
 static void reset(void)
 {
-    ActorEngine engine = {create_actor, destroy_actor, move_actor, rotate_actor};
+    ActorEngine engine = {create_actor, destroy_actor, move_actor, rotate_actor, NULL, NULL, NULL};
     dummy_actor_init(&actor, &engine);
     created = destroyed = moved = 0;
     memset(game, 0, sizeof(game)); memset(army, 0, sizeof(army)); memset(vid, 0, sizeof(vid));

@@ -1,6 +1,7 @@
 param(
     [switch]$Fullscreen,
     [switch]$DummyActor,
+    [switch]$Multiplayer,
     [ValidateRange(640, 1920)][int]$Width = 800,
     [ValidateRange(480, 1080)][int]$Height = 600,
     [string]$ServerAddress = '',
@@ -17,6 +18,29 @@ if (@(Get-Process AlienShooter -ErrorAction SilentlyContinue | Where-Object { $_
     throw 'Close the existing diagnostic game copy before starting the next session.'
 }
 if (!(Get-Process steam -ErrorAction SilentlyContinue)) { throw 'Open Steam and sign in before starting the test copy.' }
+$multiplayerMode = $Multiplayer -or !!$ServerAddress
+if ($DummyActor -and $multiplayerMode) { throw 'DummyActor and multiplayer modes are mutually exclusive.' }
+$maps = Join-Path $PSScriptRoot 'test-game\Maps'
+$backup = Join-Path $PSScriptRoot 'test-game\asmp-menu-backup'
+if ($multiplayerMode) {
+    New-Item -ItemType Directory -Path $backup -Force | Out-Null
+    foreach ($file in @('MAINMENU.LGC', 'mainmenu.men')) {
+        if (!(Test-Path -LiteralPath (Join-Path $backup $file))) {
+            Copy-Item -LiteralPath (Join-Path $maps $file) -Destination (Join-Path $backup $file)
+        }
+    }
+    $assets = Join-Path (Split-Path $PSScriptRoot -Parent) 'game\AlienShooter\Maps'
+    foreach ($file in @('steam_asmp_play.lgc', 'asmp_play.men')) {
+        Copy-Item -LiteralPath (Join-Path $assets $file) -Destination (Join-Path $maps $file) -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $assets 'steam_mainmenu.lgc') -Destination (Join-Path $maps 'MAINMENU.LGC') -Force
+    # The original menu replacement hook is expressed through the test-copy asset.
+    Copy-Item -LiteralPath (Join-Path $assets 'asmp_mainmenu.men') -Destination (Join-Path $maps 'mainmenu.men') -Force
+} elseif (Test-Path -LiteralPath $backup) {
+    foreach ($file in @('MAINMENU.LGC', 'mainmenu.men')) {
+        Copy-Item -LiteralPath (Join-Path $backup $file) -Destination (Join-Path $maps $file) -Force
+    }
+}
 # Use the engine's own display settings in the test copy.
 $configuration = Join-Path $PSScriptRoot 'test-game\AlienShooter.cfg'
 $text = [IO.File]::ReadAllText($configuration)
@@ -45,10 +69,12 @@ $previousServer = $env:ASMP_DIAG_SERVER
 $previousPort = $env:ASMP_DIAG_PORT
 $previousName = $env:ASMP_DIAG_NAME
 $previousDummy = $env:ASMP_DIAG_DUMMY
+$previousMultiplayer = $env:ASMP_DIAG_MULTIPLAYER
 try {
     $env:ASMP_DIAG_SERVER = $ServerAddress
     $env:ASMP_DIAG_PORT = "$Port"
     $env:ASMP_DIAG_NAME = $Name
+    $env:ASMP_DIAG_MULTIPLAYER = if ($multiplayerMode) { '1' } else { '' }
     $env:ASMP_DIAG_DUMMY = if ($DummyActor) { '1' } else { '' }
     $launchArguments = @($game, (Join-Path $build 'asmp-steam-diag.dll'))
     if (!$Fullscreen) { $launchArguments += @("$Width", "$Height") }
@@ -59,6 +85,10 @@ try {
     $env:ASMP_DIAG_PORT = $previousPort
     $env:ASMP_DIAG_NAME = $previousName
     $env:ASMP_DIAG_DUMMY = $previousDummy
+    $env:ASMP_DIAG_MULTIPLAYER = $previousMultiplayer
 }
-Write-Output "Start a level; fire, switch weapons, collect ammo, take damage and heal. Inspect $build\logs\asmp-diag-<PID>.log"
+if ($ServerAddress) { Write-Output 'The client connects and loads the server map automatically.' }
+elseif ($Multiplayer) { Write-Output 'Open Multiplayer in the main menu; enter a nickname and IPv4:port, then connect.' }
+else { Write-Output 'Start a campaign or survival level for the read-only diagnostics.' }
+Write-Output "Combat check: fire, switch weapons, collect ammo, take damage and heal. Logs: $build\logs\asmp-diag-<PID>.log"
 if ($DummyActor) { Write-Output 'Dummy test: enter a level, walk and turn. A second actor appears after 2 seconds, follows with an X offset of 80 and is removed after 60 seconds.' }

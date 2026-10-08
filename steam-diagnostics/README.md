@@ -1,224 +1,177 @@
-# Steam diagnostic client
+# Steam port: build and review
 
-`build/asmp-steam-diag.dll` is a separate x86 DLL that reads player state for the
-analyzed Steam Alien Shooter executable (app 33100). It intercepts slot 3 of the
-MAP_STEAM vtable in process memory. The original update method is called first,
-with its object pointer and return value preserved. After a zero return, the
-hook reads player state on the game thread and queues a snapshot. It does not
-enable multiplayer or change player state by default. The optional dummy test
-below creates one engine-owned actor for lifecycle validation. The EXE on disk
-is unchanged.
+The x86 `build/asmp-steam-diag.dll` now hosts the Steam adaptation of the existing
+multiplayer mod. The diagnostic launcher and log worker remain the entry point
+for this review stage. Starting without multiplayer options only reads player
+state; `-Multiplayer` or `-ServerAddress` enables native multiplayer behavior.
 
-A separate worker writes changed snapshots: game/player pointers, coordinates,
-health, weapon slot, ammunition, animation, leg/torso directions, movement intent,
-velocity and update-call number
-(`tick`). It checks the queue every 20 ms and writes statistics every five seconds.
-Unchanged snapshots are omitted except for a heartbeat every five seconds.
+Only Steam EXE SHA256
+`4DD960458D6FFFCC9D00E9E7BA492739FB6D530D4C0B302F1C6BAA8B55D9B142`
+is supported. Addresses use RVAs and bindings check method signatures and
+vtables. Native faults are contained with Windows SEH and disable further
+updates to the affected replica. The original Steam directory is only read.
+The launcher runs an ignored copy with separate saves and changes hooks and the
+windowed width operand in process memory. The EXE on disk remains unchanged.
 
-Only EXE SHA256 `4DD960458D6FFFCC9D00E9E7BA492739FB6D530D4C0B302F1C6BAA8B55D9B142`
-is accepted. The player accessor, tick prefix and original vtable slot are
-checked before installing the hook. Expected object vtables are checked before
-reading a player. Read faults are contained with Windows SEH.
-All addresses are RVAs, so the module load address is taken into account.
+## Build
 
-Installation exchanges one aligned pointer atomically and restores its page
-protection. Gameplay code bytes are not patched. A bounded 1024-snapshot queue
-keeps file I/O off the game thread; the hook drops a snapshot instead of waiting
-when the queue is full or locked. `# TICK_STATS` reports `calls`, `captured`,
-`dropped` and `installed`. Drops are counted rather than silently hidden.
-
-## Build and run
-
-Requires Visual Studio with the x86 C++ tools and Windows SDK. From the repository
-root in PowerShell:
-
-```powershell
-.\steam-diagnostics\build.ps1
-.\steam-diagnostics\prepare-test-game.ps1
-# Open Steam and sign in, then:
-.\steam-diagnostics\start-test.ps1
-```
-
-`build.ps1 -Server` additionally compiles the server into
-`steam-diagnostics/build/asmp-server.exe`, including the Steam state relay.
-Network tests use localhost UDP; run the build outside a sandbox that blocks
-loopback networking.
-
-Windowed tests request a render width cap of 800 by default. The engine chooses
-a supported adapter mode within that cap, favoring the desktop aspect ratio;
-the chosen mode can be smaller than the requested dimensions.
-`start-test.ps1 -Width 1024 -Height 768` requests a larger mode;
-`-Fullscreen` uses the engine's normal fullscreen behavior. The script changes the
-copied CFG defaults and `test-game/saves/options.ini`, whose saved values take precedence.
-The Steam renderer normally overrides width/height with a mode chosen using a
-hardcoded 1280 width cap. For a windowed launch, the launcher uses the initial
-process-creation debug event to change that cap in process memory before the
-renderer runs. It validates the surrounding instructions and modifies only the
-four-byte immediate operand, restores page protection and flushes the instruction
-cache. It then detaches before normal game initialization and DLL loading.
-This does not change the EXE file or scale an already rendered frame.
-
-After initialization, the launcher reads the actual render dimensions and matches
-the visible client area to them. Resizing the window below the render dimensions
-would crop the frame and is deliberately avoided. The requested height is a
-preferred bound, not a forced adapter mode. The launcher prints both engine and
-window dimensions; check the complete menu/shop and mouse aiming during gameplay.
-Game saves also belong to the copied directory.
-
-To start a local server, a headless observer client and the windowed game client:
+Requires Visual Studio C++ x86 tools and the Windows SDK. Run from the repository
+root in PowerShell; the tests need localhost UDP access:
 
 ```powershell
 .\steam-diagnostics\build.ps1 -Server
-.\steam-diagnostics\start-network-test.ps1
+.\steam-diagnostics\prepare-test-game.ps1
+```
+
+The default source is `D:\Steam\steamapps\common\Alien Shooter`; pass
+`-Source <directory>` to prepare another supported installation. Preparing again
+copies the original game files over the test directory; it is not needed before
+each launch. Keep Steam open and signed in when launching.
+
+## One-PC test
+
+```powershell
+.\steam-diagnostics\start-network-test.ps1 -Mirror
 # After exiting the game:
 .\steam-diagnostics\stop-network-test.ps1
 ```
 
-The observer runs for ten minutes and writes `build/logs/observer-<timestamp>.log`.
-The stop script checks executable path and process start time before stopping the
-session's helper processes. The observer has no game window. To test two actual
-games, run a server and use `start-test.ps1 -ServerAddress <IPv4> -Port 27020 -Name <name>`
-on each PC with its own game copy and Steam account. No remote player is created
-in the game at this stage: received state is logged for verification.
+This starts the original relay server on UDP 27020, a headless test peer named
+Mirror and the windowed game. Connection loads the server's `maps\Level_01.map`
+automatically. Mirror publishes your state with X+80 and relays your shot events
+back under its own peer ID. After the native torso has appeared, the replica
+follows movement/aim, weapons, ammo and health and receives its name and health
+bar. Walk, stop, aim independently of movement, switch weapons and fire with an
+ammo-consuming weapon. Check that the mirror animates and fires too.
 
-### Second actor lifecycle test
+`-Mirror -FireOnce` additionally asks the replica to fire one weapon-1 attack
+after six seconds of active state. This exercises the incoming native attack
+binding without local input. It does not prove local shot capture or a two-PC
+session. The helper expires after ten minutes; this is a test peer, not a bot.
+Without `-Mirror`, the helper only observes packets and creates no replica.
 
-```powershell
-.\steam-diagnostics\start-test.ps1 -DummyActor
-```
+The stop script verifies helper executable paths and process start times.
+Helper logs are in `build/logs/observer-<timestamp>.log`; game logs are in
+`build/logs/asmp-diag-<PID>.log`. Game data and reports stay local and ignored.
 
-Enter a campaign or survival level. After two seconds of valid gameplay, the
-game thread creates one MAN through the Steam engine's factory. It follows the
-local character with an X offset of 80, supplying velocity, movement intent and
-independent leg/torso directions. Native MAN logic selects idle/run and advances
-the actor's animation; replication never sets animation IDs, frame cursors or
-animation timers. This follows the legacy `RPS_SPAWNED` implementation in
-`asmp-dll/src/multiplayer/multiplayer.c`, using verified Steam methods and layout.
-It is removed through the engine's destructor after 60 seconds.
-Menus and the shop do not spawn an actor. Returning to the shop, changing maps,
-or requesting diagnostic shutdown also ends the actor's lifetime.
-The actor is a local test double; received network state does not control it.
-Weapon changes, shots and shared health are not synchronized by this test.
+## Multiplayer menu and two PCs
 
-The private 0x490-byte VID is copied from the actual local MAN, whose Steam class
-number is 7. MAP's class table maps it to jump-table index 4 and arm 0x43934C,
-which calls the MAN constructor at 0x434350. Its counters are reset and its creation/deletion scripts disabled
-to avoid executing the local player's map scripts. Its storage remains in the
-DLL while the engine owns the entity. Factory (0x440680), MAN destructor
-(0x434440), movement (0x46BC20) and rotation (0x46BD50)
-signatures and factory/destructor vtable entries are validated before enabling
-the test. The normal EXE hash check still applies.
-
-Before dereferencing a saved actor pointer, the code finds it in the current
-map's entity list and checks its private VID. It discards an actor removed by
-the engine or a pointer reused for another object. No entity is destroyed from
-the logging/network worker. A shutdown marker waits for the next game tick to
-remove the actor before restoring the hook; a paused game must resume for that
-cleanup. An engine exception disables further dummy updates and is recorded as
-`fault`; any surviving actor remains owned by the map until it unloads.
-
-`# DUMMY event=spawned|removed|lost|rejected|fault` records lifecycle transitions,
-including the failure reason and observed source class for a rejected spawn.
-`# DUMMY_POSE` records applied speed/intent, native animation/frame (read only),
-and torso aim once per second. ENTITY velocity is at +0x20; moving intent is
-flag 0x80 at +0x28. Only this flag is changed, preserving other engine state.
-MAN::action(0x82), at 0x4345F9, selects run (2) or idle (0) using velocity;
-ENTITY's update at 0x46FDA0 advances and wraps frames using engine timing.
-Check visually that a complete second character appears, animates its legs
-while running, stops when standing, follows torso aim, disappears after a minute,
-and does not replace control of the local
-player. Automated lifecycle checks use synthetic engine callbacks; a live game
-test is required to validate the mapped Steam methods and rendering.
-
-The DLL sends the latest post-update snapshot from its worker at most once every
-33 ms. `# NET_READY` confirms the application handshake, `# NET_REMOTE` records a
-peer's state, and `# NET_STATS` counts sent, received and rejected packets.
-The 100-byte version-2 packet has explicit big-endian words, IEEE 754 float
-coordinates and velocity, signed 32-bit health/live ammo/weapon slot, animation,
-leg/torso directions, movement intent, torso presence, tick and nine stored ammo
-counters. Animation IDs are diagnostic state, not applied by the dummy test;
-frame numbers and animation timers are never sent. Version 1 is rejected, so
-rebuild both clients and the server together. Process pointers are never sent.
-The server adds the sender ID and session generation, validates length/version,
-finite coordinates/speed and pose fields,
-and rejects duplicate or older state sequences, including across sequence wrap.
-New sessions allow sequence restart when a client reconnects.
-
-Menus and snapshots older than 250 ms are sent as inactive. Peers expire locally
-after one second without state. The latest snapshot replaces earlier snapshots;
-this transport does not preserve individual shots or short-lived events.
-The server relays client-provided state; gameplay authority and remote entities
-are separate subsequent stages. Automatic reconnection after a lost server is
-not implemented; restart the test client to reconnect.
-
-The game is copied into `steam-diagnostics/test-game/` with the original EXE
-name and bytes preserved. `steam_appid.txt` identifies the game to Steam during
-direct launch. The launcher requires the test-copy marker and checks the EXE
-hash. It starts the copy and loads the diagnostic DLL using
-LoadLibraryW in that process. The Steam installation is only read.
-
-Logs: `steam-diagnostics/build/logs/asmp-diag-<PID>.log`.
-Expected messages: `PROFILE accepted Steam 33100; gameplay reads after original tick`
-and `# TICK_HOOK installed slot=3`. `calls` and `captured` should increase.
-The CSV header starts with `milliseconds`; skip startup lines and lines starting
-with `#` when importing the CSV records.
-In the menu, `no-player`/`no-army` is normal. Start a level, move the player and
-check that rows with `state=player` show changing x/y and plausible health.
-
-For the combat check, fire several shots with a weapon that consumes ammo,
-switch between available weapons, collect ammunition, take damage and collect
-health. Compare the log with the HUD. `weapon_slot` is zero-based (0..9),
-`weapon_vid` is the linked weapon definition index (10..19); -1 means unknown.
-`current_ammo` is the selected weapon's live counter, computed from signed
-`current_ammo_raw / 64` with truncation toward zero. `stored_ammo_slot_1` through
-`stored_ammo_slot_9` are the other stored counters. The selected slot's stored
-value can be stale until a weapon switch; use `current_ammo` for that weapon.
-The pistol may not consume ammo. Sampling occurs after update calls; events
-within one call or dropped snapshots can still be missed. Weapon identifiers
-are engine slots, not keyboard shortcut numbers.
+Run `build/asmp-server.exe 27020` on the host PC. On each PC build and prepare a
+test copy, using its own game installation and Steam account, then either:
 
 ```powershell
-Get-Content .\steam-diagnostics\build\logs\asmp-diag-<PID>.log -Wait
+# Connect directly and load the server map:
+.\steam-diagnostics\start-test.ps1 -ServerAddress <host-IPv4> -Port 27020 -Name Alice
+# Or open the original mod's multiplayer menu:
+.\steam-diagnostics\start-test.ps1 -Multiplayer
 ```
 
-Exit the test game to stop. To stop sampling and restore the original vtable
-entry while keeping it open, create `steam-diagnostics/build/asmp-diag.stop`.
-The footer must show `hook_restore_result=0` and `installed=0`. A changed slot
-owned by another hook is left untouched and reported as an error. The next
-start removes the stop marker; restarting capture requires a new game process.
-Keep the DLL loaded until process exit, even
-after stopping: a thread may already have fetched its callback pointer.
+The menu accepts a nickname of 1..15 bytes and an IPv4:port address. Its existing
+connect/status workflow requests the connection on the worker, releases the menu
+and loads the server map on the game thread. Returning to the main menu queues
+disconnection. Campaign/shop menus send inactive state and remove replicas.
+Reconnect through the multiplayer menu after a failed or lost connection.
+Allow UDP to the server through the host firewall/network as needed.
 
-## Validation
+The test launcher installs the original mod's menu assets in the copied game
+and backs up its native main menu. Launching without multiplayer options restores
+that backup. `steam_mainmenu.lgc` and `steam_asmp_play.lgc` adapt the original
+mod's scripts to Steam's file-backed saves; Steam lacks their old registry APIs.
 
-The build runs native checks: reading synthetic game/player memory,
-including weapon switches, separate live/stored ammo, signed health and ammo,
-startup and stale-pointer states; and loading the actual DLL into an
-unsupported executable, verifying that its worker rejects it and finishes.
-Tick-hook checks cover post-update snapshots, ECX and return preservation,
-bounded queue overflow and ordering, concurrent capture/draining with 20,000
-update calls, vtable protection restoration, stop,
-calls through a previously fetched callback after stop, and rejection of
-invalid or changed slots. These checks do not substitute for a gameplay run.
-State-sync checks exercise two clients through the actual UDP server, full-width
-signed values, all stored ammo, malformed handshakes/packets, registration before
-relay, sequence ordering/wrap, absence of self-echo, inactive state on stale
-sampling, peer expiry and reconnection with a reused client ID.
-Window-mode checks cover startup instruction guards, changing only the width
-operand, restoring executable page protection, rejecting changed instructions,
-and reading the actual render dimensions. Fullscreen does not apply this patch.
+For review, test invalid name/address, failed connection, menu connection,
+return-to-menu cleanup and reconnection. Visually check names, health bars,
+weapon replacement, the complete shop, mouse aim and movement animation. An
+independent two-PC game session is still required; the local mirror does not
+validate latency or shared gameplay across machines.
 
-## Git workflow
+## Architecture and behavior
 
-`master` is the release branch; `develop` collects integrated changes. Work on
-the memory-reading stage lives in `feature/steam-diagnostics`; update interception
-lives in `feature/steam-tick-hook`, based on that diagnostic work. Follow with
-`feature/steam-state-sync` for state exchange, based on the tick hook, and
-`feature/steam-windowed-render` for matching smaller render modes to the window.
-separate branches for the Steam layout and multiplayer port. Merge reviewed stages into
-`develop`; use `release/*` when preparing a tested release and `hotfix/*` for
-release fixes. Use `feature/*` for subsequent development stages.
+| Layer | Responsibilities |
+| --- | --- |
+| `asmp-dll/src/game/steam/` | Verified Steam layout/probe, actor factory/destructor, movement/combat API, map/text/menu bindings, MAN action and D3D9/display hooks |
+| `asmp-dll/src/multiplayer/client/steam_state_client.*` | Original epnet connection/handshake, packet validation, peer state/names and shot queues; no native entities |
+| `asmp-dll/src/multiplayer/steam/` | Session commands/map loading and remote-player lifecycle, game-thread application, bounded worker handoff |
+| `common/src/steam_state_protocol.h` | Explicit Steam state/shot codecs and normalized map keys |
+| `common/epnet/`, `asmp-server/` | Existing transport and server, with validated Steam relays |
+| `steam-diagnostics/src/` | Test DLL entry point, post-update hook/queue, logging worker, launcher and optional test peer/dummy |
 
-Track source, tests, scripts and usage instructions. Reports, analysis results,
-IDA databases, build outputs, copied game assets, logs, local history backups
-and `analysis/vendor` are ignored. Keep test reports locally.
+The port follows `multiplayer.c`'s wait-for-player/torso, private VID, native
+factory, prepare-weapons/name and spawned-state flow. It applies velocity,
+movement intent, position and independent leg/torso directions. Native MAN logic
+selects idle/run and advances animation. Frames and timers are never replicated;
+the animation ID in snapshots is only diagnostic. Weapon application precedes
+torso lookup because the engine can replace the attachment.
+
+Shots follow the original action-hook approach: aim is captured from action
+0x25 and ammo-consuming attacks from action 0x5D, then queued separately from
+snapshots. Incoming events invoke native action 0x25 on the replica. The game
+thread never performs socket or file I/O. Names use native owned strings and are
+positioned again after weapon changes. Health bars use native rectangles through
+D3D9 EndScene; installation waits for the renderer to create its device.
+
+State packets are version 3, 112 bytes: explicit big-endian words, IEEE 754
+coordinates/velocity, signed 32-bit health/live ammo/weapon slot, tick,
+movement/aim fields, nine stored ammo counters, normalized 64-bit map key and
+world generation. State is published at most once every 33 ms. A 32-byte shot
+event carries sequence, map key/generation, weapon and aim coordinates. The
+server prefixes each relayed packet with sender ID and connection generation.
+Rebuild the server and all clients together; older packet versions are rejected.
+
+The relay rejects invalid lengths, versions, field ranges and duplicate/older
+sequences, including wraparound. Peers expire after one second without state;
+menus, dead players and snapshots older than 250 ms are inactive. Session/map
+changes discard stale attacks and remove replicas after checking native list
+ownership. Native entity operations and UI drawing stay on the game thread.
+Bounded queues drop work rather than blocking that thread.
+
+Health belongs to each player's local owner. Local damage to its replica is
+suppressed, while damage to the real local player is unchanged. This replaces
+the original prototype's temporary restore-to-110/death-suppression hack. Bars
+retain the prototype's maximum of 110 and clamp larger values; maximum-health
+stats are not transmitted. The ammo value used for the selected weapon is its
+live counter, not its potentially stale stored slot. Weapon slots are zero-based.
+
+The original mod does not implement monster/world synchronization or a working
+scoreboard. This stage adds neither, nor respawning, Steam invitations or
+server-authoritative combat. The existing transport is unreliable: separate
+shot events avoid snapshot loss of short-lived attacks but do not guarantee
+delivery under packet loss. Each PC still simulates its own world.
+
+## Window and diagnostic modes
+
+Windowed startup defaults to an 800x600 bound. The engine selects a supported
+adapter mode; the launcher matches the client area to the actual render size,
+avoiding cropping. `-Width 1024 -Height 768` requests a larger bound;
+`-Fullscreen` uses the engine's normal fullscreen selection.
+
+`start-test.ps1` alone logs player state after the original update. Enter a
+campaign or survival map to sample movement, signed health, weapon/live ammo and
+stored ammo. `-DummyActor` instead creates a local X+80 actor after two seconds
+and removes it after sixty seconds; it is mutually exclusive with multiplayer.
+This earlier lifecycle test does not replicate network combat.
+
+Create `build/asmp-diag.stop` to stop the mod while keeping the game open. Cleanup
+waits for the next game tick, removes owned replicas and restores action,
+display/window and update hooks. A paused game must resume. Expected footer:
+`hook_restore_result=0`, `# HOOK_RESTORE action=1 display=1`, and installed=0.
+Foreign hooks are left untouched and reported as restore errors. The DLL stays
+loaded until process exit because a caller may have fetched a callback before
+restoration. A new capture session requires restarting the game.
+
+## Validation and Gitflow
+
+The build runs synthetic layout/probe and actor lifecycle checks; update-hook
+ABI, queue overflow, concurrency and restoration checks; actual-DLL rejection
+in an unsupported process; and window-mode instruction/protection checks.
+Coordinator checks exercise torso readiness, combat state, event ordering,
+map/session generations, stale captures, expiry and rejected-actor cleanup.
+Real UDP tests exercise two clients through the server, malformed packets,
+signed fields, state/shot sequence wrap, no self-echo, stale/dead/menu shot
+rejection and reconnect with a reused client ID. These checks do not prove the
+native game's rendering or every menu/input path; use the manual review above.
+
+Work stays on `feature/steam-remote-player` for review. Reviewed features can be
+merged into `develop`; `master` remains the release branch, with `release/*` and
+`hotfix/*` following Gitflow. Track code, tests, scripts and usage instructions.
+Builds, test copies, logs, reports, analysis tools, IDA databases and local history
+backups are ignored. No push or merge is part of this review preparation.
