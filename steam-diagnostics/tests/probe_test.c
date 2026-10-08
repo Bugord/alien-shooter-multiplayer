@@ -65,7 +65,7 @@ int main(void)
     *(int32_t*)(weapon + STEAM_VID_INDEX_OFFSET) = 10;
     *(int32_t*)(player + STEAM_CURRENT_AMMO_OFFSET) = -127;
     *(int32_t*)(player + STEAM_ENTITY_HEALTH_OFFSET) = -1;
-    expect(probe_read(base, &s), PROBE_OK, "signed values and pistol slot");
+    expect(probe_read(base, &s), PROBE_OK, "signed values and slot zero");
     if (s.weapon_slot != 0 || s.current_ammo != -1 || s.health != -1) ++failures;
     *(int32_t*)(weapon + STEAM_VID_INDEX_OFFSET) = 260;
     expect(probe_read(base, &s), PROBE_OK, "unrecognized weapon VID");

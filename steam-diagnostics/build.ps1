@@ -21,15 +21,20 @@ function Compile([string[]]$Arguments) {
 $flags = @('/nologo', '/std:c11', '/W4', '/WX', '/O2', '/MT', '/DUNICODE', '/D_UNICODE', '/DWIN32_LEAN_AND_MEAN')
 Push-Location $build
 try {
-    Compile ($flags + @('/LD', "$root\src\diag.c", "$root\src\probe.c", "$root\src\hash.c", '/Fe:asmp-steam-diag.dll', '/link', 'bcrypt.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
+    Compile ($flags + @('/LD', "$root\src\diag.c", "$root\src\probe.c", "$root\src\tick_hook.c", "$root\src\hash.c", '/Fe:asmp-steam-diag.dll', '/link', 'bcrypt.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     Compile ($flags + @("$root\src\launcher.c", "$root\src\hash.c", '/Fe:asmp-diag-launch.exe', '/link', 'bcrypt.lib', 'user32.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     if (!$SkipTests) {
         Compile ($flags + @("$root\tests\probe_test.c", "$root\src\probe.c", '/Fe:probe-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + @("$root\tests\dll_load_test.c", '/Fe:dll-load-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + @("$root\tests\tick_hook_test.c", "$root\src\tick_hook.c", "$root\src\probe.c", '/Fe:tick-hook-test.exe', '/link', '/MACHINE:X86'))
         & .\probe-test.exe
         if ($LASTEXITCODE) { throw 'Probe checks failed.' }
         & .\dll-load-test.exe "$build\asmp-steam-diag.dll"
         if ($LASTEXITCODE) { throw 'DLL loading/rejection check failed.' }
+        foreach ($mode in @('normal', 'mismatch', 'invalid', 'foreign', 'concurrent')) {
+            & .\tick-hook-test.exe $mode
+            if ($LASTEXITCODE) { throw "Tick hook checks failed ($mode)." }
+        }
     }
     if ($Server) {
         $repo = Split-Path $root -Parent
