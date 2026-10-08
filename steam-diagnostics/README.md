@@ -36,9 +36,52 @@ root in PowerShell:
 .\steam-diagnostics\start-test.ps1
 ```
 
-`build.ps1 -Server` additionally compiles the existing server into
-`steam-diagnostics/build/asmp-server.exe`. Its clients still require a ported
-multiplayer DLL; the diagnostic DLL does not connect to it.
+`build.ps1 -Server` additionally compiles the server into
+`steam-diagnostics/build/asmp-server.exe`, including the Steam state relay.
+Network tests use localhost UDP; run the build outside a sandbox that blocks
+loopback networking.
+
+Tests launch in an 800x600 window by default. `start-test.ps1 -Width 1024 -Height 768`
+changes the size; `-Fullscreen` requests fullscreen. The script changes the
+copied CFG defaults and `test-game/saves/options.ini`, whose saved values take precedence.
+The Steam engine can choose a larger render resolution despite requested defaults.
+For windowed launches, the launcher also resizes the game's visible client area
+with Windows APIs and prints its measured size. Check menu hit targets and mouse
+aiming during gameplay when using a smaller window.
+Game saves also belong to the copied directory.
+
+To start a local server, a headless observer client and the windowed game client:
+
+```powershell
+.\steam-diagnostics\build.ps1 -Server
+.\steam-diagnostics\start-network-test.ps1
+# After exiting the game:
+.\steam-diagnostics\stop-network-test.ps1
+```
+
+The observer runs for ten minutes and writes `build/logs/observer-<timestamp>.log`.
+The stop script checks executable path and process start time before stopping the
+session's helper processes. The observer has no game window. To test two actual
+games, run a server and use `start-test.ps1 -ServerAddress <IPv4> -Port 27020 -Name <name>`
+on each PC with its own game copy and Steam account. No remote player is created
+in the game at this stage: received state is logged for verification.
+
+The DLL sends the latest post-update snapshot from its worker at most once every
+33 ms. `# NET_READY` confirms the application handshake, `# NET_REMOTE` records a
+peer's state, and `# NET_STATS` counts sent, received and rejected packets.
+The 84-byte versioned packet has explicit big-endian words, IEEE 754 float
+coordinates, signed 32-bit health/live ammo/weapon slot, animation, direction,
+tick and nine stored ammo counters. Process pointers are never sent. The server
+adds the sender ID and session generation, validates length/version/coordinates,
+and rejects duplicate or older state sequences, including across sequence wrap.
+New sessions allow sequence restart when a client reconnects.
+
+Menus and snapshots older than 250 ms are sent as inactive. Peers expire locally
+after one second without state. The latest snapshot replaces earlier snapshots;
+this transport does not preserve individual shots or short-lived events.
+The server relays client-provided state; gameplay authority and remote entities
+are separate subsequent stages. Automatic reconnection after a lost server is
+not implemented; restart the test client to reconnect.
 
 The game is copied into `steam-diagnostics/test-game/` with the original EXE
 name and bytes preserved. `steam_appid.txt` identifies the game to Steam during
@@ -75,8 +118,7 @@ entry while keeping it open, create `steam-diagnostics/build/asmp-diag.stop`.
 The footer must show `hook_restore_result=0` and `installed=0`. A changed slot
 owned by another hook is left untouched and reported as an error. The next
 start removes the stop marker; restarting capture requires a new game process.
-The copied game may still use its normal registry settings; the diagnostic DLL
-does not alter those settings. Keep the DLL loaded until process exit, even
+Keep the DLL loaded until process exit, even
 after stopping: a thread may already have fetched its callback pointer.
 
 ## Validation
@@ -90,12 +132,17 @@ bounded queue overflow and ordering, concurrent capture/draining with 20,000
 update calls, vtable protection restoration, stop,
 calls through a previously fetched callback after stop, and rejection of
 invalid or changed slots. These checks do not substitute for a gameplay run.
+State-sync checks exercise two clients through the actual UDP server, full-width
+signed values, all stored ammo, malformed handshakes/packets, registration before
+relay, sequence ordering/wrap, absence of self-echo, inactive state on stale
+sampling, peer expiry and reconnection with a reused client ID.
 
 ## Git workflow
 
 `master` is the release branch; `develop` collects integrated changes. Work on
 the memory-reading stage lives in `feature/steam-diagnostics`; update interception
 lives in `feature/steam-tick-hook`, based on that diagnostic work. Follow with
+`feature/steam-state-sync` for state exchange, based on the tick hook, and
 separate branches for the Steam layout and multiplayer port. Merge reviewed stages into
 `develop`; use `release/*` when preparing a tested release and `hotfix/*` for
 release fixes. Use `feature/*` for subsequent development stages.

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include "profile.h"
 
 /* Resolve the address in the target process, including forwarded kernel exports. */
@@ -36,6 +37,36 @@ static uintptr_t remote_load_library(DWORD pid)
     return result;
 }
 
+typedef struct TestWindow { DWORD pid; HWND window; } TestWindow;
+static BOOL CALLBACK find_test_window(HWND window, LPARAM parameter) {
+    TestWindow* test = (TestWindow*)parameter;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (pid == test->pid && IsWindowVisible(window) && !GetWindow(window, GW_OWNER)) {
+        test->window = window;
+        return FALSE;
+    }
+    return TRUE;
+}
+static int size_test_window(DWORD pid, int width, int height) {
+    TestWindow test = {pid, NULL};
+    for (unsigned int attempt = 0; attempt < 100 && !test.window; ++attempt) {
+        EnumWindows(find_test_window, (LPARAM)&test);
+        if (!test.window) Sleep(50);
+    }
+    if (!test.window) return 0;
+    LONG style = GetWindowLongW(test.window, GWL_STYLE);
+    if (!(style & WS_CAPTION)) return 0; /* Fullscreen must be disabled by the engine first. */
+    RECT rect = {0, 0, width, height};
+    if (!AdjustWindowRectEx(&rect, (DWORD)style, GetMenu(test.window) != NULL,
+        (DWORD)GetWindowLongW(test.window, GWL_EXSTYLE))) return 0;
+    if (!SetWindowPos(test.window, NULL, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)) return 0;
+    if (!GetClientRect(test.window, &rect)) return 0;
+    printf("Test window client size: %ld x %ld\n", rect.right - rect.left, rect.bottom - rect.top);
+    return rect.right - rect.left == width && rect.bottom - rect.top == height;
+}
+
 int wmain(int argc, wchar_t** argv)
 {
     wchar_t game[MAX_PATH], dll[MAX_PATH], directory[MAX_PATH], marker[MAX_PATH], command[MAX_PATH + 3];
@@ -45,7 +76,15 @@ int wmain(int argc, wchar_t** argv)
     HANDLE thread = NULL;
     void* remote = NULL;
     int result = 1;
-    if (argc != 3) { fwprintf(stderr, L"Usage: asmp-diag-launch.exe <test-game\\AlienShooter.exe> <asmp-steam-diag.dll>\n"); return 2; }
+    if (argc != 3 && argc != 5) { fwprintf(stderr, L"Usage: asmp-diag-launch.exe <test-game\\AlienShooter.exe> <asmp-steam-diag.dll> [window-width window-height]\n"); return 2; }
+    int width = 0, height = 0;
+    if (argc == 5) {
+        wchar_t* end;
+        width = (int)wcstol(argv[3], &end, 10);
+        if (*end || width < 640 || width > 1920) return 2;
+        height = (int)wcstol(argv[4], &end, 10);
+        if (*end || height < 480 || height > 1080) return 2;
+    }
     DWORD game_length = GetFullPathNameW(argv[1], MAX_PATH, game, NULL);
     DWORD dll_length = GetFullPathNameW(argv[2], MAX_PATH, dll, NULL);
     if (!game_length || game_length >= MAX_PATH || !dll_length || dll_length >= MAX_PATH) return 2;
@@ -83,6 +122,9 @@ int wmain(int argc, wchar_t** argv)
     DWORD module = 0;
     if (!GetExitCodeThread(thread, &module) || !module) { fprintf(stderr, "LoadLibraryW failed.\n"); goto done; }
     printf("Diagnostic DLL loaded at %08lX. Logs are beside the DLL in logs/.\n", module);
+    if (width && !size_test_window(process.dwProcessId, width, height)) {
+        fprintf(stderr, "Requested window size could not be applied; game and diagnostics remain running.\n");
+    }
     result = 0;
 done:
     if (result) fprintf(stderr, "Launcher failed (Win32 error %lu).\n", GetLastError());

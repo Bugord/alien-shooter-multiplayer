@@ -3,9 +3,11 @@
 #include <share.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include "profile.h"
 #include "probe.h"
 #include "tick_hook.h"
+#include "state_client.h"
 
 static HMODULE self;
 static HANDLE worker;
@@ -54,6 +56,7 @@ static DWORD WINAPI run(LPVOID unused)
     DWORD last_log = 0;
     DWORD last_stats = GetTickCount();
     int hook_attempted = 0;
+    StateClient* network = NULL;
     (void)unused;
     if (!GetModuleFileNameW(self, directory, MAX_PATH) || !GetModuleFileNameW(NULL, exe, MAX_PATH)) goto fail;
     wchar_t* slash = wcsrchr(directory, L'\\');
@@ -114,13 +117,40 @@ static DWORD WINAPI run(LPVOID unused)
     fprintf(log, "# TICK_HOOK installed slot=%u original=%08lX\n", STEAM_GAME_TICK_SLOT,
         (unsigned long)(base + STEAM_GAME_TICK_RVA));
     InterlockedExchange(&status, DIAG_WAITING);
+    char host[256], port_text[16], name[16];
+    if (GetEnvironmentVariableA("ASMP_DIAG_SERVER", host, sizeof(host)) > 0) {
+        DWORD host_length = GetEnvironmentVariableA("ASMP_DIAG_SERVER", host, sizeof(host));
+        DWORD port_length = GetEnvironmentVariableA("ASMP_DIAG_PORT", port_text, sizeof(port_text));
+        DWORD name_length = GetEnvironmentVariableA("ASMP_DIAG_NAME", name, sizeof(name));
+        char* end = NULL;
+        unsigned long port = port_length > 0 && port_length < sizeof(port_text) ? strtoul(port_text, &end, 10) : 0;
+        if (!name_length) strcpy_s(name, sizeof(name), "SteamTester");
+        if (host_length < sizeof(host) && name_length < sizeof(name) && port > 0 && port <= 65535 && end && !*end)
+            network = state_client_create(host, (unsigned short)port, name, log);
+        if (!network) fprintf(log, "# NET_ERROR invalid configuration or connection initialization failed\n");
+    }
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     while (GetFileAttributesW(stop_path) == INVALID_FILE_ATTRIBUTES) {
         FrameSample frames[64];
         unsigned int n = tick_hook_drain(frames, 64);
         for (unsigned int i = 0; i < n; ++i) log_frame(log, &frames[i], &last, &previous, &last_log);
         DWORD now = GetTickCount();
-        if (now - last_stats >= 5000) { log_stats(log); last_stats = now; }
+        if (network && n) {
+            const FrameSample* frame = &frames[n - 1];
+            const Snapshot* sample = &frame->snapshot;
+            MpSteamState state = {0};
+            if (frame->result == PROBE_OK) {
+                state.active = 1; state.tick = (uint32_t)frame->tick;
+                state.x = sample->x; state.y = sample->y; state.z = sample->z;
+                state.health = sample->health; state.animation = sample->animation;
+                state.direction = sample->direction; state.weapon_slot = sample->weapon_slot;
+                state.current_ammo = sample->current_ammo;
+                memcpy(state.stored_ammo, sample->stored_ammo, sizeof(state.stored_ammo));
+            }
+            state_client_publish(network, &state, frame->milliseconds);
+        }
+        state_client_update(network, now);
+        if (now - last_stats >= 5000) { log_stats(log); state_client_stats(network); last_stats = now; }
         Sleep(20);
     }
     hook_result = tick_hook_stop();
@@ -130,10 +160,13 @@ static DWORD WINAPI run(LPVOID unused)
         for (unsigned int i = 0; i < n; ++i) log_frame(log, &frames[i], &last, &previous, &last_log);
     fprintf(log, "# STOP requested by asmp-diag.stop; hook_restore_result=%d\n", hook_result);
     log_stats(log);
+    state_client_stats(network);
+    state_client_destroy(network);
     InterlockedExchange(&status, hook_result == TICK_HOOK_OK ? DIAG_STOPPED : DIAG_ERROR);
     fclose(log);
     return 0;
 fail:
+    state_client_destroy(network);
     if (hook_attempted) {
         enum TickHookResult restored = tick_hook_stop();
         if (log) fprintf(log, "# ERROR cleanup hook_restore_result=%d\n", restored);

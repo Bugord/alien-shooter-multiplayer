@@ -7,6 +7,7 @@
 #include <string.h>
 #include "server.h"
 #include "multiplayer_protocol.h"
+#include "steam_state_protocol.h"
 #include "utils/mem/mem.h"
 #include "utils/time/time.h"
 #include "epnet.h"
@@ -17,6 +18,8 @@ typedef struct Player
 {
     MpPlayer player;
     bool is_connected;
+    uint32_t steam_session, steam_sequence;
+    bool steam_received;
     unsigned long user_sync_updatd_time_ms;
     unsigned long actor_sync_updated_time_ms;
 } Player;
@@ -72,8 +75,8 @@ static void process_connection_request_(MpServer* server, uint8_t sender,
 {
     printf("Connection request from %d\n", sender);
     /* Store player name */
-    strncpy_s(server->players[sender].player.mp_user.name, MP_MAX_NAME_LEN + 1,
-              packet->name, MP_MAX_NAME_LEN);
+    memset(server->players[sender].player.mp_user.name, 0, MP_MAX_NAME_LEN + 1);
+    memcpy(server->players[sender].player.mp_user.name, packet->name, packet->name_len);
     /* Mark as connected */
     server->players[sender].is_connected = true;
     /* Send connection response */
@@ -92,6 +95,12 @@ static void process_received_packets_(MpServer* server)
         {
         case EPNET_SRV_EVENT_CLIENT_JOIN:
         {
+            if (ev.client_id < server->server_configuration.max_clients) {
+                Player* p = &server->players[ev.client_id];
+                uint32_t session = p->steam_session + 1;
+                memset(p, 0, sizeof(*p));
+                p->steam_session = session ? session : 1;
+            }
             printf("Client %d joined (low-level)\n", ev.client_id);
             break;
         }
@@ -107,10 +116,17 @@ static void process_received_packets_(MpServer* server)
         case EPNET_SRV_EVENT_PACKET:
         {
             uint8_t sender = ev.client_id;
+            if (sender >= server->server_configuration.max_clients) break;
+            int length = ev.data.packet.len;
+            if (ev.data.packet.pkt_type != MPT_C_CONNECTION_REQUEST &&
+                !server->players[sender].is_connected) break;
             switch (ev.data.packet.pkt_type)
             {
             case MPT_C_CONNECTION_REQUEST:
             {
+                if (length < 1) break;
+                uint8_t name_len = ev.data.packet.data[0];
+                if (name_len > MP_MAX_NAME_LEN || length != 1 + name_len) break;
                 process_connection_request_(
                     server, sender,
                     (MpCPacketConnectionRequest*)ev.data.packet.data);
@@ -118,6 +134,7 @@ static void process_received_packets_(MpServer* server)
             }
             case MPT_C_USER_SYNC:
             {
+                if (length != sizeof(MpCPacketUserSync)) break;
                 server->players[sender].player.mp_user =
                     ((MpCPacketUserSync*)ev.data.packet.data)->mp_user;
                 server->players[sender].user_sync_updatd_time_ms =
@@ -126,6 +143,7 @@ static void process_received_packets_(MpServer* server)
             }
             case MPT_C_ACTOR_SYNC:
             {
+                if (length != sizeof(MpCPacketActorSync)) break;
                 server->players[sender].player.mp_actor =
                     ((MpCPacketActorSync*)ev.data.packet.data)->mp_actor;
                 server->players[sender].actor_sync_updated_time_ms =
@@ -134,6 +152,7 @@ static void process_received_packets_(MpServer* server)
             }
             case MPT_C_SHOOT:
             {
+                if (length != sizeof(MpCPacketShoot)) break;
                 /* Build and send shoot packet to all other clients */
                 MpSPacketShoot msps;
                 msps.player_id = sender;
@@ -148,6 +167,23 @@ static void process_received_packets_(MpServer* server)
                                           sizeof(msps));
                     }
                 }
+                break;
+            }
+            case MPT_C_STEAM_STATE:
+            {
+                MpSteamState state;
+                Player* p = &server->players[sender];
+                if (!mp_steam_decode(ev.data.packet.data, length, &state) ||
+                    (p->steam_received && !mp_steam_newer(state.sequence, p->steam_sequence))) break;
+                p->steam_sequence = state.sequence;
+                p->steam_received = true;
+                uint8_t relay[MP_STEAM_RELAY_SIZE];
+                mp_steam_put(relay, sender);
+                mp_steam_put(relay + 4, p->steam_session);
+                memcpy(relay + 8, ev.data.packet.data, MP_STEAM_STATE_SIZE);
+                for (uint8_t i = 0; i < server->server_configuration.max_clients; ++i)
+                    if (i != sender && server->players[i].is_connected)
+                        epnet_server_send(server->ns, i, MPT_S_STEAM_STATE, relay, sizeof(relay));
                 break;
             }
             default:
@@ -265,6 +301,7 @@ static void send_actors_sync_(MpServer* server)
 
 MpServer* mp_server_create(unsigned short port, int max_clients)
 {
+    if (max_clients < 1 || max_clients > EPNET_MAX_CLIENTS) return 0;
     MpServer* server = mem_alloc(sizeof(*server));
     if (server)
     {
