@@ -13,6 +13,10 @@ typedef struct Remote {
     unsigned int failures;
     /* Last slot armed natively and last slot reported as rejected. */
     int last_weapon, rejected_weapon;
+    /* Displayed position eases toward the latest received one between packets. */
+    float shown_x, shown_y, shown_z;
+    DWORD shown_at;
+    int shown;
 } Remote;
 typedef struct PendingShot { ShotEvent event; DWORD received; } PendingShot;
 static uintptr_t base, local_game, local_player;
@@ -27,6 +31,9 @@ static PeerState incoming[MP_MAX_PEERS], current[MP_MAX_PEERS];
 static DWORD published_at, current_at;
 static PendingShot received[64], pending[64];
 static unsigned int received_count, pending_count;
+/* Game-thread staging: captures never depend on the outgoing lock. */
+static MpShot staged[64];
+static unsigned int staged_count;
 static MpShot outgoing[64];
 static unsigned int outgoing_head, outgoing_count;
 static volatile LONG event_drops;
@@ -42,7 +49,7 @@ int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
     }
     local_game = local_player = 0; local_low = local_high = world_epoch = map_started = world_load = 0;
     memset(incoming, 0, sizeof(incoming)); memset(current, 0, sizeof(current));
-    published_at = current_at = received_count = pending_count = outgoing_head = outgoing_count = 0;
+    published_at = current_at = received_count = pending_count = outgoing_head = outgoing_count = staged_count = 0;
     InterlockedExchange(&stop_requested, 0); InterlockedExchange(&game_thread, 0); InterlockedExchange(&event_drops, 0);
     enabled = 1; InterlockedExchange(&stopped, 0); return 1;
 }
@@ -75,13 +82,11 @@ void multiplayer_capture_shot(int x, int y, unsigned int weapon)
     Snapshot sample;
     if (probe_read(base, &sample) != PROBE_OK || !sample.in_level || sample.health <= 0 || sample.player != local_player ||
         sample.world_low != local_low || sample.world_high != local_high) return;
-    if (!TryAcquireSRWLockExclusive(&outgoing_lock)) { InterlockedIncrement(&event_drops); return; }
-    if (outgoing_count < 64) {
-        MpShot* shot = &outgoing[(outgoing_head + outgoing_count++) % 64];
+    if (staged_count < 64) {
+        MpShot* shot = &staged[staged_count++];
         memset(shot, 0, sizeof(*shot)); shot->x = x; shot->y = y; shot->weapon = weapon;
         shot->world_low = local_low; shot->world_high = local_high; shot->world_epoch = world_epoch;
     } else InterlockedIncrement(&event_drops);
-    ReleaseSRWLockExclusive(&outgoing_lock);
 }
 int multiplayer_take_local_shot(MpShot* out)
 {
@@ -111,6 +116,26 @@ static void abandon(Remote* r, uintptr_t game, ActorResult* update, int* cleanup
     }
     r->state = RS_ABANDONED;
     update->event = ACTOR_FAULT; update->reason = ACTOR_REASON_EXCEPTION;
+}
+/* Exponential-style easing: the shown position closes dt/(dt+tau) of the gap
+   each game tick, so packet jitter does not become visible stutter. Large gaps
+   (respawn, teleport) and stale history snap to the target. */
+#define EASE_TAU_MS 60.0f
+#define EASE_SNAP_DISTANCE 160.0f
+#define EASE_STALE_MS 250u
+static void ease_toward_target(Remote* r, Snapshot* target, DWORD now)
+{
+    float dx = target->x - r->shown_x, dy = target->y - r->shown_y, dz = target->z - r->shown_z;
+    DWORD elapsed = now - r->shown_at;
+    if (!r->shown || elapsed > EASE_STALE_MS ||
+        dx * dx + dy * dy + dz * dz > EASE_SNAP_DISTANCE * EASE_SNAP_DISTANCE) {
+        r->shown_x = target->x; r->shown_y = target->y; r->shown_z = target->z; r->shown = 1;
+    } else {
+        float dt = (float)elapsed, alpha = dt / (dt + EASE_TAU_MS);
+        r->shown_x += dx * alpha; r->shown_y += dy * alpha; r->shown_z += dz * alpha;
+    }
+    r->shown_at = now;
+    target->x = r->shown_x; target->y = r->shown_y; target->z = r->shown_z;
 }
 static void forget_weapon(Remote* r) { r->last_weapon = r->rejected_weapon = -1; r->weapon_retry_at = 0; }
 static void report(MultiplayerFrame* frame, unsigned int id, const Remote* r, const ActorResult* update, int cleanup_failed)
@@ -149,11 +174,24 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
         local_low = local->world_low; local_high = local->world_high;
     }
     if (gameplay) { local_game = local->game; local_player = state == PROBE_OK && local->health > 0 ? local->player : 0; }
-    /* Flush captures from an old map before the worker can send them. */
+    /* Drop captures from an old map before the worker can send them; the rest
+       wait in the staging array until the outgoing lock is free. */
+    if (!gameplay || stopping) staged_count = 0;
+    else {
+        unsigned int kept = 0;
+        for (unsigned int i = 0; i < staged_count; ++i)
+            if (staged[i].world_epoch == world_epoch) staged[kept++] = staged[i];
+        staged_count = kept;
+    }
     if (TryAcquireSRWLockExclusive(&outgoing_lock)) {
         if (!gameplay || stopping || (outgoing_count &&
             outgoing[outgoing_head].world_epoch != world_epoch)) outgoing_count = outgoing_head = 0;
+        unsigned int moved = 0;
+        while (moved < staged_count && outgoing_count < 64) {
+            outgoing[(outgoing_head + outgoing_count++) % 64] = staged[moved++];
+        }
         ReleaseSRWLockExclusive(&outgoing_lock);
+        if (moved) { memmove(staged, staged + moved, (staged_count - moved) * sizeof(staged[0])); staged_count -= moved; }
     }
     result.world_epoch = world_epoch;
     if (TryAcquireSRWLockExclusive(&incoming_lock)) {
@@ -239,6 +277,7 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
                     }
                 }
                 if (r->state == RS_SPAWNED) {
+                    ease_toward_target(r, &target, now);
                     ActorResult pose = actor_apply(&r->actor, &target);
                     if (pose.event == ACTOR_FAULT) { update = pose; abandon(r, local->game, &update, &cleanup_failed); }
                     else if (pose.event == ACTOR_LOST) { update = pose; r->state = RS_IDLE; forget_weapon(r); }
@@ -248,6 +287,7 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
                 }
             }
         }
+        if (r->state != RS_SPAWNED) r->shown = 0;
         if (update.event != ACTOR_NONE) report(&result, id, r, &update, cleanup_failed);
         if (actor_live(&r->actor, local->game)) any_live = 1;
     }
@@ -312,6 +352,7 @@ int multiplayer_stop(void) {
     received_count = pending_count = 0; published_at = current_at = 0;
     ReleaseSRWLockExclusive(&incoming_lock);
     AcquireSRWLockExclusive(&outgoing_lock); outgoing_count = outgoing_head = 0; ReleaseSRWLockExclusive(&outgoing_lock);
+    staged_count = 0;
     return 1;
 }
 enum RemoteState multiplayer_remote_state(unsigned int id) { return id < MP_MAX_PEERS ? remote[id].state : RS_IDLE; }

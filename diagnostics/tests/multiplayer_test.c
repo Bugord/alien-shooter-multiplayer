@@ -112,8 +112,19 @@ int main(void) {
     --event.shot.world_epoch; s->current_ammo = 1;
     multiplayer_receive_shot(&event, 2221);
     CHECK(step(2230).shots_applied == 1 && shots == 2); /* Last two-unit attack. */
-    multiplayer_capture_shot(200, 300, 1);
-    MpShot capture; CHECK(multiplayer_take_local_shot(&capture) && capture.world_epoch == 1 && capture.x == 200);
+    /* Easing: a small move is only partly applied, a large one snaps. */
+    s->x = 575; step(2234);
+    CHECK(*(float*)(entity + 0x30) > 555.5f && *(float*)(entity + 0x30) < 575.0f);
+    s->x = 2000; step(2236); CHECK(*(float*)(entity + 0x30) == 2000);
+    s->x = 555; step(2237); CHECK(*(float*)(entity + 0x30) == 555);
+    /* Captures wait in game-thread staging until a tick moves them to the worker queue. */
+    MpShot capture; CHECK(!multiplayer_take_local_shot(&capture));
+    multiplayer_capture_shot(200, 300, 1); CHECK(!multiplayer_take_local_shot(&capture));
+    step(2238); CHECK(multiplayer_take_local_shot(&capture) && capture.world_epoch == 1 && capture.x == 200);
+    for (int i = 0; i < 65; ++i) multiplayer_capture_shot(i, i, 1);
+    CHECK(step(2239).shots_discarded == 1); /* 64 staged, one counted drop. */
+    unsigned int taken = 0; while (multiplayer_take_local_shot(&capture)) ++taken;
+    CHECK(taken == 64);
     multiplayer_capture_shot(210, 310, 1);
     local.in_level = 0;
     local.world_low = local.world_high = 0;

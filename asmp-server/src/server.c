@@ -155,7 +155,8 @@ static void process_received_packets_(MpServer* server)
             {
                 MpShot shot;
                 Player* p = &server->players[sender];
-                if (!mp_shot_decode(ev.data.packet.data, length, &shot) ||
+                /* A shot is meaningful only after the sender's first valid state. */
+                if (!p->state_received || !mp_shot_decode(ev.data.packet.data, length, &shot) ||
                     (p->shot_received && !mp_sequence_newer(shot.sequence, p->shot_sequence))) break;
                 p->shot_sequence = shot.sequence; p->shot_received = true;
                 uint8_t relay[MP_SHOT_RELAY_SIZE];
