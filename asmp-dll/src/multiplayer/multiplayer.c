@@ -1,983 +1,317 @@
-/**
- * @file multiplayer.c
- * @brief Implementation of multiplayer logic.
- *
- */
 #include <string.h>
-#include <stdlib.h>
 #include "multiplayer.h"
-#include "client/client.h"
-#include "utils/mem/mem.h"
-#include "ehook.h"
-#include "game/api.h"
-#include "gameutils.h"
-#include "utils/console/console.h" // TODO: Remove later.
+#include "../game/ui.h"
+#include "../game/display_hook.h"
 
-#define STATUSBAR_NDIR     0
-#define NAME_TEXT_NDIR     2
-#define ADDRESS_TEXT_NDIR  3
-#define CONNECT_BUTTON_DIR 25 /* NDIR = 1 */
-#define NICKNAME_Y_OFFSET  -92.0f
+typedef struct Remote {
+    Actor actor;
+    uint32_t session, epoch;
+    uint32_t world_low, world_high, local_epoch;
+    enum RemoteState state;
+    DWORD entered_at, retry_at, last_pose;
+    DWORD weapon_retry_at;
+    unsigned int failures;
+    /* Last slot armed natively and last slot reported as rejected. */
+    int last_weapon, rejected_weapon;
+} Remote;
+typedef struct PendingShot { ShotEvent event; DWORD received; } PendingShot;
+static uintptr_t base, local_game, local_player;
+static uint32_t local_low, local_high, world_epoch, map_started, world_load;
+static ActorEngine engine;
+static int enabled;
+static volatile LONG stop_requested, stopped = 1;
+static volatile LONG game_thread;
+static Remote remote[MP_MAX_PEERS];
+static SRWLOCK incoming_lock = SRWLOCK_INIT, outgoing_lock = SRWLOCK_INIT;
+static PeerState incoming[MP_MAX_PEERS], current[MP_MAX_PEERS];
+static DWORD published_at, current_at;
+static PendingShot received[64], pending[64];
+static unsigned int received_count, pending_count;
+static MpShot outgoing[64];
+static unsigned int outgoing_head, outgoing_count;
+static volatile LONG event_drops;
 
-#define HEALTHBAR_Y_OFFSET              -80.0f
-#define HEALTHBAR_WIDTH                 80.0f
-#define HEALTHBAR_HEIGHT                7.0f
-#define HEALTHBAR_BORDERS_COLOR_ARGB    0xFFADA698
-#define HEALTHBAR_BACKGROUND_COLOR_ARGB 0xFF000000
-#define HEALTHBAR_HEALTH_COLOR_ARGB     0xFFD33104
-
-#define NICKNAME_X_OFFSET (-HEALTHBAR_WIDTH / 2)
-
-typedef enum MultiplayerState
+int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
 {
-    MULTIPLAYER_STATE_NONE,
-    MULTIPLAYER_STATE_MAIN_MENU,
-    MULTIPLAYER_STATE_MULTIPLAYER_MENU,
-    MULTIPLAYER_STATE_CONNECTED,
-} MultiplayerState;
-
-typedef enum StateConnectedSubstate
-{
-    SCS_JUST_CONNECTED = 0,
-    SCS_WAIT_MAP_LOAD,
-    SCS_MAP_JUST_LOADED,
-    SCS_PLAYER_JUST_SPAWNED,
-    SCS_PLAY,
-} StateConnectedSubstate;
-
-typedef enum StatePlayMenuSubstate
-{
-    SPMS_IDLE = 0,
-    SPMS_CONNECT_PRESSED = 1,
-    SPMS_INVALID_NAME = 2,
-    SPMS_INVALID_ADDRESS = 3,
-    SPMS_CONNECTING = 4,
-    SPMS_CONNECTION_FAILED = 5,
-    SPMS_CONNECTED = 6
-} StatePlayMenuSubstate;
-
-typedef enum RemotePlayerState
-{
-    RPS_NOT_SPAWNED = 0,
-    RPS_SPAWNING,
-    RPS_JUST_SPAWNED,
-    RPS_SPAWNED,
-} RemotePlayerState;
-
-
-typedef struct MultiplayerMenuInfo
-{
-    EntText* nickname;
-    EntText* address;
-    EntText* status;
-    Entity* connect_button;
-} MultiplayerMenuInfo;
-
-typedef struct RemotePlayer
-{
-    RemotePlayerState state;
-    MpPlayer mp_player;
-    EntPlayer* entity;
-    EntText* nickname_entity;
-    bool is_user_info_changed;
-    bool is_actor_info_changed;
-    Vid vid;
-} RemotePlayer;
-
-typedef struct Multiplayer
-{
-    MultiplayerState state;
-    StateConnectedSubstate state_connected_substate;
-    MpClient* mp_client;
-    RemotePlayer* remote_players;
-    load_menu_t Game__load_menu_trampoline;
-    EntPlayer__set_armed_weapon_t EntPlayer__set_armed_weapon_trampoline;
-    Entity__set_anim_t Entity__set_anim_trampoline;
-    void* IDirect3DDevice8__end_scene_orig;
-} Multiplayer;
-
-
-static Multiplayer* mp_ = 0;
-
-
-/**
- * @brief Hook of Game::wnd_proc function.
- *
- * @param this   This is a macro. The macro expands to 2 arguments:
- *               ECX - pointer to main AlienShooter game class object pointer.
- *               EDX - unused variable (actually this is EDX register value).
- * @param hwnd   Window handle.
- * @param msg    Message.
- * @param wparam Message parameter.
- * @param lparam Message parameter.
- *
- * @return int Result of call to original Game::wnd_proc.
- */
-static int CC_FASTCALL Game__wnd_proc_hook_(Game* this, HWND hwnd, uint32_t msg,
-                                            uint32_t wparam, uint32_t lparam);
-
-/**
- * @brief Hook of Game::load_menu function.
- *
- * @param menu_file Pointer to pointer to name of menu file to load.
- *
- * @return int Result of call to original Game::load_menu.
- */
-static int CC_STDCALL Game__load_menu_hook_(const char** menu_file);
-
-/**
- * @brief Hook of Game::tick function.
- *
- * @param this This is a macro. The macro expands to 2 arguments:
- *             ECX - pointer to main AlienShooter game class object pointer.
- *             EDX - unused variable (actually this is EDX register value).
- *
- * @return int Result of call original Game::tick.
- */
-static int CC_THISCALL Game__tick_hook_(Game* this);
-
-/**
- * @brief Hook of EntPlayer::set_armed_weapon function.
- *
- * @param this           This is a macro. The macro expands to 2 arguments:
- *                       ECX - pointer to entity who is calling this function.
- *                       EDX - unused variable (actually this is EDX register
- *                       value).
- * @param weapon_slot_id Weapon slot id.
- *
- * @return int Result of call to original EntPlayer::set_armed_weapon:
- *             0 - weapon was not changed.
- *             1 - weapon was changed.
- */
-static int CC_THISCALL EntPlayer__set_armed_weapon_hook_(EntPlayer* this,
-                                                         int weapon_slot_id);
-
-/**
- * @brief Hook of EntPlayer::action function.
- *
- * @param this   This is a macro. The macro expands to 2 arguments:
- *               ECX - pointer to entity who is calling this function.
- *               EDX - unused variable (actually this is EDX register value).
- * @param action Action to perform.
- * @param a3     Action param 1.
- * @param a4     Action param 2.
- * @param a5     Action param 3.
- *
- * @return int Result of call to original EntPlayer::action.
- */
-static int CC_THISCALL EntPlayer__action_hook_(Entity* this, enEntAction action,
-                                               void* a3, void* a4, void* a5);
-
-/**
- * @brief Hook of EntPlayer::set_anim function.
- *
- * @param this    This is a macro. The macro expands to 2 arguments:
- *                  ECX - pointer to entity who is calling this function.
- *                  EDX - unused variable (actually this is EDX register value).
- * @param anim_id New animation id.
- */
-static void CC_THISCALL Entity__set_anim_hook_(Entity* this, enAnim anim_id);
-
-/**
- * @brief Hook of IDirect3DDevice8::EndScene function.
- *
- * @param dev Pointer to IDirect3DDevice8 object.
- *
- * @return long Result of call to original IDirect3DDevice8::EndScene.
- */
-static long CC_STDCALL IDirect3DDevice8__end_scene_hook_(IDirect3DDevice8* dev);
-
-/**
- * @brief Calls each time when remote player's user info is received.
- *
- * @param client Pointer to MpClient object.
- * @param id     Id of remote player.
- * @param user   Pointer to received user data.
- */
-static void on_user_info_updated(MpClient* client, int id, MpUser* user);
-
-// TODO: Should be removed after refactoring.
-static void on_actor_info_updated(MpClient* client, int id, MpActor* actor);
-
-/**
- * @brief Calls each time when remote player's shoot packet is received.
- *
- * @param client Pointer to MpClient object.
- * @param id     Id of remote player.
- * @param x      X coordinate of shoot.
- * @param y      Y coordinate of shoot.
- */
-static void on_actor_shoot(MpClient* client, int id, float x, float y);
-
-/**
- * @brief Sets all necessary hooks.
- *
- * @return true If all hooks were set successfully.
- * @return false If at least one hook was not set successfully.
- */
-static bool set_hooks_(void);
-
-/**
- * @brief Reads states of multiplayer menu entities to interact with
- *        asmp_play.lgc script.
- *
- * @param[in,out] multiplayer_menu_info MultiplayerMenuInfo structure pointer.
- *
- * @return true if all required entities were found and stored to argument.
- */
-static bool read_mp_menu_info_(MultiplayerMenuInfo* multiplayer_menu_info);
-
-/**
- * @brief Parses ip and port from string.
- *
- * @param[in]  str String to parse.
- * @param[out] ip  Pointer to buffer to store ip address.
- * @param[out] port Pointer to variable to store port.
- *
- * @return true if \p ip and \p port are not NULL and \p str matches ip:port.
- */
-static bool parse_ip_port_(const char* str, char* ip, uint16_t* port);
-
-/**
- * @brief Calls each game tick when multiplayer menu is active.
- */
-static void handle_multiplayer_state_multiplayer_menu_(void);
-
-/**
- * @brief Calls each game tick when client is connected to server.
- */
-static void handle_multiplayer_state_connected_(void);
-
-/**
- * @brief Reflects changes of remote players to game world.
- */
-static void handle_remote_players_(void);
-
-/**
- * @brief Draws health bars above remote players. Should be called from
- *        IDirect3DDevice8::EndScene hook.
- */
-static void draw_health_bars_(void);
-
-
-static int CC_FASTCALL Game__wnd_proc_hook_(Game* this, HWND hwnd, uint32_t msg,
-                                            uint32_t wparam, uint32_t lparam)
-{
-    if (msg == 0x001C) /* WM_ACTIVATEAPP */
-    {
-        /* Prevent freezing game loop when game window is not active */
-        wparam = 1;
+    if (enabled || !image_base || !api || !api->create || !api->destroy || !api->move ||
+        !api->rotate || !api->action || !api->weapon || !api->health) return 0;
+    engine = *api; base = image_base;
+    memset(remote, 0, sizeof(remote));
+    for (unsigned int i = 0; i < MP_MAX_PEERS; ++i) {
+        actor_init(&remote[i].actor, &engine); remote[i].last_weapon = remote[i].rejected_weapon = -1;
     }
-    return ((Game__wnd_proc_t)FUNC_GAME_WNDPROC)(ECX, EDX, hwnd, msg, wparam,
-                                                 lparam);
+    local_game = local_player = 0; local_low = local_high = world_epoch = map_started = world_load = 0;
+    memset(incoming, 0, sizeof(incoming)); memset(current, 0, sizeof(current));
+    published_at = current_at = received_count = pending_count = outgoing_head = outgoing_count = 0;
+    InterlockedExchange(&stop_requested, 0); InterlockedExchange(&game_thread, 0); InterlockedExchange(&event_drops, 0);
+    enabled = 1; InterlockedExchange(&stopped, 0); return 1;
 }
-
-static int CC_STDCALL Game__load_menu_hook_(const char** menu_file)
+int multiplayer_enable(uintptr_t image_base)
 {
-    // console_log("Game::load_menu: %s\n", *menu_file);
-    /* If main menu, load the custom one instead */
-    if (strcmp(*menu_file, "maps\\mainmenu.men") == 0)
-    {
-        mp_client_disconnect(mp_->mp_client);
-        const char custom_mainmenu_file_name[] = "maps\\asmp_mainmenu.men";
-        const char* ptr = custom_mainmenu_file_name;
-        return mp_->Game__load_menu_trampoline((const char**)&ptr);
+    ActorEngine api;
+    return actor_engine_bind(image_base, &api) && multiplayer_initialize(image_base, &api);
+}
+void multiplayer_publish(const PeerState peers[MP_MAX_PEERS], DWORD now)
+{
+    if (!enabled) return;
+    AcquireSRWLockExclusive(&incoming_lock);
+    memcpy(incoming, peers, sizeof(incoming)); published_at = now;
+    ReleaseSRWLockExclusive(&incoming_lock);
+}
+void multiplayer_receive_shot(const ShotEvent* event, DWORD now)
+{
+    if (!enabled || !event || event->id >= MP_MAX_PEERS) return;
+    AcquireSRWLockExclusive(&incoming_lock);
+    if (received_count < 64) {
+        received[received_count].event = *event; received[received_count++].received = now;
+    } else InterlockedIncrement(&event_drops);
+    ReleaseSRWLockExclusive(&incoming_lock);
+}
+void multiplayer_capture_shot(int x, int y, unsigned int weapon)
+{
+    if (GetCurrentThreadId() != (DWORD)InterlockedCompareExchange(&game_thread, 0, 0)) return;
+    if (!enabled || !local_player || !world_epoch || weapon >= 10u ||
+        InterlockedCompareExchange(&stop_requested, 0, 0)) return;
+    Snapshot sample;
+    if (probe_read(base, &sample) != PROBE_OK || !sample.in_level || sample.health <= 0 || sample.player != local_player ||
+        sample.world_low != local_low || sample.world_high != local_high) return;
+    if (!TryAcquireSRWLockExclusive(&outgoing_lock)) { InterlockedIncrement(&event_drops); return; }
+    if (outgoing_count < 64) {
+        MpShot* shot = &outgoing[(outgoing_head + outgoing_count++) % 64];
+        memset(shot, 0, sizeof(*shot)); shot->x = x; shot->y = y; shot->weapon = weapon;
+        shot->world_low = local_low; shot->world_high = local_high; shot->world_epoch = world_epoch;
+    } else InterlockedIncrement(&event_drops);
+    ReleaseSRWLockExclusive(&outgoing_lock);
+}
+int multiplayer_take_local_shot(MpShot* out)
+{
+    int available = 0;
+    AcquireSRWLockExclusive(&outgoing_lock);
+    if (outgoing_count) {
+        *out = outgoing[outgoing_head]; outgoing_head = (outgoing_head + 1) % 64;
+        --outgoing_count; available = 1;
     }
-    else if (strcmp(*menu_file, "maps\\asmp_play.men") == 0)
-    {
-        mp_->state = MULTIPLAYER_STATE_MULTIPLAYER_MENU;
+    ReleaseSRWLockExclusive(&outgoing_lock);
+    return available;
+}
+static void target_snapshot(Snapshot* out, const MpState* in)
+{
+    memset(out, 0, sizeof(*out));
+    out->x = in->x; out->y = in->y; out->z = in->z; out->health = in->health;
+    out->direction = in->direction; out->torso_direction = in->torso_direction;
+    out->torso_present = in->torso_present; out->velocity = in->velocity; out->moving = in->moving;
+    out->weapon_slot = in->weapon_slot; out->current_ammo = in->current_ammo;
+}
+static void abandon(Remote* r, uintptr_t game, ActorResult* update, int* cleanup_failed)
+{
+    /* D1: exactly one guarded cleanup attempt after a native fault. */
+    if (r->state != RS_ABANDONED && r->actor.entity) {
+        ActorResult cleanup = actor_remove(&r->actor, game);
+        *cleanup_failed = cleanup.event == ACTOR_FAULT || r->actor.entity != 0;
     }
-    return mp_->Game__load_menu_trampoline(menu_file);
+    r->state = RS_ABANDONED;
+    update->event = ACTOR_FAULT; update->reason = ACTOR_REASON_EXCEPTION;
 }
-
-static int CC_THISCALL Game__tick_hook_(Game* this)
+static void forget_weapon(Remote* r) { r->last_weapon = r->rejected_weapon = -1; r->weapon_retry_at = 0; }
+static void report(MultiplayerFrame* frame, unsigned int id, const Remote* r, const ActorResult* update, int cleanup_failed)
 {
-    int result = ((Game__tick_t)FUNC_GAME_TICK)(ECX, EDX);
-    multiplayer_tick();
-    return result;
+    /* One entry per peer: a later event in the same tick replaces the earlier one. */
+    unsigned int i = 0;
+    while (i < frame->count && frame->remote[i].id != id) ++i;
+    if (i == frame->count) ++frame->count;
+    frame->remote[i].id = id; frame->remote[i].actor = *update;
+    frame->remote[i].state = r->state; frame->remote[i].cleanup_failed = cleanup_failed;
 }
-
-static int CC_THISCALL EntPlayer__set_armed_weapon_hook_(EntPlayer* this,
-                                                         int weapon_slot_id)
+static void backoff(Remote* r, DWORD now)
 {
-    int result =
-        mp_->EntPlayer__set_armed_weapon_trampoline(ECX, EDX, weapon_slot_id);
-    if (result)
-    {
-        if (ECX == gameutils_get_player())
-        {
-            MpPlayer* mp_player = mp_client_get_local_player(mp_->mp_client);
-            if (mp_player)
-            {
-                /* Update local player's armed weapon in client structure */
-                mp_player->mp_actor.armed_weapon = weapon_slot_id;
-            }
+    DWORD delay = r->failures < 4u ? (2000u << r->failures) : 30000u;
+    if (r->failures < 4u) ++r->failures;
+    r->retry_at = now + delay; r->state = RS_BACKOFF;
+}
+MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state, DWORD now)
+{
+    MultiplayerFrame result = {0};
+    if (!enabled || InterlockedCompareExchange(&stopped, 0, 0)) return result;
+    LONG thread = (LONG)GetCurrentThreadId();
+    LONG owner = InterlockedCompareExchange(&game_thread, thread, 0);
+    if (owner && owner != thread) return result;
+    int stopping = InterlockedCompareExchange(&stop_requested, 0, 0) != 0;
+    /* Death can temporarily remove the player. The probe still validates GAME
+       and parses its map before returning NO_PLAYER/NO_ARMY. */
+    int gameplay = (state == PROBE_OK || state == PROBE_NO_PLAYER || state == PROBE_NO_ARMY) && local->in_level;
+    if (!gameplay) {
+        local_game = local_player = 0; local_low = local_high = 0;
+    }
+    if (gameplay && (local->world_low != local_low || local->world_high != local_high || local->map_started != map_started || local->world_load != world_load)) {
+        if (!++world_epoch) ++world_epoch;
+        map_started = local->map_started;
+        world_load = local->world_load;
+        local_low = local->world_low; local_high = local->world_high;
+    }
+    if (gameplay) { local_game = local->game; local_player = state == PROBE_OK && local->health > 0 ? local->player : 0; }
+    /* Flush captures from an old map before the worker can send them. */
+    if (TryAcquireSRWLockExclusive(&outgoing_lock)) {
+        if (!gameplay || stopping || (outgoing_count &&
+            outgoing[outgoing_head].world_epoch != world_epoch)) outgoing_count = outgoing_head = 0;
+        ReleaseSRWLockExclusive(&outgoing_lock);
+    }
+    result.world_epoch = world_epoch;
+    if (TryAcquireSRWLockExclusive(&incoming_lock)) {
+        memcpy(current, incoming, sizeof(current));
+        current_at = published_at;
+        for (unsigned int i = 0; i < received_count; ++i) {
+            if (pending_count < 64) pending[pending_count++] = received[i];
+            else ++result.shots_discarded;
         }
-        else
-        {
-            /* After changing weapon, player's name entity attaches to weapon
-               entity. So, need to recalculate it's position. */
-            for (int i = 0;
-                 i < mp_client_get_max_players_number(mp_->mp_client); i++)
-            {
-                if (ECX && (mp_->remote_players[i].entity == ECX))
-                {
-                    if (mp_->remote_players[i].nickname_entity)
-                    {
-                        mp_->remote_players[i]
-                            .nickname_entity->entity.entity.x =
-                            ((Entity*)ECX)->x + NICKNAME_X_OFFSET;
-                        mp_->remote_players[i]
-                            .nickname_entity->entity.entity.y =
-                            ((Entity*)ECX)->y + NICKNAME_Y_OFFSET;
-                        break;
-                    }
+        received_count = 0;
+        ReleaseSRWLockExclusive(&incoming_lock);
+    }
+    int any_live = 0;
+    for (unsigned int id = 0; id < MP_MAX_PEERS; ++id) {
+        Remote* r = &remote[id]; const PeerState* peer = &current[id];
+        const MpState* s = &peer->state;
+        int world_changed = r->world_low != local_low || r->world_high != local_high || r->local_epoch != world_epoch;
+        if (r->state == RS_ABANDONED && world_changed && !actor_live(&r->actor, local->game)) {
+            actor_init(&r->actor, &engine); r->state = RS_IDLE; r->failures = 0;
+        }
+        int wanted = gameplay && !stopping && peer->present && now - current_at <= 1000u &&
+            s->active && s->health > 0 && s->world_epoch && s->world_low == local->world_low &&
+            s->world_high == local->world_high;
+        int changed = r->session != peer->session || r->epoch != s->world_epoch;
+        Snapshot target; target_snapshot(&target, s);
+        ActorResult update = {0}; int cleanup_failed = 0;
+        if (r->state != RS_ABANDONED && (!wanted || changed || world_changed)) {
+            update = actor_remove(&r->actor, local->game);
+            if (update.event == ACTOR_FAULT) abandon(r, local->game, &update, &cleanup_failed);
+            else { r->state = RS_IDLE; r->failures = 0; forget_weapon(r); }
+        }
+        if (r->state == RS_ABANDONED) {
+            if (stopping && actor_live(&r->actor, local->game)) {
+                any_live = 1; cleanup_failed = 1;
+                update.event = ACTOR_FAULT; update.reason = ACTOR_REASON_EXCEPTION; update.entity = r->actor.entity;
+            }
+        } else if (wanted) {
+            if ((r->state == RS_SPAWNING || r->state == RS_SPAWNED) && !actor_live(&r->actor, local->game)) {
+                update.event = ACTOR_LOST; update.entity = r->actor.entity;
+                r->actor.entity = 0; r->state = RS_IDLE; forget_weapon(r);
+            }
+            if (r->state == RS_IDLE) {
+                r->session = peer->session; r->epoch = s->world_epoch;
+                r->world_low = local_low; r->world_high = local_high; r->local_epoch = world_epoch;
+                r->entered_at = now; r->state = RS_WAITING;
+            } else if (r->state == RS_BACKOFF && (int32_t)(now - r->retry_at) >= 0) {
+                r->state = RS_WAITING; r->entered_at = now - 2000u;
+            }
+            if (r->state == RS_WAITING && now - r->entered_at >= 2000u && state == PROBE_OK && local->player) {
+                update = actor_spawn(&r->actor, base, local, &target);
+                if (update.event == ACTOR_SPAWNED) { r->state = RS_SPAWNING; r->entered_at = r->last_pose = now; }
+                else if (update.event == ACTOR_FAULT) abandon(r, local->game, &update, &cleanup_failed);
+                else {
+                    ActorResult cleanup = actor_remove(&r->actor, local->game);
+                    if (cleanup.event == ACTOR_FAULT) abandon(r, local->game, &update, &cleanup_failed);
+                    else backoff(r, now);
+                }
+            } else if (r->state == RS_SPAWNING) {
+                int torso = actor_torso_ready(&r->actor);
+                if (torso < 0) abandon(r, local->game, &update, &cleanup_failed);
+                else if (torso) {
+                    if (actor_set_army(&r->actor, local->army_index) != 1) abandon(r, local->game, &update, &cleanup_failed);
+                    else { r->state = RS_SPAWNED; r->failures = 0; }
+                } else if (now - r->entered_at >= 3000u) {
+                    update = actor_remove(&r->actor, local->game);
+                    if (update.event == ACTOR_FAULT) abandon(r, local->game, &update, &cleanup_failed);
+                    else backoff(r, now);
                 }
             }
-        }
-    }
-    return result;
-}
-
-static int CC_THISCALL EntPlayer__action_hook_(Entity* this, enEntAction action,
-                                               void* a3, void* a4, void* a5)
-{
-    static float attack_x = 0.0f;
-    static float attack_y = 0.0f;
-    if (ECX == (Entity*)gameutils_get_player())
-    {
-        if (action == ACT_COOR_ATTACK)
-        {
-            attack_x = (float)(int)a3;
-            attack_y = (float)(int)a4;
-        }
-        else if (action == ACT_ADD_AMMO)
-        {
-            if ((int)a3 <= -1 && (int)a3 >= -2)
-            {
-                mp_client_send_shoot(mp_->mp_client, attack_x, attack_y);
-            }
-        }
-    }
-    return ((Entity__action_t)FUNC_ENT_PLAYER_ACTION)(ECX, EDX, action, a3, a4,
-                                                      a5);
-}
-
-static void CC_THISCALL Entity__set_anim_hook_(Entity* this, enAnim anim_id)
-{
-    if ((mp_->state_connected_substate == SCS_PLAY))
-    {
-        if ((anim_id == ANI_DEATH) || (anim_id == ANI_DEATH2))
-        {
-            if (ECX == (Entity*)gameutils_get_player())
-            {
-                // TODO: Implement local player death logic here.
-                //       For now the code just prevents player from dying.
-                anim_id = ANI_STAND;
-                ECX->health = 110;
-            }
-            else
-            {
-                for (int i = 0;
-                     i < mp_client_get_max_players_number(mp_->mp_client); i++)
-                {
-                    if (ECX && (ECX == (Entity*)mp_->remote_players[i].entity))
-                    {
-                        // TODO: Implement rempote player death logic here.
-                        //       For now it just prevents player from dying.
-                        anim_id = ANI_STAND;
-                        ECX->health = 110;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    return mp_->Entity__set_anim_trampoline(ECX, EDX, anim_id);
-}
-
-static long CC_STDCALL IDirect3DDevice8__end_scene_hook_(IDirect3DDevice8* dev)
-{
-    typedef long(CC_STDCALL * IDirect3DDevice8__end_scene_t)(IDirect3DDevice8*);
-
-    Render__draw_colored_rect(game_globals_get_render(), 40, 40, 45, 45,
-                              0x77F04A9B);
-    /* Draw health bars */
-    draw_health_bars_();
-    return (
-        (IDirect3DDevice8__end_scene_t)(mp_->IDirect3DDevice8__end_scene_orig))(
-        dev);
-}
-
-static void on_user_info_updated(MpClient* client, int id, MpUser* user)
-{
-    (void)client;
-    mp_->remote_players[id].mp_player.mp_user = *user;
-    if (strcmp(user->name, mp_->remote_players[id].mp_player.mp_user.name) != 0)
-    {
-        strcpy(mp_->remote_players[id].mp_player.mp_user.name, user->name);
-        mp_->remote_players[id].is_user_info_changed = true;
-    }
-}
-
-static void on_actor_info_updated(MpClient* client, int id, MpActor* actor)
-{
-    (void)client;
-    mp_->remote_players[id].mp_player.mp_actor = *actor;
-    mp_->remote_players[id].is_actor_info_changed = true;
-}
-
-static void on_actor_shoot(MpClient* client, int id, float x, float y)
-{
-    (void)client;
-    if (mp_->remote_players[id].state == RPS_SPAWNED)
-    {
-        if (!((Entity*)mp_->remote_players[id].entity)
-                 ->__vftable->action((Entity*)mp_->remote_players[id].entity, 0,
-                                     ACT_GET_AMMO, 0, 0, 0))
-        {
-            ((Entity*)mp_->remote_players[id].entity)
-                ->__vftable->action((Entity*)mp_->remote_players[id].entity, 0,
-                                    ACT_ADD_AMMO, (void*)999999, 0, 0);
-        }
-
-        ((Entity*)mp_->remote_players[id].entity)
-            ->__vftable->action((Entity*)mp_->remote_players[id].entity, 0,
-                                ACT_COOR_ATTACK, (void*)(int)x, (void*)(int)y,
-                                0);
-    }
-}
-
-static bool set_hooks_(void)
-{
-    /* Game::wndproc hook */
-    if (eh_set_vmt_hook(&game_globals_get_game()->__vftable->wnd_proc, 0,
-                        Game__wnd_proc_hook_))
-    {
-        /* Game::load_menu hook */
-        mp_->Game__load_menu_trampoline =
-            eh_set_trampoline_hook((void*)FUNC_LOAD_MENU, Game__load_menu_hook_,
-                                   8, EH_TT_TRAMPOLINE_JMP);
-        if (mp_->Game__load_menu_trampoline)
-        {
-            /* Game::tick hook */
-            if (eh_set_vmt_hook(&game_globals_get_game()->__vftable->tick, 0,
-                                Game__tick_hook_))
-            {
-                /* EntPlayer::set_armed_weapon hook */
-                mp_->EntPlayer__set_armed_weapon_trampoline =
-                    eh_set_trampoline_hook(
-                        (void*)FUNC_ENT_PLAYER_SET_ARMED_WEAPON,
-                        EntPlayer__set_armed_weapon_hook_, 5,
-                        EH_TT_TRAMPOLINE_JMP);
-                if (mp_->EntPlayer__set_armed_weapon_trampoline)
-                {
-                    /* EntPlayer::action hook */
-                    if (eh_set_vmt_hook(
-                            &((Entity_vtbl*)ENT_PLAYER_VTBL)->action, 0,
-                            &EntPlayer__action_hook_))
-                    {
-                        mp_->Entity__set_anim_trampoline =
-                            eh_set_trampoline_hook((void*)FUNC_ENTITY_SET_ANIM,
-                                                   Entity__set_anim_hook_, 8,
-                                                   EH_TT_TRAMPOLINE_JMP);
-                        /* Entity::set_anim hook */
-                        if (mp_->Entity__set_anim_trampoline)
-                        {
-                            /* IDirect3DDevice8::EndScene hook */
-                            mp_->IDirect3DDevice8__end_scene_orig =
-                                eh_set_vmt_hook(
-                                    *(void***)(game_globals_get_render()
-                                                   ->IDirect3DDevice8) +
-                                        35,
-                                    0, IDirect3DDevice8__end_scene_hook_);
-                            if (mp_->IDirect3DDevice8__end_scene_orig)
-                            {
-                                return true;
-                            }
+            if (r->state == RS_SPAWNED) {
+                /* A rejected arm is retried at most once per second and reported once per slot. */
+                if (target.weapon_slot < 0) r->last_weapon = target.weapon_slot;
+                else if (target.weapon_slot != r->last_weapon &&
+                    (target.weapon_slot != r->rejected_weapon || (int32_t)(now - r->weapon_retry_at) >= 0)) {
+                    int armed = actor_arm(&r->actor, target.weapon_slot);
+                    if (armed < 0) abandon(r, local->game, &update, &cleanup_failed);
+                    else if (armed) { r->last_weapon = target.weapon_slot; r->rejected_weapon = -1; }
+                    else {
+                        if (target.weapon_slot != r->rejected_weapon) {
+                            update.event = ACTOR_REJECTED; update.reason = ACTOR_REASON_WEAPON; update.entity = r->actor.entity;
                         }
+                        r->rejected_weapon = target.weapon_slot; r->weapon_retry_at = now + 1000u;
                     }
                 }
-            }
-        }
-    }
-    return false;
-}
-
-static bool read_mp_menu_info_(MultiplayerMenuInfo* multiplayer_menu_info)
-{
-    if (multiplayer_menu_info)
-    {
-        EntText* name = (EntText*)gameutils_get_menu_item(
-            VID_004_MENU_FONT_SMALL, NAME_TEXT_NDIR);
-        if (name)
-        {
-            EntText* addr = (EntText*)gameutils_get_menu_item(
-                VID_004_MENU_FONT_SMALL, ADDRESS_TEXT_NDIR);
-            if (addr)
-            {
-                EntText* status_bar = (EntText*)gameutils_get_menu_item(
-                    VID_002_MENU_FONT, STATUSBAR_NDIR);
-                if (status_bar)
-                {
-                    Entity* connect_button = gameutils_get_menu_item(
-                        VID_705_MENU_BUTTON_BACKGROUND, CONNECT_BUTTON_DIR);
-                    if (connect_button)
-                    {
-                        multiplayer_menu_info->nickname = name;
-                        multiplayer_menu_info->address = addr;
-                        multiplayer_menu_info->status = status_bar;
-                        multiplayer_menu_info->connect_button = connect_button;
-                        return true;
-                    }
+                if (r->state == RS_SPAWNED) {
+                    ActorResult pose = actor_apply(&r->actor, &target);
+                    if (pose.event == ACTOR_FAULT) { update = pose; abandon(r, local->game, &update, &cleanup_failed); }
+                    else if (pose.event == ACTOR_LOST) { update = pose; r->state = RS_IDLE; forget_weapon(r); }
+                    else if (now - r->last_pose >= 1000u && update.event == ACTOR_NONE) { update = pose; r->last_pose = now; }
+                    if (r->state == RS_SPAWNED && ui_name(&r->actor, peer->name) < 0)
+                        abandon(r, local->game, &update, &cleanup_failed);
                 }
             }
         }
+        if (update.event != ACTOR_NONE) report(&result, id, r, &update, cleanup_failed);
+        if (actor_live(&r->actor, local->game)) any_live = 1;
     }
-    return false;
-}
-
-static bool parse_ip_port_(const char* str, char* ip, uint16_t* port)
-{
-    char* colon_pos = strchr(str, ':');
-    if (!colon_pos)
-    {
-        return false;
-    }
-    uint32_t ip_len = colon_pos - str;
-    if (ip_len == 0 || ip_len >= 16)
-    {
-        return false;
-    }
-    uint32_t port_len = strlen(str) - ip_len - 1;
-    if (port_len == 0)
-    {
-        return false;
-    }
-    strncpy(ip, str, ip_len);
-    ip[ip_len] = '\0';
-    *port = atoi(colon_pos + 1);
-    return true;
-}
-
-static void handle_multiplayer_state_multiplayer_menu_(void)
-{
-    MultiplayerMenuInfo mp_menu;
-    if (!read_mp_menu_info_(&mp_menu))
-    {
-        // TODO: Something definitely went wrong, handle it.
-        return;
-    }
-    StatePlayMenuSubstate substate = mp_menu.status->entity.entity.health;
-    switch (substate)
-    {
-    case SPMS_IDLE:
-    {
-        break;
-    }
-    case SPMS_CONNECT_PRESSED:
-    {
-        console_log("SPMS_CONNECT_PRESSED\n");
-        char ip[16] = {0};
-        uint16_t port = 0;
-        /* Check entered name */
-        size_t name_len = strlen(mp_menu.nickname->text_70);
-        if (name_len == 0) /* Invalid name len */
-        {
-            substate = SPMS_INVALID_NAME;
+    unsigned int keep = 0; unsigned int fired = 0;
+    for (unsigned int i = 0; i < pending_count; ++i) {
+        PendingShot p = pending[i]; ShotEvent* e = &p.event;
+        Remote* r = &remote[e->id]; const MpState* s = &current[e->id].state;
+        if (stopping || !gameplay || now - p.received > 2500u || r->state == RS_ABANDONED ||
+            e->session != r->session || e->shot.world_epoch != r->epoch ||
+            e->shot.world_low != local->world_low || e->shot.world_high != local->world_high ||
+            !current[e->id].present || !s->active || s->health <= 0) {
+            ++result.shots_discarded; continue;
         }
-        /* Check entered address */
-        else if (!parse_ip_port_(mp_menu.address->text_70, ip, &port))
-        {
-            /* Invalid address. */
-            substate = SPMS_INVALID_ADDRESS;
-        }
-        else
-        {
-            console_log("mp_client_connection_request(%s:%d | %s)...\n", ip,
-                        port, mp_menu.nickname->text_70);
-            if (mp_client_connection_request(mp_->mp_client, ip, port,
-                                             mp_menu.nickname->text_70))
-            {
-                console_log("ok!\n");
-                /* Disable 'CONNECT' button */
-                Entity__set_anim(mp_menu.connect_button, ANI_MENUDISABLEDOWN);
-                // TODO: Disable edit boxes, player model buttons.
-                /* Switch substate to connecting */
-                substate = SPMS_CONNECTING;
-            }
-            else
-            {
-                substate = SPMS_CONNECTION_FAILED;
-            }
-        }
-        break;
-    }
-    case SPMS_INVALID_NAME:
-    case SPMS_INVALID_ADDRESS:
-    {
-        console_log("SPMS_INVALID_NAME or SPMS_INVALID_ADDRESS\n");
-        substate = SPMS_IDLE;
-        break;
-    }
-    case SPMS_CONNECTING:
-    {
-        console_log("SPMS_CONNECTING\n");
-        /* Monitor mp_client state */
-        MpClientState mcs = mp_client_get_state(mp_->mp_client);
-        console_log("client state: %d\n", mcs);
-        switch (mcs)
-        {
-        case MP_CLIENT_STATE_CONNECTING:
-        {
-            /* Just wait for connecting */
-            break;
-        }
-        case MP_CLIENT_STATE_CONNECTED:
-        {
-            // TODO: Move functionality from this case to SPMS_CONNECTED.
-            mp_->remote_players =
-                mem_alloc(sizeof(*mp_->remote_players) *
-                          mp_client_get_max_players_number(mp_->mp_client));
-            if (mp_->remote_players)
-            {
-                mem_set(mp_->remote_players, 0,
-                        sizeof(*mp_->remote_players) *
-                            mp_client_get_max_players_number(mp_->mp_client));
-                substate = SPMS_CONNECTED;
-                mp_->state_connected_substate = SCS_JUST_CONNECTED;
-                mp_->state = MULTIPLAYER_STATE_CONNECTED;
-            }
-            else
-            {
-                // TODO: Not exactly CONNECTION failed, but allocation failed.
-                substate = SPMS_CONNECTION_FAILED;
-            }
-            break;
-        }
-        default:
-        {
-            substate = SPMS_CONNECTION_FAILED;
-            break;
-        }
-        }
-        break;
-    }
-    case SPMS_CONNECTION_FAILED:
-    {
-        console_log("SPMS_CONNECTION_FAILED\n");
-        /* Enable 'CONNECT' button */
-        Entity__set_anim(mp_menu.connect_button, ANI_STAND);
-        substate = SPMS_IDLE;
-        break;
-    }
-    case SPMS_CONNECTED:
-    {
-        console_log("SPMS_CONNECTED\n");
-        break;
-    }
-    default:
-    {
-        console_log("default (%d)\n", substate);
-        break;
-    }
-    }
-    /* Send new SPMS back to asmp_play.lgc */
-    mp_menu.status->entity.entity.health = substate;
-}
-
-static void handle_multiplayer_state_connected_(void)
-{
-    switch (mp_->state_connected_substate)
-    {
-    case SCS_JUST_CONNECTED:
-    {
-        console_log("SCS_JUST_CONNECTED\n");
-        const char* map_name =
-            mp_client_get_server_configuration(mp_->mp_client)->map_name;
-        if (map_name && strlen(map_name))
-        {
-            Game__load_map(game_globals_get_game(), map_name);
-            mp_->state_connected_substate = SCS_WAIT_MAP_LOAD;
-        }
-        else
-        {
-            // TODO: Throw an error: map name is empty.
-        }
-        break;
-    }
-    case SCS_WAIT_MAP_LOAD:
-    {
-        console_log("SCS_WAIT_MAP_LOAD\n");
-        /* This intermediate state lasts one tick and is required for the
-         * game to load a map. */
-        mp_->state_connected_substate = SCS_MAP_JUST_LOADED;
-        break;
-    }
-    case SCS_MAP_JUST_LOADED:
-    {
-        console_log("SCS_MAP_JUST_LOADED\n");
-        /* Wait for player to be spawned */
-        EntPlayer* local_player = gameutils_get_player();
-        if (local_player && ((Entity*)local_player)->child)
-        {
-            mp_->state_connected_substate = SCS_PLAYER_JUST_SPAWNED;
-        }
-        break;
-    }
-    case SCS_PLAYER_JUST_SPAWNED:
-    {
-        console_log("SCS_PLAYER_JUST_SPAWNED\n");
-        mp_->state_connected_substate = SCS_PLAY;
-        break;
-    }
-    case SCS_PLAY:
-    {
-        /* Update local player's data in client structure */
-        MpPlayer* mp_local_player = mp_client_get_local_player(mp_->mp_client);
-        if (mp_local_player)
-        {
-            EntPlayer* local_palyer = gameutils_get_player();
-            if (local_palyer && local_palyer->ent_unit.ent_object.entity.child)
-            {
-                /* Update local player's data in client structure */
-                mp_local_player->mp_actor.x = ((Entity*)local_palyer)->x;
-                mp_local_player->mp_actor.y = ((Entity*)local_palyer)->y;
-                mp_local_player->mp_actor.z = ((Entity*)local_palyer)->z;
-                mp_local_player->mp_actor.velocity =
-                    ((Entity*)local_palyer)->velocity;
-                mp_local_player->mp_actor.direction_legs =
-                    ((Entity*)local_palyer)->direction;
-                mp_local_player->mp_actor.direction_torso =
-                    ((Entity*)local_palyer)->child->direction;
-                mp_local_player->mp_actor.health =
-                    ((Entity*)local_palyer)->health;
-            }
-        }
-        /* Reflect remote players changes in game */
-        handle_remote_players_();
-        break;
-    }
-    }
-}
-
-static void handle_remote_players_(void)
-{
-    for (int i = 0; i < mp_client_get_max_players_number(mp_->mp_client); i++)
-    {
-        /* Handle user-related changes */
-
-        /* Handle actor-related changes */
-        // TOOD: Add if-connected check.
-        RemotePlayer* rp = &mp_->remote_players[i];
-        switch (rp->state)
-        {
-        case RPS_NOT_SPAWNED:
-        {
-            if (rp->is_actor_info_changed)
-            {
-                /* Create remote player entity */
-                /* Copy default player vid */
-                rp->vid = *game_globals_get_game()
-                               ->vids[VID_009_UNIT_PLAYER_MALE_LEGS];
-                /* Create entity */
-                rp->entity = (EntPlayer*)gameutils_create_entity(
-                    &rp->vid, rp->mp_player.mp_actor.x,
-                    rp->mp_player.mp_actor.y, rp->mp_player.mp_actor.z);
-                rp->state = RPS_SPAWNING;
-            }
-            break;
-        }
-        case RPS_SPAWNING:
-        {
-            /* Just wait for entity (its legs and torso) to be spawned */
-            if (rp->entity && rp->entity->ent_unit.ent_object.entity.child)
-            {
-                /* Enable FFA */
-                // TODO: FFA status should be received from server.
-                ((Entity*)rp->entity)
-                    ->__vftable->action((Entity*)rp->entity, 0, ACT_SET_ARMY,
-                                        (void*)1, 0, 0);
-                rp->state = RPS_JUST_SPAWNED;
-            }
-            break;
-        }
-        case RPS_JUST_SPAWNED:
-        {
-            /* Load (prepare) all weapons for this player */
-            for (int j = 2; j <= 9; j++)
-            {
-                if (!((Entity*)rp->entity)
-                         ->__vftable->action(
-                             (Entity*)rp->entity, 0, ACT_HAVE_ITEM,
-                             (void*)(VID_260_OBJECT_UNK_MB_ALIEN_GUN + j), 0,
-                             0))
-                {
-                    ((Entity*)rp->entity)
-                        ->__vftable->action(
-                            (Entity*)rp->entity, 0, ACT_ADD_ITEM,
-                            (void*)(VID_260_OBJECT_UNK_MB_ALIEN_GUN + j), 0, 0);
+        if (!(fired & (1u << e->id)) && r->state == RS_SPAWNED) {
+            int applied = actor_shoot(&r->actor, local->game, e->shot.x, e->shot.y, (int)e->shot.weapon);
+            if (applied) {
+                fired |= 1u << e->id;
+                if (applied > 0) ++result.shots_applied;
+                else {
+                    ActorResult fault = {0}; int failed = 0; fault.entity = r->actor.entity;
+                    abandon(r, local->game, &fault, &failed); report(&result, e->id, r, &fault, failed);
+                    ++result.shots_discarded;
                 }
+                continue;
             }
-            /* Create entity with player's name text */
-            rp->nickname_entity =
-                (EntText*)game_globals_get_game()->__vftable->create_entity(
-                    game_globals_get_game(), 0,
-                    game_globals_get_game()->vids[VID_004_MENU_FONT_SMALL],
-                    ((Entity*)rp->entity)->x, ((Entity*)rp->entity)->y,
-                    ((Entity*)rp->entity)->z, 0, rp->entity);
-            ((Entity*)rp->nickname_entity)->x =
-                ((Entity*)rp->entity)->x + NICKNAME_X_OFFSET;
-            ((Entity*)rp->nickname_entity)->y =
-                ((Entity*)rp->entity)->y + NICKNAME_Y_OFFSET;
-            ((Entity*)rp->nickname_entity)->z = ((Entity*)rp->entity)->z;
-            rp->nickname_entity->text_70 = rp->mp_player.mp_user.name;
-            rp->nickname_entity->entity.entity.vid->field_40 = 0.0f;
-            Entity__add_child_end((Entity*)rp->entity,
-                                  (Entity*)rp->nickname_entity);
-            /* Remove text entity from list_menu to make game to apply camera
-               position to it */
-            List__remove_item_by_ptr((List*)&game_globals_get_game()->list_menu,
-                                     (Entity*)rp->nickname_entity);
-            rp->state = RPS_SPAWNED;
-            break;
         }
-        case RPS_SPAWNED:
-        {
-            if (rp->is_actor_info_changed)
-            {
-                const MpActor* actor = &rp->mp_player.mp_actor;
-                Entity__move((Entity*)rp->entity, actor->x, actor->y, actor->z);
-                Entity__rotate((Entity*)rp->entity, actor->direction_legs);
-                if (((Entity*)rp->entity)->child)
-                {
-                    Entity__rotate(((Entity*)rp->entity)->child,
-                                   actor->direction_torso);
-                }
-                ((Entity*)rp->entity)->velocity = actor->velocity;
-                EntPlayer__set_armed_weapon(rp->entity, actor->armed_weapon);
-                rp->is_actor_info_changed = false;
-                Entity__set_health((Entity*)rp->entity,
-                                   rp->mp_player.mp_actor.health);
-            }
-            break;
-        }
-        }
+        pending[keep++] = p;
     }
+    pending_count = keep;
+    result.shots_discarded += (unsigned int)InterlockedExchange(&event_drops, 0);
+    if (stopping && !any_live) InterlockedExchange(&stopped, 1);
+    return result;
 }
-
-static void draw_health_bars_(void)
-{
-    if (!mp_ || mp_->state_connected_substate != SCS_PLAY ||
-        !mp_->remote_players)
-    {
-        return;
-    }
-    for (int i = 0; i < mp_client_get_max_players_number(mp_->mp_client); i++)
-    {
-        if (mp_->remote_players[i].state == RPS_SPAWNED)
-        {
-            Entity* ent = (Entity*)mp_->remote_players[i].entity;
-            /* Calculate health bar position */
-            float x = ent->x - HEALTHBAR_WIDTH / 2;
-            float y = ent->y + HEALTHBAR_Y_OFFSET;
-            x -= game_globals_get_game()->camera_x;
-            y -= game_globals_get_game()->camera_y;
-            /* Calculate health bar value len */
-            uint8_t max_hp = 110; // TODO: Should be received from server.
-            float hp_len = mp_->remote_players[i].mp_player.mp_actor.health *
-                           (HEALTHBAR_WIDTH - 2) / max_hp;
-            /* Draw borders */
-            Render__draw_colored_rect(game_globals_get_render(), x, y,
-                                      x + HEALTHBAR_WIDTH, y + HEALTHBAR_HEIGHT,
-                                      HEALTHBAR_BORDERS_COLOR_ARGB);
-            /* Draw background */
-            Render__draw_colored_rect(game_globals_get_render(), x + 1, y + 1,
-                                      x + HEALTHBAR_WIDTH - 2,
-                                      y + HEALTHBAR_HEIGHT - 2,
-                                      HEALTHBAR_BACKGROUND_COLOR_ARGB);
-            /* Draw value*/
-            Render__draw_colored_rect(game_globals_get_render(), x + 1, y + 1,
-                                      x + 1 + hp_len, y + HEALTHBAR_HEIGHT - 2,
-                                      HEALTHBAR_HEALTH_COLOR_ARGB);
-        }
-    }
+int multiplayer_is_replica(uintptr_t entity) {
+    if (GetCurrentThreadId() != (DWORD)InterlockedCompareExchange(&game_thread, 0, 0)) return 0;
+    if (!enabled || !local_game) return 0;
+    for (unsigned int i = 0; i < MP_MAX_PEERS; ++i)
+        if (remote[i].actor.entity == entity && actor_live(&remote[i].actor, local_game)) return 1;
+    return 0;
 }
-
-bool multiplayer_init(void)
-{
-    if (!mp_)
-    {
-        mp_ = mem_alloc(sizeof(Multiplayer));
-        if (mp_)
-        {
-            mp_->mp_client = mp_client_create();
-            if (mp_->mp_client)
-            {
-                /* Set multiplayer client callbacks */
-                mp_client_set_user_sync_callback(mp_->mp_client,
-                                                 &on_user_info_updated);
-                mp_client_set_actor_sync_callback(mp_->mp_client,
-                                                  &on_actor_info_updated);
-                mp_client_set_actor_shoot_callback(mp_->mp_client,
-                                                   &on_actor_shoot);
-                if (set_hooks_())
-                {
-                    return true;
-                }
-                mp_client_destroy(mp_->mp_client);
-            }
-            mem_free(mp_);
-            mp_ = 0;
-        }
-    }
-    return mp_ != 0;
+void multiplayer_draw(void) {
+    if (GetCurrentThreadId() != (DWORD)InterlockedCompareExchange(&game_thread, 0, 0)) return;
+    if (!enabled || !local_game || InterlockedCompareExchange(&stop_requested, 0, 0)) return;
+    __try {
+        if (*(uintptr_t*)(base + STEAM_GAME_PTR_RVA) != local_game) return;
+        for (unsigned int i = 0; i < MP_MAX_PEERS; ++i)
+            if (remote[i].state == RS_SPAWNED && actor_live(&remote[i].actor, local_game))
+                ui_health_bar(local_game, remote[i].actor.entity, current[i].state.health);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
-
-void multiplayer_destroy(void)
-{
-    if (mp_)
-    {
-        mem_free(mp_);
-        mp_ = 0;
-    }
+void multiplayer_request_stop(void) {
+    InterlockedExchange(&stop_requested, 1);
+    /* Startup rollback before the first tick cannot own any native entity. */
+    if (!InterlockedCompareExchange(&game_thread, 0, 0)) InterlockedExchange(&stopped, 1);
 }
-
-void multiplayer_tick(void)
-{
-    if (!mp_)
-    {
-        // TODO: Looks like this check can be removed.
-        return;
-    }
-    mp_client_tick(mp_->mp_client); // TODO: Tick only if connected/connecting.
-
-    switch (mp_->state)
-    {
-    case MULTIPLAYER_STATE_NONE:
-    {
-        break;
-    }
-    case MULTIPLAYER_STATE_MAIN_MENU:
-    { /* Just wait for multiplayer menu to be loaded to change state to
-        MULTIPLAYER_STATE_MULTIPLAYER_MENU. State switches in
-        Game::load_menu hook */
-        break;
-    }
-    case MULTIPLAYER_STATE_MULTIPLAYER_MENU:
-    {
-        handle_multiplayer_state_multiplayer_menu_();
-        break;
-    }
-    case MULTIPLAYER_STATE_CONNECTED:
-    {
-        handle_multiplayer_state_connected_();
-        break;
-    }
-    }
+int multiplayer_stopped(void) { return InterlockedCompareExchange(&stopped, 0, 0) != 0; }
+int multiplayer_stop(void) {
+    if (!multiplayer_stopped()) return 0;
+    enabled = 0; base = local_game = local_player = 0; InterlockedExchange(&game_thread, 0);
+    AcquireSRWLockExclusive(&incoming_lock);
+    memset(incoming, 0, sizeof(incoming)); memset(current, 0, sizeof(current));
+    received_count = pending_count = 0; published_at = current_at = 0;
+    ReleaseSRWLockExclusive(&incoming_lock);
+    AcquireSRWLockExclusive(&outgoing_lock); outgoing_count = outgoing_head = 0; ReleaseSRWLockExclusive(&outgoing_lock);
+    return 1;
 }
-
-Multiplayer* multiplayer_instance(void)
-{
-    return mp_;
-}
+enum RemoteState multiplayer_remote_state(unsigned int id) { return id < MP_MAX_PEERS ? remote[id].state : RS_IDLE; }

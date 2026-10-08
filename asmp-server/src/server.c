@@ -7,7 +7,7 @@
 #include <string.h>
 #include "server.h"
 #include "multiplayer_protocol.h"
-#include "steam_state_protocol.h"
+#include "protocol.h"
 #include "utils/mem/mem.h"
 #include "utils/time/time.h"
 #include "epnet.h"
@@ -16,14 +16,13 @@
 
 typedef struct Player
 {
-    MpPlayer player;
+    MpUser user;
     bool is_connected;
-    uint32_t steam_session, steam_sequence;
-    bool steam_received;
+    uint32_t session, state_sequence;
+    bool state_received;
     uint32_t shot_sequence;
     bool shot_received;
     unsigned long user_sync_updatd_time_ms;
-    unsigned long actor_sync_updated_time_ms;
 } Player;
 
 typedef struct MpServer
@@ -34,7 +33,6 @@ typedef struct MpServer
     unsigned long prev_tick_time_ms;
     Player* players;
     unsigned long prev_users_sync_sent_time_ms;
-    unsigned long prev_actors_sync_sent_time_ms;
 } MpServer;
 
 
@@ -64,21 +62,14 @@ static void process_received_packets_(MpServer* server);
  */
 static void send_users_sync_(MpServer* server);
 
-/**
- * @brief Builds and sends actors sync packets to all connected clients.
- *
- * Each client will receive information about other connected clients.
- */
-static void send_actors_sync_(MpServer* server);
-
 
 static void process_connection_request_(MpServer* server, uint8_t sender,
                                         MpCPacketConnectionRequest* packet)
 {
     printf("Connection request from %d\n", sender);
     /* Store player name */
-    memset(server->players[sender].player.mp_user.name, 0, MP_MAX_NAME_LEN + 1);
-    memcpy(server->players[sender].player.mp_user.name, packet->name, packet->name_len);
+    memset(server->players[sender].user.name, 0, MP_MAX_NAME_LEN + 1);
+    memcpy(server->players[sender].user.name, packet->name, packet->name_len);
     /* Mark as connected */
     server->players[sender].is_connected = true;
     /* Send connection response */
@@ -99,9 +90,9 @@ static void process_received_packets_(MpServer* server)
         {
             if (ev.client_id < server->server_configuration.max_clients) {
                 Player* p = &server->players[ev.client_id];
-                uint32_t session = p->steam_session + 1;
+                uint32_t session = p->session + 1;
                 memset(p, 0, sizeof(*p));
-                p->steam_session = session ? session : 1;
+                p->session = session ? session : 1;
             }
             printf("Client %d joined (low-level)\n", ev.client_id);
             break;
@@ -137,70 +128,42 @@ static void process_received_packets_(MpServer* server)
             case MPT_C_USER_SYNC:
             {
                 if (length != sizeof(MpCPacketUserSync)) break;
-                server->players[sender].player.mp_user =
+                server->players[sender].user =
                     ((MpCPacketUserSync*)ev.data.packet.data)->mp_user;
                 server->players[sender].user_sync_updatd_time_ms =
                     server->tick_time_ms;
                 break;
             }
-            case MPT_C_ACTOR_SYNC:
+            case MPT_C_STATE:
             {
-                if (length != sizeof(MpCPacketActorSync)) break;
-                server->players[sender].player.mp_actor =
-                    ((MpCPacketActorSync*)ev.data.packet.data)->mp_actor;
-                server->players[sender].actor_sync_updated_time_ms =
-                    server->tick_time_ms;
-                break;
-            }
-            case MPT_C_SHOOT:
-            {
-                if (length != sizeof(MpCPacketShoot)) break;
-                /* Build and send shoot packet to all other clients */
-                MpSPacketShoot msps;
-                msps.player_id = sender;
-                msps.x = ((MpCPacketShoot*)ev.data.packet.data)->x;
-                msps.y = ((MpCPacketShoot*)ev.data.packet.data)->y;
-                for (uint8_t i = 0;
-                     i < server->server_configuration.max_clients; i++)
-                {
-                    if (i != sender && server->players[i].is_connected)
-                    {
-                        epnet_server_send(server->ns, i, MPT_S_SHOOT, &msps,
-                                          sizeof(msps));
-                    }
-                }
-                break;
-            }
-            case MPT_C_STEAM_STATE:
-            {
-                MpSteamState state;
+                MpState state;
                 Player* p = &server->players[sender];
-                if (!mp_steam_decode(ev.data.packet.data, length, &state) ||
-                    (p->steam_received && !mp_steam_newer(state.sequence, p->steam_sequence))) break;
-                p->steam_sequence = state.sequence;
-                p->steam_received = true;
-                uint8_t relay[MP_STEAM_RELAY_SIZE];
-                mp_steam_put(relay, sender);
-                mp_steam_put(relay + 4, p->steam_session);
-                memcpy(relay + 8, ev.data.packet.data, MP_STEAM_STATE_SIZE);
+                if (!mp_state_decode(ev.data.packet.data, length, &state) ||
+                    (p->state_received && !mp_sequence_newer(state.sequence, p->state_sequence))) break;
+                p->state_sequence = state.sequence;
+                p->state_received = true;
+                uint8_t relay[MP_STATE_RELAY_SIZE];
+                mp_put_u32(relay, sender);
+                mp_put_u32(relay + 4, p->session);
+                memcpy(relay + 8, ev.data.packet.data, MP_STATE_SIZE);
                 for (uint8_t i = 0; i < server->server_configuration.max_clients; ++i)
                     if (i != sender && server->players[i].is_connected)
-                        epnet_server_send(server->ns, i, MPT_S_STEAM_STATE, relay, sizeof(relay));
+                        epnet_server_send(server->ns, i, MPT_S_STATE, relay, sizeof(relay));
                 break;
             }
-            case MPT_C_STEAM_SHOT:
+            case MPT_C_SHOT:
             {
-                MpSteamShot shot;
+                MpShot shot;
                 Player* p = &server->players[sender];
-                if (!mp_steam_shot_decode(ev.data.packet.data, length, &shot) ||
-                    (p->shot_received && !mp_steam_newer(shot.sequence, p->shot_sequence))) break;
+                if (!mp_shot_decode(ev.data.packet.data, length, &shot) ||
+                    (p->shot_received && !mp_sequence_newer(shot.sequence, p->shot_sequence))) break;
                 p->shot_sequence = shot.sequence; p->shot_received = true;
-                uint8_t relay[MP_STEAM_SHOT_RELAY_SIZE];
-                mp_steam_put(relay, sender); mp_steam_put(relay + 4, p->steam_session);
-                memcpy(relay + 8, ev.data.packet.data, MP_STEAM_SHOT_SIZE);
+                uint8_t relay[MP_SHOT_RELAY_SIZE];
+                mp_put_u32(relay, sender); mp_put_u32(relay + 4, p->session);
+                memcpy(relay + 8, ev.data.packet.data, MP_SHOT_SIZE);
                 for (uint8_t i = 0; i < server->server_configuration.max_clients; ++i)
                     if (i != sender && server->players[i].is_connected)
-                        epnet_server_send(server->ns, i, MPT_S_STEAM_SHOT, relay, sizeof(relay));
+                        epnet_server_send(server->ns, i, MPT_S_SHOT, relay, sizeof(relay));
                 break;
             }
             default:
@@ -226,7 +189,7 @@ static void send_users_sync_(MpServer* server)
     for (uint8_t destination = 0;
          destination < server->server_configuration.max_clients; destination++)
     {
-        /* Build actors info sync packet only for connected players */
+        /* Build users sync packet only for connected players */
         if (!server->players[destination].is_connected)
         {
             continue;
@@ -235,7 +198,7 @@ static void send_users_sync_(MpServer* server)
         /* Reset num_items for the player */
         packet->num_items = 0;
 
-        /* Build actors sync packet for player with 'destination' id */
+        /* Build users sync packet for player with 'destination' id */
         for (uint8_t i = 0; i < server->server_configuration.max_clients; i++)
         {
             /* Ignore disconnected players */
@@ -254,64 +217,15 @@ static void send_users_sync_(MpServer* server)
                 continue;
             }
 
-            /* Add player's actor info to packet */
+            /* Add player's user info to packet */
             packet->items[packet->num_items].id = i;
             packet->items[packet->num_items].mp_user =
-                server->players[i].player.mp_user;
+                server->players[i].user;
             packet->num_items++;
         }
         /* Send the packet */
         epnet_server_send(
             server->ns, destination, MPT_S_USERS_SYNC, packet,
-            sizeof(*packet) + sizeof(packet->items[0]) * packet->num_items);
-    }
-}
-
-static void send_actors_sync_(MpServer* server)
-{
-    uint8_t buf[1024]; // TODO: Use precalculated size.
-    MpSPacketActorsSync* packet = (MpSPacketActorsSync*)buf;
-
-    for (uint8_t destination = 0;
-         destination < server->server_configuration.max_clients; destination++)
-    {
-        /* Build actors info sync packet only for connected players */
-        if (!server->players[destination].is_connected)
-        {
-            continue;
-        }
-
-        /* Reset num_items for the player */
-        packet->num_items = 0;
-
-        /* Build actors sync packet for player with 'destination' id */
-        for (uint8_t i = 0; i < server->server_configuration.max_clients; i++)
-        {
-            /* Ignore disconnected players */
-            if (!server->players[i].is_connected)
-            {
-                continue;
-            }
-            /* Ignore player who will receive this packet */
-            if (i == destination)
-            {
-                continue;
-            }
-            /* Ignore players who did not send actor sync yet */
-            if (server->players[i].actor_sync_updated_time_ms == 0)
-            {
-                continue;
-            }
-
-            /* Add player's actor info to packet */
-            packet->items[packet->num_items].id = i;
-            packet->items[packet->num_items].mp_actor =
-                server->players[i].player.mp_actor;
-            packet->num_items++;
-        }
-        /* Send the packet */
-        epnet_server_send(
-            server->ns, destination, MPT_S_ACTORS_SYNC, packet,
             sizeof(*packet) + sizeof(packet->items[0]) * packet->num_items);
     }
 }
@@ -384,12 +298,5 @@ void mp_server_tick(MpServer* server)
     {
         send_users_sync_(server);
         server->prev_users_sync_sent_time_ms = server->tick_time_ms;
-    }
-
-    if ((server->tick_time_ms - server->prev_actors_sync_sent_time_ms) >=
-        server->server_configuration.actor_sync_update_rate_ms)
-    {
-        send_actors_sync_(server);
-        server->prev_actors_sync_sent_time_ms = server->tick_time_ms;
     }
 }

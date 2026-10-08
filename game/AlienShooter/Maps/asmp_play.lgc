@@ -1,3 +1,4 @@
+// Steam adaptation of the original ASMP menu: FLoadData/FSaveData replace registry access.
 static string asmpStrName;
 static string asmpStrAddress;
 static string asmpStrConnecting;
@@ -18,6 +19,10 @@ static int targetEditbox = 0;
 #define SPMS_CONNECTING 4
 #define SPMS_CONNECTION_FAILED 5
 #define SPMS_CONNECTED 6
+#define SPMS_CONNECTION_LOST 7
+// C MenuStatus: 0 idle, 1 request, 2 bad name, 3 bad address,
+// 4 connecting, 5 failed, 6 release menu, 7 connection lost.
+static int asmpReturnStatus = 0;
 
 int connectingAnimationTimer = 0;
 ProcessConnectingText()
@@ -53,6 +58,10 @@ ProcessConnectingText()
   {
     asmpStrConnecting="Connection failed!";
   }
+  else if( hp==SPMS_CONNECTION_LOST )
+  {
+    asmpStrConnecting="Connection lost!";
+  }
   else if( hp==SPMS_CONNECTED )
   {
     MenuRelease();
@@ -68,7 +77,8 @@ CreateMultiplayerMenu()
   /* Male by default */
   MenuAction(706,0,ANI_MENUSTANDUP);
 
-  MenuAction(STATUS_BAR_VID, STATUS_BAR_NDIR, ACT_SET_HP, SPMS_IDLE);
+  MenuAction(STATUS_BAR_VID, STATUS_BAR_NDIR, ACT_SET_HP, asmpReturnStatus);
+  asmpReturnStatus = SPMS_IDLE;
 }
 
 TactMultiplayerMenu()
@@ -81,13 +91,13 @@ TactMultiplayerMenu()
   {
       MenuAction(706,0,ANI_MENUSTANDUP);
       MenuAction(707,0,ANI_MENUSTANDDOWN);
-      SetReg(GetDefaultRegPath(),"PlayerSex","male");
+      FSaveData("save://common/"+"PlayerSex","male");
     }
     else if( MenuNVidUnderCursor()==707 )
     {
       MenuAction(707,0,ANI_MENUSTANDUP);
       MenuAction(706,0,ANI_MENUSTANDDOWN);
-      SetReg(GetDefaultRegPath(),"PlayerSex","female");
+      FSaveData("save://common/"+"PlayerSex","female");
     }
 
 

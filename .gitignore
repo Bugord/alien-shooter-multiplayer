@@ -3,30 +3,20 @@
 !/.gitignore
 !/.gitmodules
 !/.clang-format
-!/Makefile
 !/README.md
-!/Doxyfile
 
 !/asmp-dll/
 /asmp-dll/*
 
-!/asmp-dll/Makefile
 !/asmp-dll/README.md
 
 !/asmp-dll/src
 
 !/asmp-server/
 /asmp-server/*
-!/asmp-server/Makefile
 !/asmp-server/README.md
 
 !/asmp-server/src
-
-!/asmp-exe-patcher/
-/asmp-exe-patcher/*
-!/asmp-exe-patcher/src
-!/asmp-exe-patcher/Makefile
-!/asmp-exe-patcher/README.md
 
 !/common/
 
@@ -37,36 +27,27 @@
 !/game/AlienShooter/Maps/
 /game/AlienShooter/Maps/*
 !/game/AlienShooter/Maps/asmp_mainmenu.men
-!/game/AlienShooter/Maps/asmp_play.lgc
 !/game/AlienShooter/Maps/asmp_play.men
-!/game/AlienShooter/Maps/MAINMENU.LGC
 # Source scripts for the existing multiplayer menu on Steam.
-!/game/AlienShooter/Maps/steam_mainmenu.lgc
-!/game/AlienShooter/Maps/steam_asmp_play.lgc
-
-!/test
-/test/*
-!/test/Makefile
-!/test/README.md
-!/test/src/
-!/test/eztest
+!/game/AlienShooter/Maps/mainmenu.lgc
+!/game/AlienShooter/Maps/asmp_play.lgc
 
 # Steam port investigation: scripts only; reports stay local.
 !/analysis/
 /analysis/*
 !/analysis/*.py
-!/steam-diagnostics/
-/steam-diagnostics/*
-!/steam-diagnostics/README.md
-!/steam-diagnostics/*.ps1
-!/steam-diagnostics/src/
-/steam-diagnostics/src/*
-!/steam-diagnostics/src/*.c
-!/steam-diagnostics/src/*.h
-!/steam-diagnostics/tests/
-/steam-diagnostics/tests/*
-!/steam-diagnostics/tests/*.c
-!/steam-diagnostics/tests/*.h
+!/diagnostics/
+/diagnostics/*
+!/diagnostics/README.md
+!/diagnostics/*.ps1
+!/diagnostics/src/
+/diagnostics/src/*
+!/diagnostics/src/*.c
+!/diagnostics/src/*.h
+!/diagnostics/tests/
+/diagnostics/tests/*
+!/diagnostics/tests/*.c
+!/diagnostics/tests/*.h
 
 # Local logs, reverse-engineering databases and history backups.
 /.local-history/
