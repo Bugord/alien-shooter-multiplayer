@@ -6,22 +6,40 @@ param(
     [ValidateRange(480, 1080)][int]$Height = 600,
     [string]$ServerAddress = '',
     [ValidateRange(1, 65535)][int]$Port = 27020,
-    [ValidateLength(1, 15)][string]$Name = 'SteamTester'
+    [ValidateLength(1, 15)][string]$Name = 'SteamTester',
+    [ValidateSet('default', 'client-a', 'client-b')][string]$Instance = 'default',
+    [string]$RuntimeDirectory = ''
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'test-session.ps1')
+$sessionLock = Enter-TestSessionLock
+try {
 $build = Join-Path $PSScriptRoot 'build'
-$game = Join-Path $PSScriptRoot 'test-game\AlienShooter.exe'
-if (!(Test-Path -LiteralPath $game)) { throw 'Run prepare-test-game.ps1 first.' }
-if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'test-game\asmp-diag-test.marker'))) { throw 'Test-copy marker missing.' }
-if (!(Test-Path -LiteralPath (Join-Path $build 'asmp-diag.dll'))) { throw 'Run build.ps1 first.' }
-if (@(Get-Process AlienShooter -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $game }).Count) {
-    throw 'Close the existing diagnostic game copy before starting the next session.'
+$gameDirectory = Assert-TestDirectory (Get-TestGameDirectory $Instance) $PSScriptRoot
+$game = Join-Path $gameDirectory 'AlienShooter.exe'
+$runtime = $build
+if ($RuntimeDirectory) {
+    if ($Instance -eq 'default') { throw 'RuntimeDirectory is reserved for pair instances.' }
+    $runtime = Assert-TestDirectory $RuntimeDirectory (Join-Path $build 'two-client')
+    if ([IO.Path]::GetFileName($runtime) -ine $Instance) { throw 'Runtime directory must end with the selected instance name.' }
+    if (!(Test-Path -LiteralPath (Join-Path $runtime 'asmp-runtime.marker'))) { throw 'Runtime marker missing.' }
+    if ((Get-FileHash -LiteralPath (Join-Path $runtime 'asmp-diag.dll')).Hash -ne (Get-FileHash -LiteralPath (Join-Path $build 'asmp-diag.dll')).Hash) { throw 'Runtime DLL differs from current build.' }
 }
+if (!(Test-Path -LiteralPath $game)) { throw 'Run prepare-test-game.ps1 first.' }
+if (!(Test-Path -LiteralPath (Join-Path $gameDirectory 'asmp-diag-test.marker'))) { throw 'Test-copy marker missing.' }
+if (!(Test-Path -LiteralPath (Join-Path $runtime 'asmp-diag.dll'))) { throw 'Run build.ps1 first.' }
+$otherGame = ''
+if ($Instance -ne 'default') {
+    $otherInstance = if ($Instance -eq 'client-a') { 'client-b' } else { 'client-a' }
+    $otherGame = Join-Path (Get-TestGameDirectory $otherInstance) 'AlienShooter.exe'
+}
+Assert-TestGameIdle $gameDirectory -AllGames:($Instance -eq 'default') -AllowedOtherGame $otherGame
+if ($Instance -ne 'default' -and !$RuntimeDirectory) { throw 'Pair instances require an isolated RuntimeDirectory.' }
 if (!(Get-Process steam -ErrorAction SilentlyContinue)) { throw 'Open Steam and sign in before starting the test copy.' }
 $multiplayerMode = $Multiplayer -or !!$ServerAddress
 if ($DummyActor -and $multiplayerMode) { throw 'DummyActor and multiplayer modes are mutually exclusive.' }
-$maps = Join-Path $PSScriptRoot 'test-game\Maps'
-$backup = Join-Path $PSScriptRoot 'test-game\asmp-menu-backup'
+$maps = Join-Path $gameDirectory 'Maps'
+$backup = Join-Path $gameDirectory 'asmp-menu-backup'
 if ($multiplayerMode) {
     New-Item -ItemType Directory -Path $backup -Force | Out-Null
     foreach ($file in @('MAINMENU.LGC', 'mainmenu.men')) {
@@ -42,7 +60,7 @@ if ($multiplayerMode) {
     }
 }
 # Use the engine's own display settings in the test copy.
-$configuration = Join-Path $PSScriptRoot 'test-game\AlienShooter.cfg'
+$configuration = Join-Path $gameDirectory 'AlienShooter.cfg'
 $text = [IO.File]::ReadAllText($configuration)
 $mode = if ($Fullscreen) { 1 } else { 0 }
 $text = [regex]::Replace($text, '(?m)^DefaultScreenX=.*$', "DefaultScreenX=$Width")
@@ -50,7 +68,7 @@ $text = [regex]::Replace($text, '(?m)^DefaultScreenY=.*$', "DefaultScreenY=$Heig
 $text = [regex]::Replace($text, '(?m)^DefaultFullScreenMode=.*$', "DefaultFullScreenMode=$mode")
 [IO.File]::WriteAllText($configuration, $text, [Text.Encoding]::ASCII)
 # Steam loads these saved values before falling back to CFG defaults.
-$options = Join-Path $PSScriptRoot 'test-game\saves\options.ini'
+$options = Join-Path $gameDirectory 'saves\options.ini'
 $optionsText = if (Test-Path -LiteralPath $options) { [IO.File]::ReadAllText($options) } else { "[graph]`r`n" }
 if ($optionsText -notmatch '(?m)^\[graph\]\s*$') { $optionsText += "`r`n[graph]`r`n" }
 foreach ($entry in @(@('ScreenX', $Width), @('ScreenY', $Height), @('FullScreen', $mode))) {
@@ -63,7 +81,7 @@ foreach ($entry in @(@('ScreenX', $Width), @('ScreenY', $Height), @('FullScreen'
     }
 }
 [IO.File]::WriteAllText($options, $optionsText, [Text.Encoding]::ASCII)
-$stop = Join-Path $build 'asmp-diag.stop'
+$stop = Join-Path $runtime 'asmp-diag.stop'
 if (Test-Path -LiteralPath $stop) { Remove-Item -LiteralPath $stop }
 $previousServer = $env:ASMP_DIAG_SERVER
 $previousPort = $env:ASMP_DIAG_PORT
@@ -76,7 +94,7 @@ try {
     $env:ASMP_DIAG_NAME = $Name
     $env:ASMP_DIAG_MULTIPLAYER = if ($multiplayerMode) { '1' } else { '' }
     $env:ASMP_DIAG_DUMMY = if ($DummyActor) { '1' } else { '' }
-    $launchArguments = @($game, (Join-Path $build 'asmp-diag.dll'))
+    $launchArguments = @($game, (Join-Path $runtime 'asmp-diag.dll'))
     if (!$Fullscreen) { $launchArguments += @("$Width", "$Height") }
     & (Join-Path $build 'asmp-diag-launch.exe') @launchArguments
     if ($LASTEXITCODE) { throw "Diagnostic launcher failed ($LASTEXITCODE)." }
@@ -90,5 +108,6 @@ try {
 if ($ServerAddress) { Write-Output 'The client connects and loads the server map automatically.' }
 elseif ($Multiplayer) { Write-Output 'Open Multiplayer in the main menu; enter a nickname and IPv4:port, then connect.' }
 else { Write-Output 'Start a campaign or survival level for the read-only diagnostics.' }
-Write-Output "Combat check: fire, switch weapons, collect ammo, take damage and heal. Logs: $build\logs\asmp-diag-<PID>.log"
+Write-Output "Combat check: fire, switch weapons, collect ammo, take damage and heal. Logs: $runtime\logs\asmp-diag-<PID>.log"
 if ($DummyActor) { Write-Output 'Dummy test: enter a level, walk and turn. A second actor appears after 2 seconds, follows with an X offset of 80 and is removed after 60 seconds.' }
+} finally { if ($sessionLock) { $sessionLock.Dispose() } }

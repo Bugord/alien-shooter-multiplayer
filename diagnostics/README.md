@@ -59,6 +59,51 @@ The stop script verifies helper executable paths and process start times.
 Helper logs are in `build/logs/observer-<timestamp>.log`; game logs are in
 `build/logs/asmp-diag-<PID>.log`. Game data and reports stay local and ignored.
 
+## Two game copies on one PC: launch verification
+
+The first implementation checkpoint supports preparing and manually launching
+two isolated copies. Both Steam processes have been launched together; the user
+confirmed both windows and closed them. A shared-server launch/stop scenario and
+bidirectional gameplay checks are subsequent checkpoints.
+
+Each copy has its own CFG, saves, menu backup, DLL directory, logs and stop file.
+The default `test-game` and the Mirror commands above retain their paths.
+Exit both pair windows before recreating the runtime directories below. Leave
+games belonging to another test session open and defer this test until they exit.
+
+```powershell
+.\diagnostics\prepare-test-game.ps1 -Instance client-a
+.\diagnostics\prepare-test-game.ps1 -Instance client-b
+# Run after building and with Steam open. This probe starts read-only clients.
+foreach ($instance in @('client-a', 'client-b')) {
+    $runtime = Join-Path $PWD "diagnostics\build\two-client\probe\$instance"
+    New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $runtime 'asmp-runtime.marker') -Value 'ASMP isolated runtime'
+    Copy-Item -LiteralPath '.\diagnostics\build\asmp-diag.dll' -Destination (Join-Path $runtime 'asmp-diag.dll') -Force
+    .\diagnostics\start-test.ps1 -Instance $instance -RuntimeDirectory $runtime
+}
+```
+
+The launcher preserves the engine's actual render size (720×480 in the verified
+run, with an 800×600 requested bound). Use Alt+Tab to switch windows. Close them
+normally after the probe. Each `probe/client-a` or `probe/client-b` directory
+contains `logs/asmp-diag-<PID>.log`; an `asmp-diag.stop` beside that client's DLL
+stops only its diagnostic hooks. The old `build/asmp-diag.stop` does not affect
+these isolated DLLs.
+
+Preparation and launch share an exclusive file lock. Preparing an active copy
+and relaunching the same copy are refused. A pair launch permits only the other
+pair copy to be open; unknown process paths are refused. Use a shell with the
+same permissions as the games. Pair DLL directories must end with the selected
+instance name, carry the runtime marker and contain the current build's DLL.
+Do not rebuild while a game or helper is using the build output.
+
+The script checks run as part of `build.ps1` and can also run independently:
+
+```powershell
+.\diagnostics\tests\test_instance_scripts_test.ps1
+```
+
 ## Multiplayer menu and two PCs
 
 Run `build/asmp-server.exe 27020` on the host PC. On each PC build and prepare a

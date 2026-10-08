@@ -52,6 +52,7 @@
 /diagnostics/tests/*
 !/diagnostics/tests/*.c
 !/diagnostics/tests/*.h
+!/diagnostics/tests/*.ps1
 
 # Local logs, reverse-engineering databases and history backups.
 /.local-history/
