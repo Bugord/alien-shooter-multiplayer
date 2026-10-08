@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "profile.h"
+#include "window_mode.h"
 
 /* Resolve the address in the target process, including forwarded kernel exports. */
 static uintptr_t remote_load_library(DWORD pid)
@@ -76,6 +77,8 @@ int wmain(int argc, wchar_t** argv)
     HANDLE thread = NULL;
     void* remote = NULL;
     int result = 1;
+    int debugging = 0;
+    uintptr_t image = 0;
     if (argc != 3 && argc != 5) { fwprintf(stderr, L"Usage: asmp-diag-launch.exe <test-game\\AlienShooter.exe> <asmp-steam-diag.dll> [window-width window-height]\n"); return 2; }
     int width = 0, height = 0;
     if (argc == 5) {
@@ -98,8 +101,30 @@ int wmain(int argc, wchar_t** argv)
     if (!hash_file_sha256(game, digest) || strcmp(digest, STEAM_EXE_SHA256)) { fwprintf(stderr, L"Unsupported executable hash.\n"); return 2; }
     if (swprintf_s(command, MAX_PATH + 3, L"\"%s\"", game) < 0) return 2;
     startup.cb = sizeof(startup);
-    if (!CreateProcessW(game, command, NULL, NULL, FALSE, 0, NULL, directory, &startup, &process)) goto done;
+    if (!CreateProcessW(game, command, NULL, NULL, FALSE, width ? DEBUG_ONLY_THIS_PROCESS : 0,
+        NULL, directory, &startup, &process)) goto done;
     printf("Started test game PID %lu\n", process.dwProcessId);
+    if (width) {
+        debugging = 1;
+        if (!DebugSetProcessKillOnExit(FALSE)) goto done;
+        DEBUG_EVENT event;
+        if (!WaitForDebugEvent(&event, 10000)) goto done;
+        int patched = 0;
+        if (event.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT && event.dwProcessId == process.dwProcessId) {
+            image = (uintptr_t)event.u.CreateProcessInfo.lpBaseOfImage;
+            patched = window_mode_limit_width(process.hProcess, image, (unsigned int)width);
+            if (event.u.CreateProcessInfo.hFile) CloseHandle(event.u.CreateProcessInfo.hFile);
+        }
+        if (!patched) {
+            fprintf(stderr, "Render startup signature or memory update failed; test process stopped.\n");
+            TerminateProcess(process.hProcess, 1);
+        }
+        if (!ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE)) goto done;
+        if (!DebugActiveProcessStop(process.dwProcessId)) goto done;
+        debugging = 0;
+        if (!patched) goto done;
+        printf("Render mode width cap: %d (process memory only)\n", width);
+    }
     WaitForInputIdle(process.hProcess, 30000);
     DWORD exit_code = 0;
     if (!GetExitCodeProcess(process.hProcess, &exit_code) || exit_code != STILL_ACTIVE) {
@@ -122,11 +147,22 @@ int wmain(int argc, wchar_t** argv)
     DWORD module = 0;
     if (!GetExitCodeThread(thread, &module) || !module) { fprintf(stderr, "LoadLibraryW failed.\n"); goto done; }
     printf("Diagnostic DLL loaded at %08lX. Logs are beside the DLL in logs/.\n", module);
-    if (width && !size_test_window(process.dwProcessId, width, height)) {
-        fprintf(stderr, "Requested window size could not be applied; game and diagnostics remain running.\n");
+    if (width) {
+        int render_width = 0, render_height = 0;
+        if (window_mode_render_size(process.hProcess, image, &render_width, &render_height)) {
+            printf("Engine render size: %d x %d\n", render_width, render_height);
+            if (render_width > width || render_height > height)
+                fprintf(stderr, "Adapter chose a larger supported mode; preserving the complete frame.\n");
+            if (!size_test_window(process.dwProcessId, render_width, render_height))
+                fprintf(stderr, "Window could not be matched to the render size.\n");
+        } else fprintf(stderr, "Render size unavailable; window left at the engine's size.\n");
     }
     result = 0;
 done:
+    if (debugging && process.dwProcessId) {
+        TerminateProcess(process.hProcess, 1); /* Never leave this new test process paused. */
+        DebugActiveProcessStop(process.dwProcessId);
+    }
     if (result) fprintf(stderr, "Launcher failed (Win32 error %lu).\n", GetLastError());
     if (remote) VirtualFreeEx(process.hProcess, remote, 0, MEM_RELEASE);
     if (thread) CloseHandle(thread);

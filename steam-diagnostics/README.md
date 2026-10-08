@@ -41,13 +41,25 @@ root in PowerShell:
 Network tests use localhost UDP; run the build outside a sandbox that blocks
 loopback networking.
 
-Tests launch in an 800x600 window by default. `start-test.ps1 -Width 1024 -Height 768`
-changes the size; `-Fullscreen` requests fullscreen. The script changes the
+Windowed tests request a render width cap of 800 by default. The engine chooses
+a supported adapter mode within that cap, favoring the desktop aspect ratio;
+the chosen mode can be smaller than the requested dimensions.
+`start-test.ps1 -Width 1024 -Height 768` requests a larger mode;
+`-Fullscreen` uses the engine's normal fullscreen behavior. The script changes the
 copied CFG defaults and `test-game/saves/options.ini`, whose saved values take precedence.
-The Steam engine can choose a larger render resolution despite requested defaults.
-For windowed launches, the launcher also resizes the game's visible client area
-with Windows APIs and prints its measured size. Check menu hit targets and mouse
-aiming during gameplay when using a smaller window.
+The Steam renderer normally overrides width/height with a mode chosen using a
+hardcoded 1280 width cap. For a windowed launch, the launcher uses the initial
+process-creation debug event to change that cap in process memory before the
+renderer runs. It validates the surrounding instructions and modifies only the
+four-byte immediate operand, restores page protection and flushes the instruction
+cache. It then detaches before normal game initialization and DLL loading.
+This does not change the EXE file or scale an already rendered frame.
+
+After initialization, the launcher reads the actual render dimensions and matches
+the visible client area to them. Resizing the window below the render dimensions
+would crop the frame and is deliberately avoided. The requested height is a
+preferred bound, not a forced adapter mode. The launcher prints both engine and
+window dimensions; check the complete menu/shop and mouse aiming during gameplay.
 Game saves also belong to the copied directory.
 
 To start a local server, a headless observer client and the windowed game client:
@@ -86,7 +98,7 @@ not implemented; restart the test client to reconnect.
 The game is copied into `steam-diagnostics/test-game/` with the original EXE
 name and bytes preserved. `steam_appid.txt` identifies the game to Steam during
 direct launch. The launcher requires the test-copy marker and checks the EXE
-hash. It starts the copy normally and loads the diagnostic DLL using
+hash. It starts the copy and loads the diagnostic DLL using
 LoadLibraryW in that process. The Steam installation is only read.
 
 Logs: `steam-diagnostics/build/logs/asmp-diag-<PID>.log`.
@@ -136,6 +148,9 @@ State-sync checks exercise two clients through the actual UDP server, full-width
 signed values, all stored ammo, malformed handshakes/packets, registration before
 relay, sequence ordering/wrap, absence of self-echo, inactive state on stale
 sampling, peer expiry and reconnection with a reused client ID.
+Window-mode checks cover startup instruction guards, changing only the width
+operand, restoring executable page protection, rejecting changed instructions,
+and reading the actual render dimensions. Fullscreen does not apply this patch.
 
 ## Git workflow
 
@@ -143,6 +158,7 @@ sampling, peer expiry and reconnection with a reused client ID.
 the memory-reading stage lives in `feature/steam-diagnostics`; update interception
 lives in `feature/steam-tick-hook`, based on that diagnostic work. Follow with
 `feature/steam-state-sync` for state exchange, based on the tick hook, and
+`feature/steam-windowed-render` for matching smaller render modes to the window.
 separate branches for the Steam layout and multiplayer port. Merge reviewed stages into
 `develop`; use `release/*` when preparing a tested release and `hotfix/*` for
 release fixes. Use `feature/*` for subsequent development stages.

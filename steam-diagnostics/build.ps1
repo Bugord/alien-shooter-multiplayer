@@ -30,8 +30,11 @@ try {
     $netObjects = @($netCommon + $netClient | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
     Compile ($flags + $netIncludes + @('/LD', "$root\src\diag.c", "$root\src\state_client.c", "$root\src\probe.c", "$root\src\tick_hook.c", "$root\src\hash.c", '/Fe:asmp-steam-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     Compile ($flags + $netIncludes + @("$root\src\state_peer.c", "$root\src\state_client.c", '/Fe:state-peer.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
-    Compile ($flags + @("$root\src\launcher.c", "$root\src\hash.c", '/Fe:asmp-diag-launch.exe', '/link', 'bcrypt.lib', 'user32.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
+    Compile ($flags + @("$root\src\launcher.c", "$root\src\window_mode.c", "$root\src\hash.c", '/Fe:asmp-diag-launch.exe', '/link', 'bcrypt.lib', 'user32.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     if (!$SkipTests) {
+        Compile ($flags + @("$root\tests\window_mode_test.c", "$root\src\window_mode.c", '/Fe:window-mode-test.exe', '/link', '/MACHINE:X86'))
+        & .\window-mode-test.exe
+        if ($LASTEXITCODE) { throw 'Window mode checks failed.' }
         $serverSupport = @("$repo\asmp-server\src\server.c", "$repo\common\epnet\src\server\epnet_server.c", "$repo\common\src\utils\mem\mem.c", "$repo\common\src\utils\time\time.c")
         Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $serverSupport)
         $serverObjects = @($serverSupport | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
