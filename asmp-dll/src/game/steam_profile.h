@@ -16,7 +16,21 @@
 #define STEAM_GAME_VTABLE_RVA 0xDB034u
 #define STEAM_MAN_VTABLE_RVA 0xDA438u
 #define STEAM_PLAYER_ACCESSOR_RVA 0x3B5F0u
+/* Entity factory (GAME slot 8), MAN destructor (MAN slot 0), and MAN methods. */
+#define STEAM_ACTOR_CREATE_RVA 0x40680u
+#define STEAM_ACTOR_DESTROY_RVA 0x34440u
 #define STEAM_ACTOR_ACTION_RVA 0x34470u
+#define STEAM_ACTOR_MOVE_RVA 0x6BC20u
+#define STEAM_ACTOR_ROTATE_RVA 0x6BD50u
+#define STEAM_ACTOR_WEAPON_RVA 0x34BA0u
+#define STEAM_ACTOR_HEALTH_RVA 0x6BFB0u
+/* Factory switch: entity class 7 (MAN) -> index table (classes start at 2)
+   -> jump table entry 4, whose arm constructs MAN. */
+#define STEAM_MAN_CLASS 7u
+#define STEAM_MAN_JUMP_INDEX 4u
+#define STEAM_CLASS_INDEX_TABLE_RVA 0x394B4u
+#define STEAM_CLASS_JUMP_TABLE_RVA 0x39484u
+#define STEAM_MAN_CONSTRUCT_RVA 0x3934Cu
 #define STEAM_RENDER_DEVICE_OFFSET 0xE28u
 #define STEAM_WINDOW_PROC_RVA 0x40290u
 #define STEAM_END_SCENE_SLOT 42u

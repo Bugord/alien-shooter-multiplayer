@@ -16,9 +16,9 @@ versions, field ranges and older sequence numbers.
 | File | Contents |
 | --- | --- |
 | [src/main.c](src/main.c) | Entry point and tick loop |
-| [src/server.c](src/server.c) | Join handshake, validation and relay |
+| [src/server.c](src/server.c) | Hello/welcome handshake, roster broadcast, validation and relay |
 
-Packet formats are in [common/src/protocol.h](../common/src/protocol.h) and
-[multiplayer_protocol.h](../common/src/multiplayer_protocol.h). Rebuild the server
+Packet formats are in [common/src/protocol.h](../common/src/protocol.h): state, shot, hello, welcome and
+roster packets, each with explicit big-endian encoding. Rebuild the server
 together with all clients when the format changes. See
 [Architecture and behavior](../docs/architecture.md) for the protocol details.
