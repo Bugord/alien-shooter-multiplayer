@@ -39,6 +39,7 @@ try {
         & "$root\tests\test_instance_scripts_test.ps1"
         & "$root\tests\test_resource_isolation_test.ps1"
         & "$root\tests\bash_wrappers_test.ps1"
+        & "$root\tests\two_client_session_test.ps1"
         Compile ($flags + @("$root\tests\window_mode_test.c", "$root\src\window_mode.c", '/Fe:window-mode-test.exe', '/link', '/MACHINE:X86'))
         & .\window-mode-test.exe
         if ($LASTEXITCODE) { throw 'Window mode checks failed.' }

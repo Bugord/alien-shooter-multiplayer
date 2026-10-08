@@ -8,7 +8,8 @@ param(
     [ValidateRange(1, 65535)][int]$Port = 27020,
     [ValidateLength(1, 15)][string]$Name = 'SteamTester',
     [ValidateSet('default', 'client-a', 'client-b')][string]$Instance = 'default',
-    [string]$RuntimeDirectory = ''
+    [string]$RuntimeDirectory = '',
+    [string]$LaunchResultPath = ''
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'test-session.ps1')
@@ -86,10 +87,12 @@ $previousPort = $env:ASMP_DIAG_PORT
 $previousName = $env:ASMP_DIAG_NAME
 $previousDummy = $env:ASMP_DIAG_DUMMY
 $previousMultiplayer = $env:ASMP_DIAG_MULTIPLAYER
+$previousLaunchResult = $env:ASMP_LAUNCH_RESULT
 try {
     $env:ASMP_DIAG_SERVER = $ServerAddress
     $env:ASMP_DIAG_PORT = "$Port"
     $env:ASMP_DIAG_NAME = $Name
+    $env:ASMP_LAUNCH_RESULT = $LaunchResultPath
     $env:ASMP_DIAG_MULTIPLAYER = if ($multiplayerMode) { '1' } else { '' }
     $env:ASMP_DIAG_DUMMY = if ($DummyActor) { '1' } else { '' }
     $launchArguments = @($game, (Join-Path $runtime 'asmp-diag.dll'))
@@ -101,6 +104,7 @@ try {
     $env:ASMP_DIAG_NAME = $previousName
     $env:ASMP_DIAG_DUMMY = $previousDummy
     $env:ASMP_DIAG_MULTIPLAYER = $previousMultiplayer
+    $env:ASMP_LAUNCH_RESULT = $previousLaunchResult
 }
 if ($ServerAddress) { Write-Output 'The client connects and loads the server map automatically.' }
 elseif ($Multiplayer) { Write-Output 'Open Multiplayer in the main menu; enter a nickname and IPv4:port, then connect.' }

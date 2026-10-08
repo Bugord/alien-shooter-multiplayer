@@ -64,8 +64,8 @@ Helper logs are in `build/logs/observer-<timestamp>.log`; game logs are in
 The first two implementation checkpoints support preparing and manually launching
 two isolated copies, with a new pair of DLL directories for each test. Both Steam
 processes have been launched together; the user confirmed both windows and closed
-them. A shared-server launch/stop scenario and bidirectional gameplay checks are
-subsequent checkpoints.
+them. A shared-server launch/stop scenario is the managed session below; bidirectional
+gameplay checks are the live checklist at its end.
 
 Each copy has its own CFG, saves, menu backup, DLL directory, logs and stop file.
 The default `test-game` and the Mirror commands above retain their paths.
@@ -160,12 +160,87 @@ bash diagnostics/start-clients.sh 192.168.1.10 27020 Alice Bob
 Use `--help` on either script. From another directory, pass the full script path,
 for example `bash /d/Projects/Mods/alien-shooter-multiplayer/diagnostics/start-clients.sh`.
 Close the games normally when finished. These are manual launch conveniences;
-they do not add a session manifest, per-client restart or managed pair shutdown.
+the managed session below adds the manifest, readiness checks, per-client restart
+and paired shutdown.
 
 `tests/bash_wrappers_test.ps1` checks Bash syntax and real Bash-to-PowerShell
 argument forwarding with temporary stubs, including paths with spaces, literal
 names, invalid ports and propagated exit codes. It runs in `build.ps1` when Git
 Bash is installed. No games or relay are started by that test.
+
+## Managed two-client session
+
+One command starts the relay and both real clients; another stops them. Prepare
+`client-a` and `client-b` once, build with `-Server`, keep Steam open and close any
+other game of this project first.
+
+```powershell
+.\diagnostics\start-two-client-test.ps1 [-NameA LocalA] [-NameB LocalB] [-Port 27020]
+.\diagnostics\start-two-client-test.ps1 -RestartClient A   # relaunch one exited client
+.\diagnostics\stop-two-client-test.ps1 [-CloseGames [-Force]] [-TimeoutSeconds 15]
+```
+
+Start refuses an older `network-session.json`, a running Mirror peer, a busy UDP
+port, any running `AlienShooter` or a previous session whose processes are still
+alive or cannot be identified. It prepares fresh DLL directories, starts the relay
+and waits until it owns the UDP port, then launches A and B one at a time. A client
+counts as started only when its log shows `NET_READY` and an accepted map load
+(`# SESSION map_load_result=1`) within `-TimeoutSeconds` (default 90); loader
+success alone is not enough. The launcher records its result as JSON
+(`ASMP_LAUNCH_RESULT`, written beside each client's DLL as `launch-result.json`)
+with the PID, EXE path and creation time, so no output is parsed. Windows are
+never found by name; identity is always PID + image path + creation time.
+
+State lives in `build/two-client/session.json` (written through a temporary file
+and replaced atomically): session id, relay and client identities, runtime
+directories, DLL hash, ports, names and a per-process state
+(`starting/running/failed/mod-stopped/stopped`). Relay logs are `server.out.log`
+and `server.err.log` in the session directory; game logs are in each
+client's `logs/`. If anything fails, the mod is rolled back in the clients that
+did start, the relay is stopped, the games and manifest stay for diagnosis, and
+the command reports the failing stage.
+
+Stop writes both clients' `asmp-diag.stop` files, waits for `cleanup=1` in each
+log and only then stops the relay. The game windows stay open unless `-CloseGames`
+is given (a normal close request first; `-Force` terminates only a process whose
+identity still matches). A game in the background may not tick: if cleanup times
+out, bring that window to the front and run stop again; the relay is kept until
+both clients are clean. Stop is repeatable, skips processes that already exited,
+and never touches a process whose PID was reused or whose path/time cannot be
+read; such items are listed and remain in the manifest.
+
+`-RestartClient A|B` relaunches an exited client against the live relay in the same
+session and leaves the other client alone. A client stopped with `-CloseGames`
+requires a full new start (the relay is stopped by then).
+
+`tests/two_client_session_test.ps1` (part of `build.ps1`) covers the manifest,
+identity and PID reuse, readiness parsing, launcher failure/timeout paths,
+partial and repeated stop, `-CloseGames -Force`, concurrent commands and the JSON
+launcher result, using substituted launch operations and harmless fake processes.
+Real native starts are covered only by the live checklist.
+
+### Live checklist (two windows, one keyboard and mouse)
+
+1. Start the pair; both clients show a different peer ID in their logs and each
+   sees exactly one remote replica.
+2. Move, stop, aim and change weapons in both directions; keep one window in the
+   background for at least 60 seconds and confirm ticks and packets continue.
+3. Only the active window reacts to input: switch with a held key, check cursor
+   capture and Alt+Tab; no input reaches both windows.
+4. Ammo-consuming shots replay on the other side; compare local ammo use, received
+   events and `SHOTS applied` with what is visible.
+5. Damage/healing of an owner shows on the replica; owner death removes it while
+   the survivor stays in its own world.
+6. A leaves to the menu: B loses A; A reconnects: exactly one replica again.
+   Repeat for B and for closing and restarting one process (`-RestartClient`).
+7. Stop the relay: both return to Multiplayer with a lost-connection message;
+   after a new start both can connect again.
+8. A stop file for A alone unloads only A's hooks. Full and repeated stop report
+   cleanup truthfully.
+9. No stray helpers or settings crossover afterwards; the original Steam install
+   is unchanged.
+
+None of this has been run live yet; mark each item after a real session.
 
 ## Multiplayer menu and two PCs
 
