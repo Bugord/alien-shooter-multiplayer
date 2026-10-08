@@ -1,9 +1,12 @@
 #ifndef ASMP_DIAG_PROBE_H
 #define ASMP_DIAG_PROBE_H
 #include <stdint.h>
+#include "profile.h"
 typedef struct Snapshot {
     uintptr_t game, army, player;
-    uint32_t army_index, health, animation;
+    uint32_t army_index, animation;
+    int32_t health, weapon_slot, weapon_vid, current_ammo, current_ammo_raw;
+    uint32_t stored_ammo[STEAM_STORED_AMMO_COUNT];
     unsigned int direction;
     float x, y, z;
 } Snapshot;

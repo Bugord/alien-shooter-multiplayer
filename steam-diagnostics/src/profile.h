@@ -21,6 +21,21 @@
 #define STEAM_ENTITY_ANIM_OFFSET 0x4Cu
 #define STEAM_ENTITY_DIRECTION_OFFSET 0x50u
 #define STEAM_ENTITY_HEALTH_OFFSET 0x58u
+/* MAN::set_armed_weapon at 0x434BA0 follows player VID -> linked weapon VID.
+   The linked VID index is slot + 10; slot 10 passed to the setter aliases 0. */
+#define STEAM_ENTITY_VID_OFFSET 0x1Cu
+#define STEAM_VID_LINKED_OFFSET 0x5Cu
+#define STEAM_VID_INDEX_OFFSET 0x04u
+#define STEAM_WEAPON_VID_FIRST 10
+#define STEAM_WEAPON_SLOT_COUNT 10u
+/* UNIT::action(0x5C), 0x47292E: signed fixed-point ammo / 64, toward zero.
+   MAN::action(0x5C), 0x4346EE: inactive slot N uses player+0x94+N*4.
+   The selected slot's stored count is stale until switching weapons. */
+#define STEAM_CURRENT_AMMO_OFFSET 0x84u
+#define STEAM_AMMO_SCALE 64
+#define STEAM_STORED_AMMO_BASE_OFFSET 0x94u
+#define STEAM_STORED_AMMO_FIRST_SLOT 1u
+#define STEAM_STORED_AMMO_COUNT 9u
 
 enum DiagStatus { DIAG_STARTING, DIAG_WAITING, DIAG_SAMPLING, DIAG_REJECTED, DIAG_ERROR };
 int hash_file_sha256(const wchar_t* path, char output[65]);

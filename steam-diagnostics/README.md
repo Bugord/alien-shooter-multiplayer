@@ -3,7 +3,7 @@
 `build/asmp-steam-diag.dll` is a separate x86 DLL that checks loading and reads player state for the analyzed
 Steam Alien Shooter executable (app 33100). It does not enable multiplayer,
 install hooks, call game functions, or patch the executable. It logs game/player
-pointers, coordinates, health, animation and direction every 250 ms when values
+pointers, coordinates, health, weapon slot, ammunition, animation and direction every 250 ms when values
 change, with a heartbeat every five seconds.
 
 Only EXE SHA256 `4DD960458D6FFFCC9D00E9E7BA492739FB6D530D4C0B302F1C6BAA8B55D9B142`
@@ -38,6 +38,16 @@ Expected header: `PROFILE accepted Steam 33100; no hooks installed`.
 In the menu, `no-player`/`no-army` is normal. Start a level, move the player and
 check that rows with `state=player` show changing x/y and plausible health.
 
+For the combat check, fire several shots with a weapon that consumes ammo,
+switch between available weapons, collect ammunition, take damage and collect
+health. Compare the log with the HUD. `weapon_slot` is zero-based (0..9),
+`weapon_vid` is the linked weapon definition index (10..19); -1 means unknown.
+`current_ammo` is the selected weapon's live counter, computed from signed
+`current_ammo_raw / 64` with truncation toward zero. `stored_ammo_slot_1` through
+`stored_ammo_slot_9` are the other stored counters. The selected slot's stored
+value can be stale until a weapon switch; use `current_ammo` for that weapon.
+The pistol may not consume ammo. Sampling can skip events shorter than 250 ms.
+
 ```powershell
 Get-Content .\steam-diagnostics\build\logs\asmp-diag-<PID>.log -Wait
 ```
@@ -50,7 +60,8 @@ does not alter those settings. Do not manually unload it while it is sampling.
 ## Validation
 
 The build runs two native checks: reading synthetic game/player memory,
-including startup and stale-pointer states; and loading the actual DLL into an
+including weapon switches, separate live/stored ammo, signed health and ammo,
+startup and stale-pointer states; and loading the actual DLL into an
 unsupported executable, verifying that its worker rejects it and finishes.
 These checks do not substitute for observing movement in the real game.
 

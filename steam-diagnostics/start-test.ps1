@@ -11,4 +11,4 @@ $stop = Join-Path $build 'asmp-diag.stop'
 if (Test-Path -LiteralPath $stop) { Remove-Item -LiteralPath $stop }
 & (Join-Path $build 'asmp-diag-launch.exe') $game (Join-Path $build 'asmp-steam-diag.dll')
 if ($LASTEXITCODE) { throw "Diagnostic launcher failed ($LASTEXITCODE)." }
-Write-Output "Start a level and move the player. Inspect $build\logs\asmp-diag-<PID>.log"
+Write-Output "Start a level; fire, switch weapons, collect ammo, take damage and heal. Inspect $build\logs\asmp-diag-<PID>.log"

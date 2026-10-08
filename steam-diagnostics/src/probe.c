@@ -7,6 +7,8 @@
 enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output)
 {
     Snapshot s = {0};
+    s.weapon_slot = -1;
+    s.weapon_vid = -1;
     enum ProbeResult result = PROBE_OK;
     /* No game function calls or writes. SEH contains invalid/transient pointers. */
     __try {
@@ -25,7 +27,23 @@ enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output)
                     s.x = *(float*)(s.player + STEAM_ENTITY_X_OFFSET);
                     s.y = *(float*)(s.player + STEAM_ENTITY_Y_OFFSET);
                     s.z = *(float*)(s.player + STEAM_ENTITY_Z_OFFSET);
-                    s.health = *(uint32_t*)(s.player + STEAM_ENTITY_HEALTH_OFFSET);
+                    s.health = *(int32_t*)(s.player + STEAM_ENTITY_HEALTH_OFFSET);
+                    s.current_ammo_raw = *(int32_t*)(s.player + STEAM_CURRENT_AMMO_OFFSET);
+                    s.current_ammo = s.current_ammo_raw / STEAM_AMMO_SCALE;
+                    for (unsigned int i = 0; i < STEAM_STORED_AMMO_COUNT; ++i) {
+                        s.stored_ammo[i] = *(uint32_t*)(s.player + STEAM_STORED_AMMO_BASE_OFFSET +
+                            (i + STEAM_STORED_AMMO_FIRST_SLOT) * sizeof(uint32_t));
+                    }
+                    uintptr_t vid = *(uintptr_t*)(s.player + STEAM_ENTITY_VID_OFFSET);
+                    if (vid) {
+                        uintptr_t weapon = *(uintptr_t*)(vid + STEAM_VID_LINKED_OFFSET);
+                        if (weapon) {
+                            s.weapon_vid = *(int32_t*)(weapon + STEAM_VID_INDEX_OFFSET);
+                            if (s.weapon_vid >= STEAM_WEAPON_VID_FIRST &&
+                                s.weapon_vid < STEAM_WEAPON_VID_FIRST + (int32_t)STEAM_WEAPON_SLOT_COUNT)
+                                s.weapon_slot = s.weapon_vid - STEAM_WEAPON_VID_FIRST;
+                        }
+                    }
                     s.animation = *(uint32_t*)(s.player + STEAM_ENTITY_ANIM_OFFSET);
                     s.direction = *(unsigned char*)(s.player + STEAM_ENTITY_DIRECTION_OFFSET);
                     if (!_finite(s.x) || !_finite(s.y) || !_finite(s.z)) result = PROBE_BAD_COORDS;

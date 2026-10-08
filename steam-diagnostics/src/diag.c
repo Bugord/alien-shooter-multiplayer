@@ -59,7 +59,10 @@ static DWORD WINAPI run(LPVOID unused)
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { goto fail; }
     fprintf(log, "PROFILE accepted Steam 33100; no hooks installed\n");
-    fprintf(log, "milliseconds,state,game,player,army,x,y,z,health,animation,direction\n");
+    fprintf(log, "milliseconds,state,game,player,army,x,y,z,health,animation,direction,weapon_slot,weapon_vid,current_ammo,current_ammo_raw");
+    for (unsigned int i = 0; i < STEAM_STORED_AMMO_COUNT; ++i)
+        fprintf(log, ",stored_ammo_slot_%u", i + STEAM_STORED_AMMO_FIRST_SLOT);
+    fprintf(log, "\n");
     InterlockedExchange(&status, DIAG_WAITING);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     while (GetFileAttributesW(stop_path) == INVALID_FILE_ATTRIBUTES) {
@@ -67,9 +70,13 @@ static DWORD WINAPI run(LPVOID unused)
         enum ProbeResult result = probe_read(base, &sample);
         DWORD now = GetTickCount();
         if (result != previous || (result == PROBE_OK && memcmp(&last, &sample, sizeof(sample))) || now - last_log >= 5000) {
-            fprintf(log, "%lu,%s,%08lX,%08lX,%u,%.3f,%.3f,%.3f,%u,%u,%u\n", now,
+            fprintf(log, "%lu,%s,%08lX,%08lX,%u,%.3f,%.3f,%.3f,%d,%u,%u,%d,%d,%d,%d", now,
                 probe_result_name(result), (unsigned long)sample.game, (unsigned long)sample.player,
-                sample.army_index, sample.x, sample.y, sample.z, sample.health, sample.animation, sample.direction);
+                sample.army_index, sample.x, sample.y, sample.z, sample.health, sample.animation, sample.direction,
+                sample.weapon_slot, sample.weapon_vid, sample.current_ammo, sample.current_ammo_raw);
+            for (unsigned int i = 0; i < STEAM_STORED_AMMO_COUNT; ++i)
+                fprintf(log, ",%u", sample.stored_ammo[i]);
+            fprintf(log, "\n");
             last_log = now;
             last = sample;
             previous = result;
