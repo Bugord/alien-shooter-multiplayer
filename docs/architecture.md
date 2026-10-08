@@ -63,8 +63,11 @@ Native entity operations and UI drawing stay on the game thread.
 Bounded queues drop work rather than blocking that thread. Captured shots wait
 in a game-thread staging array and move to the worker queue when its lock is
 free; only a full buffer drops a shot, and drops are counted. Remote positions
-ease toward the latest received value each game tick (about 60 ms time
-constant); a jump over 160 units or a gap over 250 ms snaps.
+are interpolated (`pose_buffer.c`): samples are placed on the sender's game-tick
+timeline, played back 100 ms behind the newest one at the measured tick rate, and
+extrapolated for at most 100 ms when starved. A jump over 160 units resets the
+history. Both threads use the performance-counter clock (`game/clock.h`) and the
+worker polls every 2 ms at 1 ms timer resolution, so packets are not batched.
 
 Health belongs to each player's local owner. Local damage to its replica is
 suppressed, while damage to the real local player is unchanged. This replaces

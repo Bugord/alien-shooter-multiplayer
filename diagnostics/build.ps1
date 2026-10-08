@@ -24,7 +24,7 @@ $netIncludes = @("/I$repo\common\epnet\include", "/I$repo\common\epnet\src\commo
 $netCommon = @(Get-ChildItem "$repo\common\epnet\src\common\*.c" | ForEach-Object FullName)
 $netClient = @("$repo\common\epnet\src\client\epnet_client.c")
 $actorSources = @("$repo\asmp-dll\src\game\actor.c", "$repo\asmp-dll\src\game\actor_api.c")
-$multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\asmp-dll\src\game\action_hook.c", "$repo\asmp-dll\src\game\ui.c", "$repo\asmp-dll\src\game\display_hook.c", "$repo\asmp-dll\src\multiplayer\session.c")
+$multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", "$repo\asmp-dll\src\game\action_hook.c", "$repo\asmp-dll\src\game\ui.c", "$repo\asmp-dll\src\game\display_hook.c", "$repo\asmp-dll\src\multiplayer\session.c")
 $hookSources = @("$repo\asmp-dll\src\game\slot_hook.c", "$repo\asmp-dll\src\game\tick_hook.c", "$repo\asmp-dll\src\game\world_hook.c")
 $runtimeSource = "$repo\asmp-dll\src\multiplayer\runtime.c"
 Push-Location $build
@@ -32,7 +32,7 @@ try {
     # Compile the existing networking library separately with its warning level.
     Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $netCommon + $netClient)
     $netObjects = @($netCommon + $netClient | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
-    Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @($runtimeSource) + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\diag_tick.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
+    Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @($runtimeSource) + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\diag_tick.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'winmm.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     Compile ($flags + $netIncludes + @("$root\src\state_peer.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:state-peer.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
     Compile ($flags + @("$root\src\launcher.c", "$root\src\window_mode.c", "$root\src\hash.c", '/Fe:asmp-diag-launch.exe', '/link', 'bcrypt.lib', 'user32.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     if (!$SkipTests) {
@@ -49,6 +49,7 @@ try {
         Compile ($flags + $netIncludes + @("$root\tests\state_sync_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:state-sync-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
         & .\state-sync-test.exe
         if ($LASTEXITCODE) { throw 'State sync checks failed.' }
+        Compile ($flags + @("$root\tests\pose_buffer_test.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", '/Fe:pose-buffer-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + @("$root\tests\probe_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:probe-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + @("$root\tests\dll_load_test.c", '/Fe:dll-load-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\tick_hook_test.c", "$root\src\diag_tick.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\dummy_actor.c", '/Fe:tick-hook-test.exe', '/link', '/MACHINE:X86'))
@@ -67,6 +68,7 @@ try {
         if ($LASTEXITCODE) { throw 'Multiplayer coordinator checks failed.' }
         & .\dummy-actor-test.exe
         if ($LASTEXITCODE) { throw 'Dummy actor lifecycle checks failed.' }
+        & .\pose-buffer-test.exe
         & .\probe-test.exe
         if ($LASTEXITCODE) { throw 'Probe checks failed.' }
         & .\dll-load-test.exe "$build\asmp-diag.dll"

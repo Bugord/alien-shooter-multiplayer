@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <mmsystem.h>
 #include <stdio.h>
 #include <share.h>
 #include <stdint.h>
@@ -9,6 +10,7 @@
 #include "diag_tick.h"
 #include "../../asmp-dll/src/game/display_hook.h"
 #include "../../asmp-dll/src/multiplayer/runtime.h"
+#include "../../asmp-dll/src/game/clock.h"
 
 static HMODULE self;
 static HANDLE worker;
@@ -82,7 +84,7 @@ static DWORD WINAPI run(LPVOID unused)
     enum ProbeResult previous = (enum ProbeResult)-1;
     Snapshot last = {0};
     DWORD last_log = 0;
-    DWORD last_stats = GetTickCount();
+    DWORD last_stats = clock_ms();
     int hook_attempted = 0;
     int runtime_attempted = 0;
     (void)unused;
@@ -180,15 +182,19 @@ static DWORD WINAPI run(LPVOID unused)
     }
     InterlockedExchange(&status, DIAG_WAITING);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    /* 1 ms timer resolution: the worker polls the socket and sends states
+       every couple of milliseconds instead of in 16-31 ms bursts. */
+    timeBeginPeriod(1);
     while (GetFileAttributesW(stop_path) == INVALID_FILE_ATTRIBUTES) {
         FrameSample frames[64];
         unsigned int n = diag_tick_drain(frames, 64);
         for (unsigned int i = 0; i < n; ++i) log_frame(log, &frames[i], &last, &previous, &last_log);
-        DWORD now = GetTickCount();
+        DWORD now = clock_ms();
         if (runtime_attempted) runtime_worker_step(now);
         if (now - last_stats >= 5000) { log_stats(log); last_stats = now; }
-        Sleep(20);
+        Sleep(2);
     }
+    timeEndPeriod(1);
     int cleanup_ok = 1;
     if (runtime_attempted) cleanup_ok = runtime_stop(5000u);
     else {

@@ -112,11 +112,11 @@ int main(void) {
     --event.shot.world_epoch; s->current_ammo = 1;
     multiplayer_receive_shot(&event, 2221);
     CHECK(step(2230).shots_applied == 1 && shots == 2); /* Last two-unit attack. */
-    /* Easing: a small move is only partly applied, a large one snaps. */
-    s->x = 575; step(2234);
-    CHECK(*(float*)(entity + 0x30) > 555.5f && *(float*)(entity + 0x30) < 575.0f);
-    s->x = 2000; step(2236); CHECK(*(float*)(entity + 0x30) == 2000);
-    s->x = 555; step(2237); CHECK(*(float*)(entity + 0x30) == 555);
+    /* Interpolation: a small move is played back behind the newest sample, a large one snaps. */
+    s->sequence = 1; s->tick = 40; s->x = 575; step(2234);
+    CHECK(*(float*)(entity + 0x30) >= 555.0f && *(float*)(entity + 0x30) < 575.0f);
+    s->sequence = 2; s->tick = 48; s->x = 2000; step(2236); CHECK(*(float*)(entity + 0x30) == 2000);
+    s->sequence = 3; s->tick = 56; s->x = 555; step(2237); CHECK(*(float*)(entity + 0x30) == 555);
     /* Captures wait in game-thread staging until a tick moves them to the worker queue. */
     MpShot capture; CHECK(!multiplayer_take_local_shot(&capture));
     multiplayer_capture_shot(200, 300, 1); CHECK(!multiplayer_take_local_shot(&capture));

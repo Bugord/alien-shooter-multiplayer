@@ -1,4 +1,5 @@
 #include "tick_hook.h"
+#include "clock.h"
 typedef int (__fastcall* TickFn)(void*, void*);
 static struct {
     SlotHook hook;
@@ -12,7 +13,7 @@ static int __fastcall on_tick(void* game, void* unused) {
     LONG call = InterlockedIncrement(&tick.calls);
     if (!result) {
         InterlockedIncrement(&tick.active);
-        if (InterlockedCompareExchange(&tick.enabled, 0, 0)) tick.notify(game, call, GetTickCount());
+        if (InterlockedCompareExchange(&tick.enabled, 0, 0)) tick.notify(game, call, clock_ms());
         InterlockedDecrement(&tick.active);
     }
     return result;
