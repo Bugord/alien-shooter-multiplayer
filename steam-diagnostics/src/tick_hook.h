@@ -2,6 +2,7 @@
 #define ASMP_DIAG_TICK_HOOK_H
 #include <windows.h>
 #include "probe.h"
+#include "dummy_actor.h"
 
 #define FRAME_QUEUE_CAPACITY 1024u
 typedef struct FrameSample {
@@ -9,6 +10,7 @@ typedef struct FrameSample {
     LONG tick;
     enum ProbeResult result;
     Snapshot snapshot;
+    ActorResult actor;
 } FrameSample;
 typedef struct TickStats {
     LONG calls, captured, dropped, installed;
@@ -22,4 +24,7 @@ enum TickHookResult tick_hook_install(void* volatile* slot, void* expected, uint
 enum TickHookResult tick_hook_stop(void);
 unsigned int tick_hook_drain(FrameSample* output, unsigned int capacity);
 TickStats tick_hook_stats(void);
+int tick_hook_enable_dummy(uintptr_t image_base);
+void tick_hook_request_dummy_stop(void);
+int tick_hook_dummy_stopped(void);
 #endif

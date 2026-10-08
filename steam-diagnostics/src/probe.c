@@ -42,11 +42,19 @@ enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output)
                             if (s.weapon_vid >= STEAM_WEAPON_VID_FIRST &&
                                 s.weapon_vid < STEAM_WEAPON_VID_FIRST + (int32_t)STEAM_WEAPON_SLOT_COUNT)
                                 s.weapon_slot = s.weapon_vid - STEAM_WEAPON_VID_FIRST;
+                            uintptr_t child = *(uintptr_t*)(s.player + STEAM_ENTITY_CHILD_OFFSET);
+                            if (child && *(uintptr_t*)(child + STEAM_ENTITY_VID_OFFSET) == weapon) {
+                                s.torso_present = 1;
+                                s.torso_direction = *(unsigned char*)(child + STEAM_ENTITY_DIRECTION_OFFSET);
+                            }
                         }
                     }
                     s.animation = *(uint32_t*)(s.player + STEAM_ENTITY_ANIM_OFFSET);
                     s.direction = *(unsigned char*)(s.player + STEAM_ENTITY_DIRECTION_OFFSET);
-                    if (!_finite(s.x) || !_finite(s.y) || !_finite(s.z)) result = PROBE_BAD_COORDS;
+                    s.velocity = *(float*)(s.player + STEAM_ENTITY_VELOCITY_OFFSET);
+                    s.moving = !!(*(uint32_t*)(s.player + STEAM_ENTITY_FLAGS_OFFSET) & STEAM_ENTITY_MOVING_FLAG);
+                    if (!_finite(s.x) || !_finite(s.y) || !_finite(s.z) || !_finite(s.velocity))
+                        result = PROBE_BAD_COORDS;
                 }
             }
         }

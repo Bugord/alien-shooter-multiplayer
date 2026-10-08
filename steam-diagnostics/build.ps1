@@ -28,7 +28,7 @@ try {
     # Compile the existing networking library separately with its warning level.
     Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $netCommon + $netClient)
     $netObjects = @($netCommon + $netClient | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
-    Compile ($flags + $netIncludes + @('/LD', "$root\src\diag.c", "$root\src\state_client.c", "$root\src\probe.c", "$root\src\tick_hook.c", "$root\src\hash.c", '/Fe:asmp-steam-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
+    Compile ($flags + $netIncludes + @('/LD', "$root\src\diag.c", "$root\src\state_client.c", "$root\src\probe.c", "$root\src\tick_hook.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-steam-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     Compile ($flags + $netIncludes + @("$root\src\state_peer.c", "$root\src\state_client.c", '/Fe:state-peer.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
     Compile ($flags + @("$root\src\launcher.c", "$root\src\window_mode.c", "$root\src\hash.c", '/Fe:asmp-diag-launch.exe', '/link', 'bcrypt.lib', 'user32.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     if (!$SkipTests) {
@@ -43,7 +43,10 @@ try {
         if ($LASTEXITCODE) { throw 'State sync checks failed.' }
         Compile ($flags + @("$root\tests\probe_test.c", "$root\src\probe.c", '/Fe:probe-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + @("$root\tests\dll_load_test.c", '/Fe:dll-load-test.exe', '/link', '/MACHINE:X86'))
-        Compile ($flags + @("$root\tests\tick_hook_test.c", "$root\src\tick_hook.c", "$root\src\probe.c", '/Fe:tick-hook-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + @("$root\tests\tick_hook_test.c", "$root\src\tick_hook.c", "$root\src\probe.c", "$root\src\dummy_actor.c", '/Fe:tick-hook-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + @("$root\tests\dummy_actor_test.c", "$root\src\dummy_actor.c", '/Fe:dummy-actor-test.exe', '/link', '/MACHINE:X86'))
+        & .\dummy-actor-test.exe
+        if ($LASTEXITCODE) { throw 'Dummy actor lifecycle checks failed.' }
         & .\probe-test.exe
         if ($LASTEXITCODE) { throw 'Probe checks failed.' }
         & .\dll-load-test.exe "$build\asmp-steam-diag.dll"

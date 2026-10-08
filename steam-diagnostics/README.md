@@ -5,10 +5,13 @@ analyzed Steam Alien Shooter executable (app 33100). It intercepts slot 3 of the
 MAP_STEAM vtable in process memory. The original update method is called first,
 with its object pointer and return value preserved. After a zero return, the
 hook reads player state on the game thread and queues a snapshot. It does not
-enable multiplayer or change player state. The EXE on disk is unchanged.
+enable multiplayer or change player state by default. The optional dummy test
+below creates one engine-owned actor for lifecycle validation. The EXE on disk
+is unchanged.
 
 A separate worker writes changed snapshots: game/player pointers, coordinates,
-health, weapon slot, ammunition, animation, direction and update-call number
+health, weapon slot, ammunition, animation, leg/torso directions, movement intent,
+velocity and update-call number
 (`tick`). It checks the queue every 20 ms and writes statistics every five seconds.
 Unchanged snapshots are omitted except for a heartbeat every five seconds.
 
@@ -78,13 +81,66 @@ games, run a server and use `start-test.ps1 -ServerAddress <IPv4> -Port 27020 -N
 on each PC with its own game copy and Steam account. No remote player is created
 in the game at this stage: received state is logged for verification.
 
+### Second actor lifecycle test
+
+```powershell
+.\steam-diagnostics\start-test.ps1 -DummyActor
+```
+
+Enter a campaign or survival level. After two seconds of valid gameplay, the
+game thread creates one MAN through the Steam engine's factory. It follows the
+local character with an X offset of 80, supplying velocity, movement intent and
+independent leg/torso directions. Native MAN logic selects idle/run and advances
+the actor's animation; replication never sets animation IDs, frame cursors or
+animation timers. This follows the legacy `RPS_SPAWNED` implementation in
+`asmp-dll/src/multiplayer/multiplayer.c`, using verified Steam methods and layout.
+It is removed through the engine's destructor after 60 seconds.
+Menus and the shop do not spawn an actor. Returning to the shop, changing maps,
+or requesting diagnostic shutdown also ends the actor's lifetime.
+The actor is a local test double; received network state does not control it.
+Weapon changes, shots and shared health are not synchronized by this test.
+
+The private 0x490-byte VID is copied from the actual local MAN, whose Steam class
+number is 7. MAP's class table maps it to jump-table index 4 and arm 0x43934C,
+which calls the MAN constructor at 0x434350. Its counters are reset and its creation/deletion scripts disabled
+to avoid executing the local player's map scripts. Its storage remains in the
+DLL while the engine owns the entity. Factory (0x440680), MAN destructor
+(0x434440), movement (0x46BC20) and rotation (0x46BD50)
+signatures and factory/destructor vtable entries are validated before enabling
+the test. The normal EXE hash check still applies.
+
+Before dereferencing a saved actor pointer, the code finds it in the current
+map's entity list and checks its private VID. It discards an actor removed by
+the engine or a pointer reused for another object. No entity is destroyed from
+the logging/network worker. A shutdown marker waits for the next game tick to
+remove the actor before restoring the hook; a paused game must resume for that
+cleanup. An engine exception disables further dummy updates and is recorded as
+`fault`; any surviving actor remains owned by the map until it unloads.
+
+`# DUMMY event=spawned|removed|lost|rejected|fault` records lifecycle transitions,
+including the failure reason and observed source class for a rejected spawn.
+`# DUMMY_POSE` records applied speed/intent, native animation/frame (read only),
+and torso aim once per second. ENTITY velocity is at +0x20; moving intent is
+flag 0x80 at +0x28. Only this flag is changed, preserving other engine state.
+MAN::action(0x82), at 0x4345F9, selects run (2) or idle (0) using velocity;
+ENTITY's update at 0x46FDA0 advances and wraps frames using engine timing.
+Check visually that a complete second character appears, animates its legs
+while running, stops when standing, follows torso aim, disappears after a minute,
+and does not replace control of the local
+player. Automated lifecycle checks use synthetic engine callbacks; a live game
+test is required to validate the mapped Steam methods and rendering.
+
 The DLL sends the latest post-update snapshot from its worker at most once every
 33 ms. `# NET_READY` confirms the application handshake, `# NET_REMOTE` records a
 peer's state, and `# NET_STATS` counts sent, received and rejected packets.
-The 84-byte versioned packet has explicit big-endian words, IEEE 754 float
-coordinates, signed 32-bit health/live ammo/weapon slot, animation, direction,
-tick and nine stored ammo counters. Process pointers are never sent. The server
-adds the sender ID and session generation, validates length/version/coordinates,
+The 100-byte version-2 packet has explicit big-endian words, IEEE 754 float
+coordinates and velocity, signed 32-bit health/live ammo/weapon slot, animation,
+leg/torso directions, movement intent, torso presence, tick and nine stored ammo
+counters. Animation IDs are diagnostic state, not applied by the dummy test;
+frame numbers and animation timers are never sent. Version 1 is rejected, so
+rebuild both clients and the server together. Process pointers are never sent.
+The server adds the sender ID and session generation, validates length/version,
+finite coordinates/speed and pose fields,
 and rejects duplicate or older state sequences, including across sequence wrap.
 New sessions allow sequence restart when a client reconnects.
 

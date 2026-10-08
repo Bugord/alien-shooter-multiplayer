@@ -27,6 +27,15 @@
 #define STEAM_ENTITY_ANIM_OFFSET 0x4Cu
 #define STEAM_ENTITY_DIRECTION_OFFSET 0x50u
 #define STEAM_ENTITY_HEALTH_OFFSET 0x58u
+#define STEAM_ENTITY_CHILD_OFFSET 0x40u
+#define STEAM_ENTITY_FRAME_FIRST_OFFSET 0x08u
+#define STEAM_ENTITY_FRAME_CURRENT_OFFSET 0x0Cu
+#define STEAM_ENTITY_FRAME_LAST_OFFSET 0x10u
+#define STEAM_ENTITY_VELOCITY_OFFSET 0x20u
+#define STEAM_ENTITY_FLAGS_OFFSET 0x28u
+/* ENTITY::calculate_movement (0x46E7B0) accelerates with this flag set;
+   otherwise it decelerates. MAN::action(0x82) chooses idle/run from velocity. */
+#define STEAM_ENTITY_MOVING_FLAG 0x80u
 /* MAN::set_armed_weapon at 0x434BA0 follows player VID -> linked weapon VID.
    The linked VID index is slot + 10; slot 10 passed to the setter aliases 0. */
 #define STEAM_ENTITY_VID_OFFSET 0x1Cu

@@ -83,9 +83,10 @@ void state_client_update(StateClient* c, unsigned long now) {
                 (session != p->session && !mp_steam_newer(session, p->session)))) { ++c->rejected; continue; }
             p->state = state; p->session = session; p->received_at = now; p->present = 1;
             ++c->received;
-            if (c->log) fprintf(c->log, "# NET_REMOTE id=%u session=%u seq=%u active=%u tick=%u x=%.3f y=%.3f z=%.3f health=%d weapon=%d ammo=%d animation=%u direction=%u\n",
+            if (c->log) fprintf(c->log, "# NET_REMOTE id=%u session=%u seq=%u active=%u tick=%u x=%.3f y=%.3f z=%.3f health=%d weapon=%d ammo=%d animation=%u direction=%u velocity=%.3f moving=%u torso_present=%u torso_direction=%u\n",
                 id, session, state.sequence, state.active, state.tick, state.x, state.y, state.z,
-                state.health, state.weapon_slot, state.current_ammo, state.animation, state.direction);
+                state.health, state.weapon_slot, state.current_ammo, state.animation, state.direction,
+                state.velocity, state.moving, state.torso_present, state.torso_direction);
         }
     }
     if (c->joined && !c->ready && now - c->requested_at >= 500) {

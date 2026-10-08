@@ -8,7 +8,8 @@ typedef struct Snapshot {
     int32_t health, weapon_slot, weapon_vid, current_ammo, current_ammo_raw;
     uint32_t stored_ammo[STEAM_STORED_AMMO_COUNT];
     unsigned int direction;
-    float x, y, z;
+    uint32_t moving, torso_present, torso_direction;
+    float x, y, z, velocity;
 } Snapshot;
 enum ProbeResult { PROBE_OK, PROBE_NO_GAME, PROBE_GAME_TYPE, PROBE_NO_ARMY,
                    PROBE_NO_PLAYER, PROBE_PLAYER_TYPE, PROBE_BAD_COORDS, PROBE_READ_FAULT };

@@ -1,5 +1,6 @@
 param(
     [switch]$Fullscreen,
+    [switch]$DummyActor,
     [ValidateRange(640, 1920)][int]$Width = 800,
     [ValidateRange(480, 1080)][int]$Height = 600,
     [string]$ServerAddress = '',
@@ -43,10 +44,12 @@ if (Test-Path -LiteralPath $stop) { Remove-Item -LiteralPath $stop }
 $previousServer = $env:ASMP_DIAG_SERVER
 $previousPort = $env:ASMP_DIAG_PORT
 $previousName = $env:ASMP_DIAG_NAME
+$previousDummy = $env:ASMP_DIAG_DUMMY
 try {
     $env:ASMP_DIAG_SERVER = $ServerAddress
     $env:ASMP_DIAG_PORT = "$Port"
     $env:ASMP_DIAG_NAME = $Name
+    $env:ASMP_DIAG_DUMMY = if ($DummyActor) { '1' } else { '' }
     $launchArguments = @($game, (Join-Path $build 'asmp-steam-diag.dll'))
     if (!$Fullscreen) { $launchArguments += @("$Width", "$Height") }
     & (Join-Path $build 'asmp-diag-launch.exe') @launchArguments
@@ -55,5 +58,7 @@ try {
     $env:ASMP_DIAG_SERVER = $previousServer
     $env:ASMP_DIAG_PORT = $previousPort
     $env:ASMP_DIAG_NAME = $previousName
+    $env:ASMP_DIAG_DUMMY = $previousDummy
 }
 Write-Output "Start a level; fire, switch weapons, collect ammo, take damage and heal. Inspect $build\logs\asmp-diag-<PID>.log"
+if ($DummyActor) { Write-Output 'Dummy test: enter a level, walk and turn. A second actor appears after 2 seconds, follows with an X offset of 80 and is removed after 60 seconds.' }

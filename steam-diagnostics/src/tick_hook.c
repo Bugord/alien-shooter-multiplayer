@@ -14,6 +14,9 @@ static volatile LONG used, enabled, installed, calls, captured, dropped;
 static SRWLOCK queue_lock = SRWLOCK_INIT;
 static FrameSample queue[FRAME_QUEUE_CAPACITY];
 static unsigned int head, count;
+static DummyActor dummy;
+static int dummy_enabled;
+static volatile LONG dummy_stop, dummy_done = 1;
 static int __fastcall on_tick(void* game, void* unused);
 
 static void* hook_pointer(void)
@@ -69,6 +72,19 @@ static int __fastcall on_tick(void* game, void* unused)
         frame.milliseconds = GetTickCount();
         frame.tick = tick;
         frame.result = probe_read(base, &frame.snapshot);
+        if (dummy_enabled && !InterlockedCompareExchange(&dummy_done, 0, 0)) {
+            int stopping = InterlockedCompareExchange(&dummy_stop, 0, 0) != 0;
+            frame.actor = dummy_actor_tick(&dummy, base, &frame.snapshot,
+                frame.result, frame.milliseconds, stopping);
+            if (frame.actor.event == ACTOR_FAULT) {
+                /* Do not retry engine mutations after an exception. The map
+                   still owns any surviving actor until it unloads. */
+                InterlockedExchange(&dummy_done, 1);
+            } else if (frame.actor.event == ACTOR_REJECTED) {
+                InterlockedExchange(&dummy_stop, 1);
+            }
+            if (stopping && !dummy.entity) InterlockedExchange(&dummy_done, 1);
+        }
         /* Never wait on the logging thread from the game thread. */
         if (TryAcquireSRWLockExclusive(&queue_lock)) {
             if (count < FRAME_QUEUE_CAPACITY) {
@@ -109,3 +125,15 @@ TickStats tick_hook_stats(void)
     stats.installed = InterlockedCompareExchange(&installed, 0, 0);
     return stats;
 }
+
+int tick_hook_enable_dummy(uintptr_t image_base)
+{
+    ActorEngine engine;
+    if (InterlockedCompareExchange(&used, 0, 0) || !actor_engine_bind(image_base, &engine)) return 0;
+    dummy_actor_init(&dummy, &engine);
+    dummy_enabled = 1;
+    InterlockedExchange(&dummy_done, 0);
+    return 1;
+}
+void tick_hook_request_dummy_stop(void) { InterlockedExchange(&dummy_stop, 1); }
+int tick_hook_dummy_stopped(void) { return InterlockedCompareExchange(&dummy_done, 0, 0) != 0; }

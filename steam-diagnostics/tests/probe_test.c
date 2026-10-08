@@ -19,8 +19,9 @@ int main(void)
     unsigned char* player = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0xBC);
     unsigned char* vid = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x60);
     unsigned char* weapon = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x08);
+    unsigned char* torso = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x70);
     Snapshot s;
-    if (!image || !game || !army || !player || !vid || !weapon) return 2;
+    if (!image || !game || !army || !player || !vid || !weapon || !torso) return 2;
     uintptr_t base = (uintptr_t)image;
     expect(probe_read(base, &s), PROBE_NO_GAME, "no initialized game");
     *(uintptr_t*)(image + STEAM_GAME_PTR_RVA) = (uintptr_t)game;
@@ -41,6 +42,11 @@ int main(void)
     *(unsigned char*)(player + STEAM_ENTITY_DIRECTION_OFFSET) = 128;
     *(uintptr_t*)(player + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)vid;
     *(uintptr_t*)(vid + STEAM_VID_LINKED_OFFSET) = (uintptr_t)weapon;
+    *(uintptr_t*)(player + STEAM_ENTITY_CHILD_OFFSET) = (uintptr_t)torso;
+    *(uintptr_t*)(torso + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)weapon;
+    torso[STEAM_ENTITY_DIRECTION_OFFSET] = 220;
+    *(float*)(player + STEAM_ENTITY_VELOCITY_OFFSET) = 0.125f;
+    *(uint32_t*)(player + STEAM_ENTITY_FLAGS_OFFSET) = 0x123480u;
     *(int32_t*)(weapon + STEAM_VID_INDEX_OFFSET) = 12;
     *(int32_t*)(player + STEAM_CURRENT_AMMO_OFFSET) = 7 * 64 + 63;
     for (unsigned int i = 0; i < STEAM_STORED_AMMO_COUNT; ++i)
@@ -53,6 +59,26 @@ int main(void)
         s.current_ammo_raw != 511 || s.stored_ammo[1] != 101) ++failures;
     for (unsigned int i = 0; i < STEAM_STORED_AMMO_COUNT; ++i)
         if (s.stored_ammo[i] != 100 + i) ++failures;
+    if (s.velocity != 0.125f || !s.moving || !s.torso_present || s.torso_direction != 220 ||
+        s.direction != 128) ++failures;
+    *(uint32_t*)(player + STEAM_ENTITY_FLAGS_OFFSET) &= ~STEAM_ENTITY_MOVING_FLAG;
+    expect(probe_read(base, &s), PROBE_OK, "released movement while still decelerating");
+    if (s.moving || s.velocity != 0.125f) ++failures;
+    uint32_t bad_velocity = 0x7F800000u;
+    memcpy(player + STEAM_ENTITY_VELOCITY_OFFSET, &bad_velocity, 4);
+    expect(probe_read(base, &s), PROBE_BAD_COORDS, "reject nonfinite velocity");
+    *(float*)(player + STEAM_ENTITY_VELOCITY_OFFSET) = 0;
+    expect(probe_read(base, &s), PROBE_OK, "fully stopped");
+    if (s.velocity || s.moving) ++failures;
+    *(uintptr_t*)(torso + STEAM_ENTITY_VID_OFFSET) = 0;
+    expect(probe_read(base, &s), PROBE_OK, "unrelated child is not a torso");
+    if (s.torso_present) ++failures;
+    *(uintptr_t*)(player + STEAM_ENTITY_CHILD_OFFSET) = 0;
+    expect(probe_read(base, &s), PROBE_OK, "torso temporarily absent");
+    if (s.torso_present) ++failures;
+    *(uintptr_t*)(player + STEAM_ENTITY_CHILD_OFFSET) = 1;
+    expect(probe_read(base, &s), PROBE_READ_FAULT, "contain stale torso pointer");
+    *(uintptr_t*)(player + STEAM_ENTITY_CHILD_OFFSET) = 0;
     /* The armed weapon uses live fixed-point ammo, not its stale stored slot. */
     *(int32_t*)(player + STEAM_CURRENT_AMMO_OFFSET) = 6 * 64;
     *(int32_t*)(player + STEAM_ENTITY_HEALTH_OFFSET) = 42;
@@ -91,6 +117,7 @@ int main(void)
     HeapFree(GetProcessHeap(), 0, player);
     HeapFree(GetProcessHeap(), 0, vid);
     HeapFree(GetProcessHeap(), 0, weapon);
+    HeapFree(GetProcessHeap(), 0, torso);
     printf("Probe checks: %s\n", failures ? "FAILED" : "passed");
     return failures ? 1 : 0;
 }

@@ -21,6 +21,20 @@ static void log_frame(FILE* log, const FrameSample* frame, Snapshot* last,
     enum ProbeResult* previous, DWORD* last_log)
 {
     const Snapshot* sample = &frame->snapshot;
+    if (frame->actor.event != ACTOR_NONE) {
+        static const char* events[] = {"none", "spawned", "removed", "lost", "rejected", "fault", "pose"};
+        static const char* reasons[] = {"none", "vid-class", "no-child", "list-category", "factory-null",
+            "unregistered", "entity-type", "local-player-changed", "exception"};
+        fprintf(log, "# DUMMY event=%s entity=%08lX category=%u updates=%u tick=%ld reason=%s source_class=%u\n",
+            events[frame->actor.event], (unsigned long)frame->actor.entity,
+            frame->actor.category, frame->actor.updates, frame->tick,
+            reasons[frame->actor.reason], frame->actor.source_class);
+        if (frame->actor.event == ACTOR_POSE)
+            fprintf(log, "# DUMMY_POSE velocity=%.3f moving=%u native_animation=%u native_frame=%u torso=%u applied_torso=%u torso_present=%u\n",
+                frame->actor.applied_velocity, frame->actor.applied_moving,
+                frame->actor.native_animation, frame->actor.native_frame, sample->torso_direction,
+                frame->actor.applied_torso, frame->actor.torso_present);
+    }
     if (frame->result == *previous &&
         (frame->result != PROBE_OK || !memcmp(last, sample, sizeof(*sample))) &&
         frame->milliseconds - *last_log < 5000) return;
@@ -31,7 +45,8 @@ static void log_frame(FILE* log, const FrameSample* frame, Snapshot* last,
         sample->weapon_vid, sample->current_ammo, sample->current_ammo_raw);
     for (unsigned int i = 0; i < STEAM_STORED_AMMO_COUNT; ++i)
         fprintf(log, ",%u", sample->stored_ammo[i]);
-    fprintf(log, ",%ld\n", frame->tick);
+    fprintf(log, ",%ld,%.3f,%u,%u,%u\n", frame->tick, sample->velocity, sample->moving,
+        sample->torso_present, sample->torso_direction);
     *last_log = frame->milliseconds;
     *last = *sample;
     *previous = frame->result;
@@ -105,7 +120,16 @@ static DWORD WINAPI run(LPVOID unused)
     fprintf(log, "milliseconds,state,game,player,army,x,y,z,health,animation,direction,weapon_slot,weapon_vid,current_ammo,current_ammo_raw");
     for (unsigned int i = 0; i < STEAM_STORED_AMMO_COUNT; ++i)
         fprintf(log, ",stored_ammo_slot_%u", i + STEAM_STORED_AMMO_FIRST_SLOT);
-    fprintf(log, ",tick\n");
+    fprintf(log, ",tick,velocity,moving,torso_present,torso_direction\n");
+    char dummy_option[8] = {0};
+    DWORD dummy_length = GetEnvironmentVariableA("ASMP_DIAG_DUMMY", dummy_option, sizeof(dummy_option));
+    if (dummy_length == 1 && dummy_option[0] == '1') {
+        if (!tick_hook_enable_dummy(base)) {
+            fprintf(log, "REJECTED dummy actor engine signature mismatch\n");
+            goto fail;
+        }
+        fprintf(log, "# DUMMY enabled offset_x=80 lifetime_seconds=60\n");
+    }
     hook_attempted = 1;
     enum TickHookResult hook_result = tick_hook_install(
         (void* volatile*)(base + STEAM_GAME_VTABLE_RVA + STEAM_GAME_TICK_SLOT * sizeof(uintptr_t)),
@@ -144,6 +168,8 @@ static DWORD WINAPI run(LPVOID unused)
                 state.x = sample->x; state.y = sample->y; state.z = sample->z;
                 state.health = sample->health; state.animation = sample->animation;
                 state.direction = sample->direction; state.weapon_slot = sample->weapon_slot;
+                state.velocity = sample->velocity; state.moving = sample->moving;
+                state.torso_direction = sample->torso_direction; state.torso_present = sample->torso_present;
                 state.current_ammo = sample->current_ammo;
                 memcpy(state.stored_ammo, sample->stored_ammo, sizeof(state.stored_ammo));
             }
@@ -151,6 +177,17 @@ static DWORD WINAPI run(LPVOID unused)
         }
         state_client_update(network, now);
         if (now - last_stats >= 5000) { log_stats(log); state_client_stats(network); last_stats = now; }
+        Sleep(20);
+    }
+    tick_hook_request_dummy_stop();
+    /* Removal belongs to the game thread. If the game is paused, cleanup waits
+       for its next update; never destroy an engine entity from this worker. */
+    if (!tick_hook_dummy_stopped()) fprintf(log, "# DUMMY waiting for game-thread cleanup\n");
+    while (!tick_hook_dummy_stopped()) {
+        FrameSample pending[64];
+        unsigned int available = tick_hook_drain(pending, 64);
+        for (unsigned int i = 0; i < available; ++i)
+            log_frame(log, &pending[i], &last, &previous, &last_log);
         Sleep(20);
     }
     hook_result = tick_hook_stop();

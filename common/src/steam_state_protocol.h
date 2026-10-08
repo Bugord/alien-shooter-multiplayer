@@ -7,8 +7,8 @@
 /* Separate from legacy MpActor: explicit big-endian words, no pointers/padding. */
 #define MPT_C_STEAM_STATE 0x30
 #define MPT_S_STEAM_STATE 0x31
-#define MP_STEAM_STATE_VERSION 1u
-#define MP_STEAM_STATE_SIZE 84
+#define MP_STEAM_STATE_VERSION 2u
+#define MP_STEAM_STATE_SIZE 100
 #define MP_STEAM_RELAY_SIZE (8 + MP_STEAM_STATE_SIZE)
 #define MP_STEAM_SEND_MS 33u
 typedef struct MpSteamState {
@@ -16,6 +16,8 @@ typedef struct MpSteamState {
     float x, y, z;
     int32_t health, weapon_slot, current_ammo;
     uint32_t animation, direction, stored_ammo[9];
+    float velocity;
+    uint32_t moving, torso_direction, torso_present;
 } MpSteamState;
 
 static inline void mp_steam_put(uint8_t* p, uint32_t n) {
@@ -42,6 +44,12 @@ static inline void mp_steam_encode(uint8_t p[MP_STEAM_STATE_SIZE], const MpSteam
     mp_steam_put(p + 40, (uint32_t)s->weapon_slot);
     mp_steam_put(p + 44, (uint32_t)s->current_ammo);
     for (int i = 0; i < 9; ++i) mp_steam_put(p + 48 + i * 4, s->stored_ammo[i]);
+    uint32_t velocity;
+    memcpy(&velocity, &s->velocity, 4);
+    mp_steam_put(p + 84, velocity);
+    mp_steam_put(p + 88, s->moving);
+    mp_steam_put(p + 92, s->torso_direction);
+    mp_steam_put(p + 96, s->torso_present);
 }
 static inline int mp_steam_decode(const uint8_t* p, int length, MpSteamState* s) {
     if (length != MP_STEAM_STATE_SIZE || mp_steam_get(p) != MP_STEAM_STATE_VERSION) return 0;
@@ -56,7 +64,12 @@ static inline int mp_steam_decode(const uint8_t* p, int length, MpSteamState* s)
     bits = mp_steam_get(p + 40); memcpy(&s->weapon_slot, &bits, 4);
     bits = mp_steam_get(p + 44); memcpy(&s->current_ammo, &bits, 4);
     for (int i = 0; i < 9; ++i) s->stored_ammo[i] = mp_steam_get(p + 48 + i * 4);
+    bits = mp_steam_get(p + 84); memcpy(&s->velocity, &bits, 4);
+    s->moving = mp_steam_get(p + 88);
+    s->torso_direction = mp_steam_get(p + 92);
+    s->torso_present = mp_steam_get(p + 96);
     return s->active <= 1 && isfinite(s->x) && isfinite(s->y) && isfinite(s->z) &&
-        s->weapon_slot >= -1 && s->weapon_slot < 10;
+        s->weapon_slot >= -1 && s->weapon_slot < 10 && s->torso_present <= 1 &&
+        s->direction <= 255u && s->torso_direction <= 255u && s->moving <= 1 && isfinite(s->velocity);
 }
 #endif
