@@ -1,6 +1,7 @@
 /*
 
 !/.gitignore
+!/.gitattributes
 !/.gitmodules
 !/.clang-format
 !/README.md
@@ -44,6 +45,7 @@
 /diagnostics/*
 !/diagnostics/README.md
 !/diagnostics/*.ps1
+!/diagnostics/*.sh
 !/diagnostics/src/
 /diagnostics/src/*
 !/diagnostics/src/*.c
@@ -52,6 +54,7 @@
 /diagnostics/tests/*
 !/diagnostics/tests/*.c
 !/diagnostics/tests/*.h
+!/diagnostics/tests/*.ps1
 
 # Local logs, reverse-engineering databases and history backups.
 /.local-history/

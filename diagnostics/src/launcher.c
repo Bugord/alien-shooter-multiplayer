@@ -68,6 +68,44 @@ static int size_test_window(DWORD pid, int width, int height) {
     return rect.right - rect.left == width && rect.bottom - rect.top == height;
 }
 
+/* Machine-readable launch identity for orchestration scripts (ASMP_LAUNCH_RESULT=<file>). */
+static void json_append(char* out, size_t capacity, const wchar_t* text)
+{
+    char utf8[2 * MAX_PATH];
+    size_t used = strlen(out);
+    int length = WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8, (int)sizeof(utf8), NULL, NULL);
+    if (length <= 0) utf8[0] = 0;
+    for (const char* c = utf8; *c && used + 3 < capacity; ++c) {
+        if (*c == '\\' || *c == '"') out[used++] = '\\';
+        if ((unsigned char)*c >= 0x20) out[used++] = *c;
+    }
+    out[used] = 0;
+}
+static void write_launch_result(const wchar_t* game, const wchar_t* dll, DWORD pid, HANDLE process,
+                                const char* stage, int ok)
+{
+    wchar_t path[MAX_PATH], temporary[MAX_PATH + 8];
+    char text[8 * MAX_PATH];
+    if (!GetEnvironmentVariableW(L"ASMP_LAUNCH_RESULT", path, MAX_PATH) || !path[0]) return;
+    if (swprintf_s(temporary, MAX_PATH + 8, L"%s.tmp", path) < 0) return;
+    unsigned long long ticks = 0;
+    FILETIME created, exited, kernel, user;
+    if (process && GetProcessTimes(process, &created, &exited, &kernel, &user))
+        ticks = (((unsigned long long)created.dwHighDateTime << 32) | created.dwLowDateTime) + 504911232000000000ULL;
+    snprintf(text, sizeof(text), "{\"schema\":1,\"stage\":\"%s\",\"ok\":%s,\"pid\":%lu,\"started\":\"%llu\",\"exe\":\"",
+             stage, ok ? "true" : "false", (unsigned long)pid, ticks);
+    json_append(text, sizeof(text), game ? game : L"");
+    strncat_s(text, sizeof(text), "\",\"dll\":\"", _TRUNCATE);
+    json_append(text, sizeof(text), dll ? dll : L"");
+    strncat_s(text, sizeof(text), "\"}\n", _TRUNCATE);
+    HANDLE file = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    BOOL good = WriteFile(file, text, (DWORD)strlen(text), &written, NULL) && written == strlen(text);
+    CloseHandle(file);
+    if (!good || !MoveFileExW(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) DeleteFileW(temporary);
+}
+
 int wmain(int argc, wchar_t** argv)
 {
     wchar_t game[MAX_PATH], dll[MAX_PATH], directory[MAX_PATH], marker[MAX_PATH], command[MAX_PATH + 3];
@@ -79,6 +117,7 @@ int wmain(int argc, wchar_t** argv)
     int result = 1;
     int debugging = 0;
     uintptr_t image = 0;
+    const char* stage = "validate";
     if (argc != 3 && argc != 5) { fwprintf(stderr, L"Usage: asmp-diag-launch.exe <test-game\\AlienShooter.exe> <asmp-diag.dll> [window-width window-height]\n"); return 2; }
     int width = 0, height = 0;
     if (argc == 5) {
@@ -91,14 +130,14 @@ int wmain(int argc, wchar_t** argv)
     DWORD game_length = GetFullPathNameW(argv[1], MAX_PATH, game, NULL);
     DWORD dll_length = GetFullPathNameW(argv[2], MAX_PATH, dll, NULL);
     if (!game_length || game_length >= MAX_PATH || !dll_length || dll_length >= MAX_PATH) return 2;
-    if (GetFileAttributesW(dll) == INVALID_FILE_ATTRIBUTES) { fwprintf(stderr, L"Diagnostic DLL missing.\n"); return 2; }
+    if (GetFileAttributesW(dll) == INVALID_FILE_ATTRIBUTES) { fwprintf(stderr, L"Diagnostic DLL missing.\n"); result = 2; goto done; }
     wcscpy_s(directory, MAX_PATH, game);
     wchar_t* slash = wcsrchr(directory, L'\\');
     if (!slash || _wcsicmp(slash + 1, L"AlienShooter.exe")) return 2;
     *slash = 0;
     if (swprintf_s(marker, MAX_PATH, L"%s\\asmp-diag-test.marker", directory) < 0) return 2;
-    if (GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES) { fwprintf(stderr, L"Use prepare-test-game.ps1 first: test-copy marker missing.\n"); return 2; }
-    if (!hash_file_sha256(game, digest) || strcmp(digest, STEAM_EXE_SHA256)) { fwprintf(stderr, L"Unsupported executable hash.\n"); return 2; }
+    if (GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES) { fwprintf(stderr, L"Use prepare-test-game.ps1 first: test-copy marker missing.\n"); result = 2; goto done; }
+    if (!hash_file_sha256(game, digest) || strcmp(digest, STEAM_EXE_SHA256)) { fwprintf(stderr, L"Unsupported executable hash.\n"); result = 2; goto done; }
     if (swprintf_s(command, MAX_PATH + 3, L"\"%s\"", game) < 0) return 2;
     startup.cb = sizeof(startup);
     if (!CreateProcessW(game, command, NULL, NULL, FALSE, width ? DEBUG_ONLY_THIS_PROCESS : 0,
@@ -131,6 +170,7 @@ int wmain(int argc, wchar_t** argv)
         fprintf(stderr, "Game exited before DLL loading (code %lu). Check Steam and the game's logs.\n", exit_code);
         goto done;
     }
+    stage = "loading-dll";
     SIZE_T size = (wcslen(dll) + 1) * sizeof(wchar_t);
     remote = VirtualAllocEx(process.hProcess, NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remote || !WriteProcessMemory(process.hProcess, remote, dll, size, NULL)) goto done;
@@ -158,7 +198,10 @@ int wmain(int argc, wchar_t** argv)
         } else fprintf(stderr, "Render size unavailable; window left at the engine's size.\n");
     }
     result = 0;
+    stage = "dll-loaded";
 done:
+    if (process.dwProcessId) write_launch_result(game, dll, process.dwProcessId, process.hProcess, stage, !result);
+    else if (argc >= 3) write_launch_result(game_length ? game : NULL, dll_length ? dll : NULL, 0, NULL, stage, 0);
     if (debugging && process.dwProcessId) {
         TerminateProcess(process.hProcess, 1); /* Never leave this new test process paused. */
         DebugActiveProcessStop(process.dwProcessId);

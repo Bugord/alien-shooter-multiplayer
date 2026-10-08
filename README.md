@@ -47,7 +47,8 @@ cd alien-shooter-multiplayer
 This builds `asmp-diag.dll`, the launcher, the test peer and `asmp-server.exe`
 into `diagnostics/build/` and runs all tests. See
 [build and test instructions](diagnostics/README.md) for preparing the test game
-copy, one-PC and two-PC sessions.
+copy, Git Bash server/two-client launch, the managed two-client session, one-PC Mirror sessions, two-copy launch
+verification and two-PC sessions.
 
 ## Server-client architecture
 The server-client architecture is divided into two parts:

@@ -7,7 +7,7 @@ page for your task.
 
 | Page | Contents |
 | --- | --- |
-| [Build, test and review](../diagnostics/README.md) | Build, preparing the test game copy, one-PC Mirror test, multiplayer menu and two-PC sessions, window and diagnostic modes, what the automated tests cover |
+| [Build, test and review](../diagnostics/README.md) | Build, preparing test copies and isolated DLL pairs, Git Bash server/two-client launch, managed two-client session (start, stop, restart, live checklist), one-PC Mirror test, two-copy launch verification, multiplayer menu and two-PC sessions, window and diagnostic modes, what the automated tests cover |
 
 ## How it works
 
