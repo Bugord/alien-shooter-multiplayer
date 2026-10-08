@@ -1,0 +1,151 @@
+// Steam adaptation of the original ASMP menu: FLoadData/FSaveData replace registry access.
+static string asmpStrName;
+static string asmpStrAddress;
+static string asmpStrConnecting;
+
+static int targetEditbox = 0;
+
+#define TARGET_EDITBOX_NONE    0
+#define TARGET_EDITBOX_NAME    1
+#define TARGET_EDITBOX_ADDRESS 2
+
+#define STATUS_BAR_VID 2
+#define STATUS_BAR_NDIR 0
+
+#define SPMS_IDLE 0
+#define SPMS_CONNECT_PRESSED 1
+#define SPMS_INVALID_NAME 2
+#define SPMS_INVALID_ADDRESS 3
+#define SPMS_CONNECTING 4
+#define SPMS_CONNECTION_FAILED 5
+#define SPMS_CONNECTED 6
+#define SPMS_CONNECTION_LOST 7
+// C SteamMenuStatus: 0 idle, 1 request, 2 bad name, 3 bad address,
+// 4 connecting, 5 failed, 6 release menu, 7 connection lost.
+static int asmpReturnStatus = 0;
+
+int connectingAnimationTimer = 0;
+ProcessConnectingText()
+{
+  int hp;
+  hp = Action(MenuFind(STATUS_BAR_VID, STATUS_BAR_NDIR), ACT_GET_HP);
+  //MenuAction(2,0,ACT_GET_HP);
+
+  if( hp==SPMS_INVALID_NAME)
+  {
+    asmpStrConnecting="Invalid name!";
+  }
+  else if( hp==SPMS_INVALID_ADDRESS )
+  {
+    asmpStrConnecting="Invalid address!";
+  }
+  else if( hp==SPMS_CONNECTING )
+  {
+    if( ( GetTime()-connectingAnimationTimer ) > 250 )
+    {
+      connectingAnimationTimer = GetTime();
+      if( strlen(asmpStrConnecting) < strlen("connecting...") )
+      {
+        asmpStrConnecting+=".";
+      }
+      else
+      {
+        asmpStrConnecting="connecting";
+      }
+    }
+  }
+  else if( hp==SPMS_CONNECTION_FAILED )
+  {
+    asmpStrConnecting="Connection failed!";
+  }
+  else if( hp==SPMS_CONNECTION_LOST )
+  {
+    asmpStrConnecting="Connection lost!";
+  }
+  else if( hp==SPMS_CONNECTED )
+  {
+    MenuRelease();
+  }
+}
+
+CreateMultiplayerMenu()
+{
+  int menu;
+  MenuRelease();
+  MenuLoad("maps\\asmp_play.men");
+  asmpStrConnecting = "";
+  /* Male by default */
+  MenuAction(706,0,ANI_MENUSTANDUP);
+
+  MenuAction(STATUS_BAR_VID, STATUS_BAR_NDIR, ACT_SET_HP, asmpReturnStatus);
+  asmpReturnStatus = SPMS_IDLE;
+}
+
+TactMultiplayerMenu()
+{
+  ProcessConnectingText();
+
+  if( MenuLClick() )
+  {
+    if( MenuNVidUnderCursor()==706 )
+  {
+      MenuAction(706,0,ANI_MENUSTANDUP);
+      MenuAction(707,0,ANI_MENUSTANDDOWN);
+      FSaveData("save://common/"+"PlayerSex","male");
+    }
+    else if( MenuNVidUnderCursor()==707 )
+    {
+      MenuAction(707,0,ANI_MENUSTANDUP);
+      MenuAction(706,0,ANI_MENUSTANDDOWN);
+      FSaveData("save://common/"+"PlayerSex","female");
+    }
+
+
+    if( MenuNVidUnderCursor()==705 ) // Button
+  {
+    if( MenuNDirUnderCursor() == 1 ) // Connect
+    {
+        MenuAction(STATUS_BAR_VID, STATUS_BAR_NDIR, ACT_SET_HP, SPMS_CONNECT_PRESSED);
+    }
+  }
+    else if( MenuNVidUnderCursor()==708 ) // EditBox
+    {
+      if( MenuNDirUnderCursor() == 0 ) // Name
+      {
+        //asmpStrName = "Name";
+        targetEditbox = TARGET_EDITBOX_NAME;
+      }
+      else if( MenuNDirUnderCursor() == 1 ) // Address
+      {
+        //asmpStrAddress = "Address";
+        targetEditbox = TARGET_EDITBOX_ADDRESS;
+      }
+    }
+  }
+
+  if( targetEditbox == TARGET_EDITBOX_NAME )
+  {
+    // Handle backspace
+    if( GetKey()==VK_BACK && strlen(asmpStrName) >= 1 )
+    {
+      asmpStrName[strlen(asmpStrName)-1] = 0;
+    }
+    else if( GetKey() >= 32 && GetKey() <= 126 )
+    {
+        asmpStrName += Printf("%c",GetKey());
+    }
+  }
+  else if ( targetEditbox == TARGET_EDITBOX_ADDRESS )
+  {
+    // Handle backspace
+    if( GetKey()==VK_BACK && strlen(asmpStrAddress) >= 1 )
+    {
+      asmpStrAddress[strlen(asmpStrAddress)-1] = 0;
+    }
+    else if( (GetKey() >= 48 && GetKey() <= 57) || // Handle numbers
+             GetKey() == '.' || GetKey() == ':')   // Handle dot, colon
+    {
+      asmpStrAddress += Printf("%c",GetKey());
+    }
+  }
+}

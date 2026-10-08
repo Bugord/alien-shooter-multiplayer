@@ -1,6 +1,21 @@
 # alien-shooter-multiplayer
 Alien Shooter is a single-player isometric top-down shooter released in 2003. This repository contains the results of reverse engineering and development in C, which enables network play for the game.
 
+## Steam port
+
+The Steam adaptation is under review on `feature/steam-remote-player`. It reuses
+the existing epnet transport, server and multiplayer lifecycle, with verified
+Steam engine bindings. Connection/map loading, remote players, movement and
+torso aim, weapons, ammo, health, shot events, names and health bars are adapted.
+Animations run in the native engine from movement intent.
+
+Use the x86 Visual Studio build and test-copy launcher described in
+[Steam build and test instructions](steam-diagnostics/README.md). The DLL still
+uses the diagnostic entry point during this review stage. The GCC build and EXE
+patcher instructions below describe the original executable, not the Steam port.
+Steam invitations, monster/world synchronization and the original unfinished
+scoreboard are not implemented.
+
 ## Navigation
 - [Repository navigation](#Repository-navigation)
 - [Prerequisites](#Prerequisites)
@@ -26,7 +41,6 @@ Alien Shooter is a single-player isometric top-down shooter released in 2003. Th
   - [/common/src/utils/mem](/common/src/utils/mem) - Memory allocator.
 - [/game](/game) - Modified game files. Currently, these include menu markup files (.men) and menu logic description files (.lgc).
 - [/test](/test) - Unit tests for critical logic.
-- [/AlienShooter.exe.idb](/AlienShooter.exe.idb) - IDA database with all information found by reverse engineering the game's executable file (AlienShooter.exe).
 
 ## Prerequisites
 ### OS Windows
