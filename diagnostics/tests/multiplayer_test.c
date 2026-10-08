@@ -112,6 +112,16 @@ int main(void) {
     --event.shot.world_epoch; s->current_ammo = 1;
     multiplayer_receive_shot(&event, 2221);
     CHECK(step(2230).shots_applied == 1 && shots == 2); /* Last two-unit attack. */
+    /* A busy torso would ignore native 0x25: the event waits instead of being consumed. */
+    *(unsigned int*)(torso + 0x54) = 5001; multiplayer_receive_shot(&event, 2231);
+    MultiplayerFrame waiting = step(2231);
+    CHECK(waiting.shots_applied == 0 && waiting.shots_discarded == 0 && shots == 2);
+    *(unsigned int*)(torso + 0x54) = 5000; *(unsigned int*)(torso + 0x4C) = 8;
+    *(int*)(torso + 0x0C) = 3; *(int*)(torso + 0x10) = 3;
+    CHECK(step(2232).shots_applied == 0 && shots == 2); /* Attack animation still playing. */
+    *(int*)(torso + 0x0C) = 4;
+    CHECK(step(2233).shots_applied == 1 && shots == 3);
+    *(unsigned int*)(torso + 0x4C) = 0;
     /* Interpolation: a small move is played back behind the newest sample, a large one snaps. */
     s->sequence = 1; s->tick = 40; s->x = 575; step(2234);
     CHECK(*(float*)(entity + 0x30) >= 555.0f && *(float*)(entity + 0x30) < 575.0f);
