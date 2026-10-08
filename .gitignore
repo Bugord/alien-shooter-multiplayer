@@ -50,7 +50,23 @@
 !/test/src/
 !/test/eztest
 
-# Reports, logs, databases and history backups stay local.
+# Steam port investigation: scripts only; reports stay local.
+!/analysis/
+/analysis/*
+!/analysis/*.py
+!/steam-diagnostics/
+/steam-diagnostics/*
+!/steam-diagnostics/README.md
+!/steam-diagnostics/*.ps1
+!/steam-diagnostics/src/
+/steam-diagnostics/src/*
+!/steam-diagnostics/src/*.c
+!/steam-diagnostics/src/*.h
+!/steam-diagnostics/tests/
+/steam-diagnostics/tests/*
+!/steam-diagnostics/tests/*.c
+
+# Local reports, logs, reverse-engineering databases and history backups.
 /.local-history/
 /reports/
 *.log
