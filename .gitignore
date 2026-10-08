@@ -3,7 +3,6 @@
 
 !/.gitignore
 !/.gitmodules
-!/AlienShooter.exe.idb
 !/Makefile
 !/README.md
 !/Doxyfile
@@ -50,3 +49,10 @@
 !/test/README.md
 !/test/src/
 !/test/eztest
+
+# Reports, logs, databases and history backups stay local.
+/.local-history/
+/reports/
+*.log
+*.idb
+*.i64
