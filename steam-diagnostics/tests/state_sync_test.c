@@ -65,6 +65,9 @@ int main(void) {
     CHECK(mp_steam_newer(0, UINT32_MAX) && !mp_steam_newer(7, 7) && !mp_steam_newer(6, 7));
 
     uint32_t low, high;
+    CHECK(mp_steam_is_level_path("maps/LEVEL_01.MAP") && mp_steam_is_level_path("maps\\survive_01.map"));
+    CHECK(!mp_steam_is_level_path("maps/mainmenu.map") && !mp_steam_is_level_path("maps/../Level_01.map"));
+    CHECK(!mp_steam_is_level_path("maps/Level_01.map.extra") && !mp_steam_is_level_path("maps/level_"));
     mp_steam_world_key("MAPS/level_01.map", &low, &high);
     CHECK(low == original.world_low && high == original.world_high);
     MpSteamShot shot = {0}, shot_decoded;

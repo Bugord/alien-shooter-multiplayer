@@ -83,8 +83,7 @@ void state_client_update(StateClient* c, unsigned long now) {
             const char* map = response.server_configuration.map_name;
             if (!response.server_configuration.max_clients || response.server_configuration.max_clients > EPNET_MAX_CLIENTS ||
                 !memchr(map, 0, MP_MAX_MAP_NAME_LEN) ||
-                (_strnicmp(map, "maps\\Level_", 11) && _strnicmp(map, "maps\\survive_", 13)) ||
-                strstr(map, "..") || !strstr(map, ".map")) { ++c->rejected; continue; }
+                !mp_steam_is_level_path(map)) { ++c->rejected; continue; }
             memcpy(c->map, map, sizeof(c->map));
             if (!c->ready && c->log) fprintf(c->log, "# NET_READY id=%u\n", epnet_client_get_id(c->transport));
             c->ready = 1;

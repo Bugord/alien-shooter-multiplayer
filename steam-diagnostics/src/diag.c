@@ -200,10 +200,10 @@ static DWORD WINAPI run(LPVOID unused)
             const FrameSample* frame = &frames[n - 1];
             const Snapshot* sample = &frame->snapshot;
             MpSteamState state = {0};
-            if (frame->result == PROBE_OK && sample->health > 0 && (sample->world_low || sample->world_high)) {
+            if (frame->result == PROBE_OK && sample->in_level) {
                 state.world_low = sample->world_low; state.world_high = sample->world_high;
                 state.world_epoch = frame->multiplayer.world_epoch;
-                state.active = 1; state.tick = (uint32_t)frame->tick;
+                state.active = sample->health > 0; state.tick = (uint32_t)frame->tick;
                 state.x = sample->x; state.y = sample->y; state.z = sample->z;
                 state.health = sample->health; state.animation = sample->animation;
                 state.direction = sample->direction; state.weapon_slot = sample->weapon_slot;

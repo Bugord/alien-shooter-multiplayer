@@ -85,6 +85,7 @@ int main(void) {
     *(uintptr_t*)(vid + 0x5C) = (uintptr_t)weapons[1];
     local.game = (uintptr_t)game; local.player = (uintptr_t)player; local.army = (uintptr_t)army; local.health = 110;
     mp_steam_world_key("maps\\Level_01.map", &local.world_low, &local.world_high);
+    local.in_level = 1;
     MpSteamState* s = &peers[0].state;
     peers[0].present = 1; peers[0].session = 1;
     s->world_low = local.world_low; s->world_high = local.world_high; s->world_epoch = 7;
@@ -114,11 +115,17 @@ int main(void) {
     steam_multiplayer_capture_shot(200, 300, 1);
     MpSteamShot capture; CHECK(steam_multiplayer_take_local_shot(&capture) && capture.world_epoch == 1 && capture.x == 200);
     steam_multiplayer_capture_shot(210, 310, 1);
+    local.in_level = 0;
     local.world_low = local.world_high = 0;
     step(2240); CHECK(destroyed == 1 && !steam_multiplayer_take_local_shot(&capture));
     mp_steam_world_key("maps\\Level_01.map", &local.world_low, &local.world_high);
+    local.in_level = 1;
     CHECK(step(2260).world_epoch == 2); step(2280); step(4260); attach_torso(); step(4280);
     CHECK(created == 2 && health == 301);
+    local.health = 0; CHECK(step(4300).world_epoch == 2 && destroyed == 1);
+    CHECK(step(4320).world_epoch == 2 && destroyed == 1);
+    CHECK(steam_multiplayer_tick(&local, PROBE_NO_PLAYER, 4330).world_epoch == 2 && destroyed == 1);
+    local.health = 110; CHECK(step(4350).world_epoch == 2 && destroyed == 1);
     steam_multiplayer_tick(&local, PROBE_OK, 5400); CHECK(destroyed == 2); /* Expired worker data. */
     step(5420); step(5440); step(7440); attach_torso(); step(7460); CHECK(created == 3);
     s->weapon_slot = 5; fail_weapon = 1; step(7480); step(7500);

@@ -15,7 +15,7 @@ typedef struct Remote {
 } Remote;
 typedef struct PendingShot { SteamShotEvent event; DWORD received; } PendingShot;
 static uintptr_t base, local_game, local_player;
-static uint32_t local_low, local_high, world_epoch;
+static uint32_t local_low, local_high, world_epoch, map_started;
 static ActorEngine engine;
 static int enabled;
 static volatile LONG stop_requested, stopped = 1;
@@ -39,7 +39,7 @@ int steam_multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
     for (unsigned int i = 0; i < STEAM_MAX_PEERS; ++i) {
         steam_actor_init(&remote[i].actor, &engine); remote[i].last_weapon = -1;
     }
-    local_game = local_player = 0; local_low = local_high = world_epoch = 0;
+    local_game = local_player = 0; local_low = local_high = world_epoch = map_started = 0;
     memset(incoming, 0, sizeof(incoming)); memset(current, 0, sizeof(current));
     published_at = current_at = received_count = pending_count = outgoing_head = outgoing_count = 0;
     InterlockedExchange(&stop_requested, 0); InterlockedExchange(&game_thread, 0); InterlockedExchange(&event_drops, 0);
@@ -72,7 +72,7 @@ void steam_multiplayer_capture_shot(int x, int y, unsigned int weapon)
     if (!enabled || !local_player || !world_epoch || weapon >= 10u ||
         InterlockedCompareExchange(&stop_requested, 0, 0)) return;
     Snapshot sample;
-    if (probe_read(base, &sample) != PROBE_OK || sample.player != local_player ||
+    if (probe_read(base, &sample) != PROBE_OK || !sample.in_level || sample.health <= 0 || sample.player != local_player ||
         sample.world_low != local_low || sample.world_high != local_high) return;
     if (!TryAcquireSRWLockExclusive(&outgoing_lock)) { InterlockedIncrement(&event_drops); return; }
     if (outgoing_count < 64) {
@@ -124,18 +124,19 @@ SteamMultiplayerFrame steam_multiplayer_tick(const Snapshot* local, enum ProbeRe
     LONG thread = (LONG)GetCurrentThreadId();
     LONG owner = InterlockedCompareExchange(&game_thread, thread, 0);
     if (owner && owner != thread) return result;
-    steam_display_hook_install(base, steam_multiplayer_draw);
     int stopping = InterlockedCompareExchange(&stop_requested, 0, 0) != 0;
-    int gameplay = state == PROBE_OK && (local->world_low || local->world_high) && local->health > 0;
+    /* Death can temporarily remove the player. The probe still validates GAME
+       and parses its map before returning NO_PLAYER/NO_ARMY. */
+    int gameplay = (state == PROBE_OK || state == PROBE_NO_PLAYER || state == PROBE_NO_ARMY) && local->in_level;
     if (!gameplay) {
         local_game = local_player = 0; local_low = local_high = 0;
     }
-    if (gameplay && (local->game != local_game || local->player != local_player ||
-        local->world_low != local_low || local->world_high != local_high)) {
+    if (gameplay && (local->world_low != local_low || local->world_high != local_high || local->map_started != map_started)) {
         if (!++world_epoch) ++world_epoch;
-        local_game = local->game; local_player = local->player;
+        map_started = local->map_started;
         local_low = local->world_low; local_high = local->world_high;
     }
+    if (gameplay) { local_game = local->game; local_player = state == PROBE_OK && local->health > 0 ? local->player : 0; }
     /* Flush captures from an old map before the worker can send them. */
     if (TryAcquireSRWLockExclusive(&outgoing_lock)) {
         if (!gameplay || stopping || (outgoing_count &&
@@ -189,7 +190,7 @@ SteamMultiplayerFrame steam_multiplayer_tick(const Snapshot* local, enum ProbeRe
             } else if (r->state == RS_BACKOFF && (int32_t)(now - r->retry_at) >= 0) {
                 r->state = RS_WAITING; r->entered_at = now - 2000u;
             }
-            if (r->state == RS_WAITING && now - r->entered_at >= 2000u) {
+            if (r->state == RS_WAITING && now - r->entered_at >= 2000u && state == PROBE_OK && local->player) {
                 update = steam_actor_spawn(&r->actor, base, local, &target);
                 if (update.event == ACTOR_SPAWNED) { r->state = RS_SPAWNING; r->entered_at = r->last_pose = now; }
                 else if (update.event == ACTOR_FAULT) abandon(r, local->game, &update, &cleanup_failed);

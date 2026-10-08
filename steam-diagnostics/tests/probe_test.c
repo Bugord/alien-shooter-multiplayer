@@ -62,6 +62,14 @@ int main(void)
     if (s.velocity != 0.125f || !s.moving || !s.torso_present || s.torso_direction != 220 ||
         s.direction != 128) ++failures;
     *(uint32_t*)(player + STEAM_ENTITY_FLAGS_OFFSET) &= ~STEAM_ENTITY_MOVING_FLAG;
+    *(const char**)(game + STEAM_GAME_MAP_PATH_OFFSET) = "maps/LEVEL_01.MAP";
+    *(uint32_t*)(game + STEAM_GAME_MAP_STARTED_OFFSET) = 123;
+    expect(probe_read(base, &s), PROBE_OK, "one normalized level identity");
+    if (!s.in_level || !s.world_low || s.map_started != 123) ++failures;
+    *(const char**)(game + STEAM_GAME_MAP_PATH_OFFSET) = "maps/mainmenu.map";
+    expect(probe_read(base, &s), PROBE_OK, "menu is not a level");
+    if (s.in_level || s.world_low || s.world_high) ++failures;
+    *(const char**)(game + STEAM_GAME_MAP_PATH_OFFSET) = "maps/LEVEL_01.MAP";
     expect(probe_read(base, &s), PROBE_OK, "released movement while still decelerating");
     if (s.moving || s.velocity != 0.125f) ++failures;
     uint32_t bad_velocity = 0x7F800000u;

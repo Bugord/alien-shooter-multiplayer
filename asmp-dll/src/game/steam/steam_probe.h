@@ -11,6 +11,7 @@ typedef struct Snapshot {
     uint32_t moving, torso_present, torso_direction;
     float x, y, z, velocity;
     uint32_t world_low, world_high;
+    uint32_t in_level, map_started;
     char map[128];
 } Snapshot;
 enum ProbeResult { PROBE_OK, PROBE_NO_GAME, PROBE_GAME_TYPE, PROBE_NO_ARMY,

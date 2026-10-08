@@ -18,15 +18,14 @@ enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output)
         if (!s.game) result = PROBE_NO_GAME;
         else if (*(uintptr_t*)s.game != image_base + STEAM_GAME_VTABLE_RVA) result = PROBE_GAME_TYPE;
         else {
-            const char* map = *(const char**)(s.game + 0x20u);
+            const char* map = *(const char**)(s.game + STEAM_GAME_MAP_PATH_OFFSET);
+            s.map_started = *(uint32_t*)(s.game + STEAM_GAME_MAP_STARTED_OFFSET);
             if (map) {
                 unsigned int i;
                 for (i = 0; i < sizeof(s.map) - 1 && map[i]; ++i) s.map[i] = map[i];
                 s.map[i] = 0;
-                const char* file = strrchr(s.map, '\\');
-                if (!file) file = strrchr(s.map, '/');
-                file = file ? file + 1 : s.map;
-                if (i < sizeof(s.map) - 1 && (!_strnicmp(file, "level_", 6) || !_strnicmp(file, "survive_", 8)))
+                s.in_level = !(i == sizeof(s.map) - 1 && map[i]) && mp_steam_is_level_path(s.map);
+                if (s.in_level)
                     mp_steam_world_key(s.map, &s.world_low, &s.world_high);
             }
             s.army_index = *(uint32_t*)(s.game + STEAM_ARMY_INDEX_OFFSET) & 3u;

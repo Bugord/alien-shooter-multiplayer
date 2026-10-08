@@ -78,6 +78,20 @@ static inline int mp_steam_decode(const uint8_t* p, int length, MpSteamState* s)
         s->direction <= 255u && s->torso_direction <= 255u && s->moving <= 1 && isfinite(s->velocity);
 }
 /* Normalize only ASCII game filenames; / and \\ are equivalent. */
+static inline int mp_steam_is_level_path(const char* path) {
+    if (!path || !*path || strlen(path) >= 128u || strstr(path, "..")) return 0;
+    const char* file = path;
+    for (const char* p = path; *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 32 || c > 126 || c == ':') return 0;
+        if (c == '/' || c == '\\') file = p + 1;
+    }
+    char normalized[128]; size_t i;
+    for (i = 0; file[i]; ++i) normalized[i] = file[i] >= 'A' && file[i] <= 'Z' ? (char)(file[i] + 'a' - 'A') : file[i];
+    normalized[i] = 0;
+    return i > 10u && (!strncmp(normalized, "level_", 6) || !strncmp(normalized, "survive_", 8)) &&
+        !strcmp(normalized + i - 4, ".map");
+}
 static inline void mp_steam_world_key(const char* path, uint32_t* low, uint32_t* high) {
     uint64_t key = UINT64_C(14695981039346656037);
     while (*path) {
