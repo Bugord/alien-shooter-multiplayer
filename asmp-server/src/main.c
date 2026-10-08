@@ -3,8 +3,6 @@
 #include <stdlib.h>
 #include "utils/time/time.h"
 
-#ifndef EZTEST
-
 int main(int argc, char* argv[])
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -28,4 +26,3 @@ int main(int argc, char* argv[])
     return 0;
 }
 
-#endif /* EZTEST */

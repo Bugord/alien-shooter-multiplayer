@@ -4,7 +4,7 @@
 #include <string.h>
 #include <math.h>
 
-/* Separate from legacy MpActor: explicit big-endian words, no pointers/padding. */
+/* Explicit big-endian words, no pointers/padding. */
 #define MPT_C_STEAM_STATE 0x30
 #define MPT_S_STEAM_STATE 0x31
 #define MP_STEAM_STATE_VERSION 3u
