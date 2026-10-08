@@ -1,10 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "state_client.h"
-#pragma warning(push)
-#pragma warning(disable:4200) /* Existing protocol uses C flexible array members. */
-#include "../../../../common/src/multiplayer_protocol.h"
-#pragma warning(pop)
 #include "epnet_client.h"
 
 typedef struct Peer {
@@ -12,7 +8,6 @@ typedef struct Peer {
     uint32_t session;
     unsigned long received_at;
     int present;
-    char name[16];
     uint32_t shot_session, shot_sequence;
     int shot_received;
 } Peer;
@@ -26,14 +21,17 @@ struct StateClient {
     uint32_t sequence, sent, received, rejected;
     MpState latest;
     Peer peers[EPNET_MAX_CLIENTS];
+    /* Latest roster: names are trusted only for the session that the server lists. */
+    char roster_name[EPNET_MAX_CLIENTS][MP_MAX_NAME_LEN + 1];
+    uint32_t roster_session[EPNET_MAX_CLIENTS];
+    uint32_t server_capacity;
     uint32_t shot_sequence, shot_dropped;
-    unsigned long user_sent_at;
     ShotEvent shots[64];
     unsigned int shot_head, shot_count;
 };
 
 StateClient* state_client_create(const char* host, unsigned short port, const char* name, FILE* log) {
-    if (!host || !port || !name || strlen(name) > MP_MAX_NAME_LEN || epnet_init()) return NULL;
+    if (!host || !port || !mp_is_player_name(name) || epnet_init()) return NULL;
     StateClient* c = calloc(1, sizeof(*c));
     if (c) {
         c->log = log;
@@ -72,19 +70,16 @@ void state_client_update(StateClient* c, unsigned long now) {
             c->ready = c->joined = 0;
             c->shot_count = c->shot_head = 0;
             memset(c->peers, 0, sizeof(c->peers));
+            memset(c->roster_name, 0, sizeof(c->roster_name)); memset(c->roster_session, 0, sizeof(c->roster_session));
             if (c->log) fprintf(c->log, "# NET_DISCONNECTED reason=%u\n", ev.data.disconnect_reason);
         }
         if (ev.type != EPNET_EVENT_PACKET) continue;
-        if (ev.data.packet.pkt_type == MPT_S_CONNECTION_RESPONSE && c->joined &&
-            ev.data.packet.len == sizeof(MpSPacketConnectionResponse)) {
-            MpSPacketConnectionResponse response;
-            memcpy(&response, ev.data.packet.data, sizeof(response));
-            const char* map = response.server_configuration.map_name;
-            if (!response.server_configuration.max_clients || response.server_configuration.max_clients > EPNET_MAX_CLIENTS ||
-                !memchr(map, 0, MP_MAX_MAP_NAME_LEN) ||
-                !mp_is_level_path(map)) { ++c->rejected; continue; }
-            memcpy(c->map, map, sizeof(c->map));
-            if (!c->ready && c->log) fprintf(c->log, "# NET_READY id=%u\n", epnet_client_get_id(c->transport));
+        if (ev.data.packet.pkt_type == MPT_S_WELCOME && c->joined) {
+            uint32_t id, capacity; char map[MP_MAX_MAP_NAME_LEN];
+            if (!mp_welcome_decode(ev.data.packet.data, ev.data.packet.len, &id, &capacity, map) ||
+                capacity > EPNET_MAX_CLIENTS || id != epnet_client_get_id(c->transport)) { ++c->rejected; continue; }
+            memcpy(c->map, map, sizeof(c->map)); c->server_capacity = capacity;
+            if (!c->ready && c->log) fprintf(c->log, "# NET_READY id=%u\n", id);
             c->ready = 1;
         }
         if (ev.data.packet.pkt_type == MPT_S_STATE && c->ready) {
@@ -104,16 +99,15 @@ void state_client_update(StateClient* c, unsigned long now) {
                 state.health, state.weapon_slot, state.current_ammo, state.animation, state.direction,
                 state.velocity, state.moving, state.torso_present, state.torso_direction);
         }
-        if (ev.data.packet.pkt_type == MPT_S_USERS_SYNC && c->ready) {
-            const uint8_t* data = ev.data.packet.data;
-            int length = ev.data.packet.len;
-            if (length < 1 || data[0] > EPNET_MAX_CLIENTS || length != 1 + data[0] * 17) {
-                ++c->rejected; continue;
-            }
-            for (unsigned int i = 0; i < data[0]; ++i) {
-                const uint8_t* item = data + 1 + i * 17;
-                if (item[0] >= EPNET_MAX_CLIENTS || !memchr(item + 1, 0, 16)) { ++c->rejected; continue; }
-                memcpy(c->peers[item[0]].name, item + 1, 16);
+        if (ev.data.packet.pkt_type == MPT_S_ROSTER && c->ready) {
+            MpRosterEntry entries[MP_ROSTER_MAX_ENTRIES]; unsigned int count;
+            if (!mp_roster_decode(ev.data.packet.data, ev.data.packet.len, entries, &count)) { ++c->rejected; continue; }
+            /* The roster replaces the whole table, so departed peers lose their names. */
+            memset(c->roster_name, 0, sizeof(c->roster_name)); memset(c->roster_session, 0, sizeof(c->roster_session));
+            for (unsigned int i = 0; i < count; ++i) {
+                if (entries[i].id >= EPNET_MAX_CLIENTS) continue;
+                memcpy(c->roster_name[entries[i].id], entries[i].name, sizeof(entries[i].name));
+                c->roster_session[entries[i].id] = entries[i].session;
             }
         }
         if (ev.data.packet.pkt_type == MPT_S_SHOT && c->ready) {
@@ -138,10 +132,9 @@ void state_client_update(StateClient* c, unsigned long now) {
         }
     }
     if (c->joined && !c->ready && now - c->requested_at >= 500) {
-        uint8_t request[1 + MP_MAX_NAME_LEN];
-        request[0] = (uint8_t)strlen(c->name);
-        memcpy(request + 1, c->name, request[0]);
-        epnet_client_send(c->transport, MPT_C_CONNECTION_REQUEST, request, 1 + request[0]);
+        uint8_t hello[5 + MP_MAX_NAME_LEN];
+        int length = mp_hello_encode(hello, sizeof(hello), c->name);
+        if (length) epnet_client_send(c->transport, MPT_C_HELLO, hello, (size_t)length);
         c->requested_at = now;
     }
     if (c->ready && now - c->sent_at >= MP_STATE_SEND_MS) {
@@ -153,12 +146,6 @@ void state_client_update(StateClient* c, unsigned long now) {
         mp_state_encode(packet, &state);
         epnet_client_send(c->transport, MPT_C_STATE, packet, sizeof(packet));
         ++c->sent; c->sent_at = now;
-    }
-    if (c->ready && now - c->user_sent_at >= MP_USER_SYNC_UPDATE_RATE_MS) {
-        MpCPacketUserSync packet = {0};
-        strcpy_s(packet.mp_user.name, sizeof(packet.mp_user.name), c->name);
-        epnet_client_send(c->transport, MPT_C_USER_SYNC, &packet, sizeof(packet));
-        c->user_sent_at = now;
     }
 }
 const char* state_client_map(const StateClient* c) { return c && c->ready ? c->map : NULL; }
@@ -177,7 +164,7 @@ int state_client_peer_info(const StateClient* c, unsigned int id, unsigned long 
     memset(out, 0, sizeof(*out));
     if (!state_client_peer(c, id, now, &out->state)) return 0;
     out->session = c->peers[id].session; out->present = 1;
-    memcpy(out->name, c->peers[id].name, sizeof(out->name));
+    if (c->roster_session[id] == out->session) memcpy(out->name, c->roster_name[id], sizeof(out->name));
     return 1;
 }
 int state_client_send_shot(StateClient* c, const MpShot* source, unsigned long now) {

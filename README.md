@@ -30,7 +30,6 @@ for example `git show 1a0cf25:asmp-dll/src/multiplayer/multiplayer.c`.
 - [/common](/common) - Code shared by the server and the client.
   - [/common/epnet](/common/epnet) - Networking library (submodule).
   - [/common/src/protocol.h](/common/src/protocol.h) - State and shot packet codecs.
-  - [/common/src/multiplayer_protocol.h](/common/src/multiplayer_protocol.h) - Join and player-name packets.
 - [/docs](/docs) - [Architecture and behavior](docs/architecture.md) and the [documentation index](docs/README.md).
 - [/diagnostics](/diagnostics) - Build script, test launcher, unit tests and a headless test peer.
 - [/game](/game) - Modified game files: menu markup (.men) and menu logic (.lgc).

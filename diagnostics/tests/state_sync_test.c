@@ -81,6 +81,27 @@ int main(void) {
     shot_packet[3] = 2; CHECK(!mp_shot_decode(shot_packet, sizeof(shot_packet), &shot_decoded));
     shot.weapon = 10; mp_shot_encode(shot_packet, &shot);
     CHECK(!mp_shot_decode(shot_packet, sizeof(shot_packet), &shot_decoded)); shot.weapon = 2;
+    /* Handshake and roster codecs. */
+    uint8_t hs[256]; char text[MP_MAX_NAME_LEN + 1]; char map[MP_MAX_MAP_NAME_LEN]; uint32_t id, capacity;
+    int n = mp_hello_encode(hs, sizeof(hs), "Alice");
+    CHECK(n == 10 && mp_hello_decode(hs, n, text) && !strcmp(text, "Alice"));
+    CHECK(!mp_hello_decode(hs, n - 1, text) && !mp_hello_decode(hs, n + 1, text));
+    hs[3] = 9; CHECK(!mp_hello_decode(hs, n, text)); hs[3] = 1;
+    hs[4] = 0; CHECK(!mp_hello_decode(hs, 5, text)); /* Empty name. */
+    CHECK(!mp_hello_encode(hs, sizeof(hs), "") && !mp_hello_encode(hs, sizeof(hs), "SixteenCharsName") && !mp_hello_encode(hs, sizeof(hs), "bad"));
+    n = mp_welcome_encode(hs, sizeof(hs), 3, 4, "maps/Level_01.map");
+    CHECK(n && mp_welcome_decode(hs, n, &id, &capacity, map) && id == 3 && capacity == 4 && !strcmp(map, "maps/Level_01.map"));
+    CHECK(!mp_welcome_decode(hs, n - 1, &id, &capacity, map));
+    CHECK(!mp_welcome_encode(hs, sizeof(hs), 4, 4, "maps/Level_01.map") || !mp_welcome_decode(hs, 13 + 17, &id, &capacity, map));
+    CHECK(!mp_welcome_encode(hs, sizeof(hs), 0, 4, "maps/mainmenu.map")); /* Not a level. */
+    MpRosterEntry roster[MP_ROSTER_MAX_ENTRIES], back[MP_ROSTER_MAX_ENTRIES]; unsigned int count;
+    memset(roster, 0, sizeof(roster));
+    roster[0].id = 0; roster[0].session = 5; strcpy_s(roster[0].name, sizeof(roster[0].name), "One");
+    roster[1].id = 7; roster[1].session = 1; strcpy_s(roster[1].name, sizeof(roster[1].name), "Seven");
+    n = mp_roster_encode(hs, sizeof(hs), roster, 2);
+    CHECK(n && mp_roster_decode(hs, n, back, &count) && count == 2 && back[1].id == 7 && !strcmp(back[1].name, "Seven"));
+    CHECK(!mp_roster_decode(hs, n - 1, back, &count) && !mp_roster_decode(hs, n + 1, back, &count));
+    roster[1].id = 0; CHECK(!mp_roster_encode(hs, sizeof(hs), roster, 2) || (n = mp_roster_encode(hs, sizeof(hs), roster, 2), !mp_roster_decode(hs, n, back, &count))); /* Duplicate id. */
     unsigned short port = (unsigned short)(55000 + GetCurrentProcessId() % 5000);
     MpServer* server = mp_server_create(port, 4); CHECK(server);
     StateClient* a = state_client_create("127.0.0.1", port, "First", NULL); CHECK(a);
@@ -93,6 +114,9 @@ int main(void) {
     CHECK(decoded.velocity == 0.125f && decoded.moving && decoded.torso_present && decoded.torso_direction == 220);
     CHECK(state_client_peer(a, 1, GetTickCount(), &decoded));
     CHECK(!state_client_peer(a, 0, GetTickCount(), &decoded));
+    PeerState named;
+    CHECK(state_client_peer_info(b, 0, GetTickCount(), &named) && !strcmp(named.name, "First"));
+    CHECK(state_client_peer_info(a, 1, GetTickCount(), &named) && !strcmp(named.name, "Second"));
     CHECK(state_client_map(a) && !strcmp(state_client_map(a), "maps\\Level_01.map"));
     ShotEvent event;
     CHECK(!state_client_send_shot(a, &shot, GetTickCount())); /* Dead owner. */
@@ -120,14 +144,14 @@ int main(void) {
     epnet_client_send(raw, MPT_C_STATE, packet, sizeof(packet));
     raw_pump(server, a, b, raw);
     CHECK(!state_client_peer(b, 2, GetTickCount(), &decoded)); /* Not registered yet. */
-    uint8_t bad_request[] = {15, 'X'};
-    epnet_client_send(raw, 0x10, bad_request, sizeof(bad_request));
+    uint8_t bad_request[] = {0, 0, 0, 1, 15, 'X'};
+    epnet_client_send(raw, MPT_C_HELLO, bad_request, sizeof(bad_request));
     raw_pump(server, a, b, raw);
     epnet_client_send(raw, MPT_C_STATE, packet, sizeof(packet));
     raw_pump(server, a, b, raw);
     CHECK(!state_client_peer(b, 2, GetTickCount(), &decoded));
-    uint8_t request[] = {3, 'R', 'a', 'w'};
-    epnet_client_send(raw, 0x10, request, sizeof(request));
+    uint8_t request[32]; int request_length = mp_hello_encode(request, sizeof(request), "Raw");
+    epnet_client_send(raw, MPT_C_HELLO, request, (size_t)request_length);
     raw_pump(server, a, b, raw);
     epnet_client_send(raw, MPT_C_STATE, packet, sizeof(packet) - 1);
     raw_pump(server, a, b, raw);
@@ -170,6 +194,7 @@ int main(void) {
     a = state_client_create("127.0.0.1", port, "Rejoined", NULL); CHECK(a);
     pump(server, a, b, 1000, &original, NULL);
     CHECK(state_client_peer(b, 0, GetTickCount(), &decoded) && decoded.active && decoded.health == 301);
+    CHECK(state_client_peer_info(b, 0, GetTickCount(), &named) && !strcmp(named.name, "Rejoined")); /* Replaced, not stale. */
     state_client_destroy(a); state_client_destroy(b); mp_server_destroy(server);
     puts("State sync checks passed: signed values, codec validation, two clients through UDP server, menu/stall, expiry, reconnect.");
     return 0;

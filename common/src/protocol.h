@@ -7,7 +7,18 @@
 /* Explicit big-endian words, no pointers/padding. */
 #define MPT_C_STATE 0x30
 #define MPT_S_STATE 0x31
+#define MPT_C_SHOT 0x32
+#define MPT_S_SHOT 0x33
+#define MPT_C_HELLO 0x34
+#define MPT_S_WELCOME 0x35
+#define MPT_S_ROSTER 0x36
+/* Each packet family versions independently. */
 #define MP_STATE_VERSION 3u
+#define MP_SHOT_VERSION 1u
+#define MP_HANDSHAKE_VERSION 1u
+#define MP_MAX_NAME_LEN 15
+#define MP_MAX_MAP_NAME_LEN 24
+#define MP_ROSTER_INTERVAL_MS 2000u
 #define MP_STATE_SIZE 112
 #define MP_STATE_RELAY_SIZE (8 + MP_STATE_SIZE)
 #define MP_STATE_SEND_MS 33u
@@ -102,8 +113,6 @@ static inline void mp_world_key(const char* path, uint32_t* low, uint32_t* high)
     }
     *low = (uint32_t)key; *high = (uint32_t)(key >> 32);
 }
-#define MPT_C_SHOT 0x32
-#define MPT_S_SHOT 0x33
 #define MP_SHOT_SIZE 32
 #define MP_SHOT_RELAY_SIZE (8 + MP_SHOT_SIZE)
 typedef struct MpShot {
@@ -111,13 +120,13 @@ typedef struct MpShot {
     int32_t x, y;
 } MpShot;
 static inline void mp_shot_encode(uint8_t p[MP_SHOT_SIZE], const MpShot* s) {
-    mp_put_u32(p, MP_STATE_VERSION); mp_put_u32(p + 4, s->sequence);
+    mp_put_u32(p, MP_SHOT_VERSION); mp_put_u32(p + 4, s->sequence);
     mp_put_u32(p + 8, s->world_low); mp_put_u32(p + 12, s->world_high);
     mp_put_u32(p + 16, s->world_epoch); mp_put_u32(p + 20, s->weapon);
     mp_put_u32(p + 24, (uint32_t)s->x); mp_put_u32(p + 28, (uint32_t)s->y);
 }
 static inline int mp_shot_decode(const uint8_t* p, int length, MpShot* s) {
-    if (length != MP_SHOT_SIZE || mp_get_u32(p) != MP_STATE_VERSION) return 0;
+    if (length != MP_SHOT_SIZE || mp_get_u32(p) != MP_SHOT_VERSION) return 0;
     memset(s, 0, sizeof(*s));
     s->sequence = mp_get_u32(p + 4); s->world_low = mp_get_u32(p + 8);
     s->world_high = mp_get_u32(p + 12); s->world_epoch = mp_get_u32(p + 16);
@@ -128,5 +137,85 @@ static inline int mp_shot_decode(const uint8_t* p, int length, MpShot* s) {
        conversions away from overflow for received events. */
     return s->weapon < 10u && s->world_epoch && (s->world_low || s->world_high) &&
         s->x >= -1000000 && s->x <= 1000000 && s->y >= -1000000 && s->y <= 1000000;
+}
+/* Handshake and roster. Strings are length-prefixed ASCII 32..126 without a
+   terminator on the wire; decoders always produce NUL-terminated buffers. */
+typedef struct MpRosterEntry { uint32_t id, session; char name[MP_MAX_NAME_LEN + 1]; } MpRosterEntry;
+#define MP_ROSTER_MAX_ENTRIES 16u
+static inline int mp_is_player_name(const char* name) {
+    size_t length = name ? strlen(name) : 0;
+    if (!length || length > MP_MAX_NAME_LEN) return 0;
+    for (size_t i = 0; i < length; ++i)
+        if ((unsigned char)name[i] < 32 || (unsigned char)name[i] > 126) return 0;
+    return 1;
+}
+static inline int mp_read_string(const uint8_t* p, size_t available, char* out, size_t capacity, size_t* used) {
+    if (!available) return 0;
+    size_t length = p[0];
+    if (length + 1 > available || length >= capacity) return 0;
+    memcpy(out, p + 1, length); out[length] = 0; *used = length + 1;
+    return 1;
+}
+/* Client -> server: version, name. Returns the packet length, or 0. */
+static inline int mp_hello_encode(uint8_t* out, size_t capacity, const char* name) {
+    if (!mp_is_player_name(name)) return 0;
+    size_t length = strlen(name);
+    if (capacity < 5 + length) return 0;
+    mp_put_u32(out, MP_HANDSHAKE_VERSION); out[4] = (uint8_t)length; memcpy(out + 5, name, length);
+    return (int)(5 + length);
+}
+static inline int mp_hello_decode(const uint8_t* p, int length, char name[MP_MAX_NAME_LEN + 1]) {
+    size_t used;
+    if (length < 5 || mp_get_u32(p) != MP_HANDSHAKE_VERSION ||
+        !mp_read_string(p + 4, (size_t)length - 4, name, MP_MAX_NAME_LEN + 1, &used) ||
+        used != (size_t)length - 4) return 0;
+    return mp_is_player_name(name);
+}
+/* Server -> client: version, client id, capacity, server map. */
+static inline int mp_welcome_encode(uint8_t* out, size_t capacity, uint32_t id, uint32_t max_clients, const char* map) {
+    size_t length = map ? strlen(map) : 0;
+    if (!mp_is_level_path(map) || length >= MP_MAX_MAP_NAME_LEN || capacity < 13 + length) return 0;
+    mp_put_u32(out, MP_HANDSHAKE_VERSION); mp_put_u32(out + 4, id); mp_put_u32(out + 8, max_clients);
+    out[12] = (uint8_t)length; memcpy(out + 13, map, length);
+    return (int)(13 + length);
+}
+static inline int mp_welcome_decode(const uint8_t* p, int length, uint32_t* id, uint32_t* max_clients, char map[MP_MAX_MAP_NAME_LEN]) {
+    size_t used;
+    if (length < 13 || mp_get_u32(p) != MP_HANDSHAKE_VERSION ||
+        !mp_read_string(p + 12, (size_t)length - 12, map, MP_MAX_MAP_NAME_LEN, &used) ||
+        used != (size_t)length - 12) return 0;
+    *id = mp_get_u32(p + 4); *max_clients = mp_get_u32(p + 8);
+    return *max_clients >= 1 && *max_clients <= MP_ROSTER_MAX_ENTRIES && *id < *max_clients && mp_is_level_path(map);
+}
+/* Server -> client: the complete name table. It replaces every earlier one. */
+static inline int mp_roster_encode(uint8_t* out, size_t capacity, const MpRosterEntry* entries, unsigned int count) {
+    if (count > MP_ROSTER_MAX_ENTRIES || capacity < 8) return 0;
+    mp_put_u32(out, MP_HANDSHAKE_VERSION); mp_put_u32(out + 4, count);
+    size_t at = 8;
+    for (unsigned int i = 0; i < count; ++i) {
+        size_t length = strlen(entries[i].name);
+        if (!mp_is_player_name(entries[i].name) || entries[i].id >= MP_ROSTER_MAX_ENTRIES || capacity < at + 9 + length) return 0;
+        mp_put_u32(out + at, entries[i].id); mp_put_u32(out + at + 4, entries[i].session);
+        out[at + 8] = (uint8_t)length; memcpy(out + at + 9, entries[i].name, length); at += 9 + length;
+    }
+    return (int)at;
+}
+static inline int mp_roster_decode(const uint8_t* p, int length, MpRosterEntry entries[MP_ROSTER_MAX_ENTRIES], unsigned int* count) {
+    if (length < 8 || mp_get_u32(p) != MP_HANDSHAKE_VERSION) return 0;
+    uint32_t n = mp_get_u32(p + 4), seen = 0;
+    if (n > MP_ROSTER_MAX_ENTRIES) return 0;
+    size_t at = 8;
+    for (uint32_t i = 0; i < n; ++i) {
+        size_t used;
+        if ((size_t)length < at + 9) return 0;
+        MpRosterEntry* e = &entries[i]; memset(e, 0, sizeof(*e));
+        e->id = mp_get_u32(p + at); e->session = mp_get_u32(p + at + 4);
+        if (e->id >= MP_ROSTER_MAX_ENTRIES || (seen & (1u << e->id)) || !e->session ||
+            !mp_read_string(p + at + 8, (size_t)length - at - 8, e->name, sizeof(e->name), &used) ||
+            !mp_is_player_name(e->name)) return 0;
+        seen |= 1u << e->id; at += 8 + used;
+    }
+    if (at != (size_t)length) return 0;
+    *count = n; return 1;
 }
 #endif

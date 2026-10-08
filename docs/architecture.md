@@ -6,9 +6,9 @@ and running it, see [Build, test and review](../diagnostics/README.md).
 | Layer | Responsibilities |
 | --- | --- |
 | `asmp-dll/src/game/` | Verified Steam EXE layout/probe (`steam_profile.h`), actor factory/destructor, movement/combat API, map/text/menu bindings, shared slot helper, MAP tick/load, MAN action and D3D9/display hooks |
-| `asmp-dll/src/multiplayer/client/state_client.*` | Original epnet connection/handshake, packet validation, peer state/names and shot queues; no native entities |
+| `asmp-dll/src/multiplayer/client/state_client.*` | epnet connection, hello/welcome handshake, roster names, packet validation, peer state/names and shot queues; no native entities |
 | `asmp-dll/src/multiplayer/` | Production startup/rollback/shutdown and worker loop, session and remote-player state machines, game-thread application, bounded worker handoff |
-| `common/src/protocol.h` | Explicit state/shot codecs and normalized map keys; `multiplayer_protocol.h` holds the join/name handshake |
+| `common/src/protocol.h` | Explicit state, shot, hello, welcome and roster codecs, and normalized map keys |
 | `common/epnet/`, `asmp-server/` | Existing transport and server, with validated state/shot relays |
 | `diagnostics/src/` | Test DLL configuration and logging, frame observer/queue, read-only/dummy harness, launcher and optional test peer |
 
@@ -41,6 +41,17 @@ event carries sequence, map key/generation, weapon and aim coordinates. The
 server prefixes each relayed packet with sender ID and connection generation.
 Rebuild the server and all clients together; older packet versions are rejected.
 
+Each packet family has its own version: state 3, shot 1, handshake 1. After the
+transport connects, the client repeats `MPT_C_HELLO` (version, length-prefixed
+name of 1..15 printable ASCII characters) until the server answers
+`MPT_S_WELCOME` (version, client id, capacity, validated level path). A client
+is not registered, and its state and shots are ignored, until its hello is
+accepted. The server broadcasts `MPT_S_ROSTER` whenever someone joins or leaves
+and every two seconds. A roster lists id, session and name of every connected
+player and replaces the whole name table; the client uses a name only when the
+roster session matches the peer's state session, so a replaced peer never shows
+a stale name. Shots are relayed only after the sender's first valid state.
+
 The relay rejects invalid lengths, versions, field ranges and duplicate/older
 sequences, including wraparound. Peers expire after one second without state;
 menus, dead players and snapshots older than 250 ms are inactive. Session/map
@@ -49,7 +60,11 @@ ownership. The probe's map key, native map-start marker and observed load
 generation identify the world; a reused GAME pointer does not. Local death
 publishes inactive state but preserves the current world and its living peers.
 Native entity operations and UI drawing stay on the game thread.
-Bounded queues drop work rather than blocking that thread.
+Bounded queues drop work rather than blocking that thread. Captured shots wait
+in a game-thread staging array and move to the worker queue when its lock is
+free; only a full buffer drops a shot, and drops are counted. Remote positions
+ease toward the latest received value each game tick (about 60 ms time
+constant); a jump over 160 units or a gap over 250 ms snaps.
 
 Health belongs to each player's local owner. Local damage to its replica is
 suppressed, while damage to the real local player is unchanged. This replaces
