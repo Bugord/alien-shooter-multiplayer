@@ -1,8 +1,8 @@
 /*
-/*/
 
 !/.gitignore
 !/.gitmodules
+!/.clang-format
 !/Makefile
 !/README.md
 !/Doxyfile
@@ -12,10 +12,8 @@
 
 !/asmp-dll/Makefile
 !/asmp-dll/README.md
-!/asmp-dll/.clang-format
 
 !/asmp-dll/src
-!/asmp-dll/test
 
 !/asmp-server/
 /asmp-server/*
@@ -41,7 +39,10 @@
 !/game/AlienShooter/Maps/asmp_mainmenu.men
 !/game/AlienShooter/Maps/asmp_play.lgc
 !/game/AlienShooter/Maps/asmp_play.men
-!/game/AlienShooter/Maps/MAINMENU.lgc
+!/game/AlienShooter/Maps/MAINMENU.LGC
+# Source scripts for the existing multiplayer menu on Steam.
+!/game/AlienShooter/Maps/steam_mainmenu.lgc
+!/game/AlienShooter/Maps/steam_asmp_play.lgc
 
 !/test
 /test/*
@@ -65,14 +66,10 @@
 !/steam-diagnostics/tests/
 /steam-diagnostics/tests/*
 !/steam-diagnostics/tests/*.c
+!/steam-diagnostics/tests/*.h
 
-# Local reports, logs, reverse-engineering databases and history backups.
+# Local logs, reverse-engineering databases and history backups.
 /.local-history/
-/reports/
 *.log
 *.idb
 *.i64
-
-# Source scripts for the existing multiplayer menu on Steam.
-!/game/AlienShooter/Maps/steam_mainmenu.lgc
-!/game/AlienShooter/Maps/steam_asmp_play.lgc
