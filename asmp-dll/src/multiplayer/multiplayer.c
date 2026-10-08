@@ -1,5 +1,6 @@
 #include <string.h>
 #include "multiplayer.h"
+#include "pose_buffer.h"
 #include "../game/ui.h"
 #include "../game/display_hook.h"
 
@@ -13,10 +14,8 @@ typedef struct Remote {
     unsigned int failures;
     /* Last slot armed natively and last slot reported as rejected. */
     int last_weapon, rejected_weapon;
-    /* Displayed position eases toward the latest received one between packets. */
-    float shown_x, shown_y, shown_z;
-    DWORD shown_at;
-    int shown;
+    /* Received positions, played back a fixed delay behind the newest. */
+    PoseBuffer pose;
 } Remote;
 typedef struct PendingShot { ShotEvent event; DWORD received; } PendingShot;
 static uintptr_t base, local_game, local_player;
@@ -117,25 +116,12 @@ static void abandon(Remote* r, uintptr_t game, ActorResult* update, int* cleanup
     r->state = RS_ABANDONED;
     update->event = ACTOR_FAULT; update->reason = ACTOR_REASON_EXCEPTION;
 }
-/* Exponential-style easing: the shown position closes dt/(dt+tau) of the gap
-   each game tick, so packet jitter does not become visible stutter. Large gaps
-   (respawn, teleport) and stale history snap to the target. */
-#define EASE_TAU_MS 60.0f
-#define EASE_SNAP_DISTANCE 160.0f
-#define EASE_STALE_MS 250u
-static void ease_toward_target(Remote* r, Snapshot* target, DWORD now)
+/* The shown position is interpolated between received samples on the sender's
+   tick timeline (see pose_buffer.h), not pulled toward the latest packet. */
+static void interpolate_pose(Remote* r, const MpState* state, Snapshot* target, DWORD now)
 {
-    float dx = target->x - r->shown_x, dy = target->y - r->shown_y, dz = target->z - r->shown_z;
-    DWORD elapsed = now - r->shown_at;
-    if (!r->shown || elapsed > EASE_STALE_MS ||
-        dx * dx + dy * dy + dz * dz > EASE_SNAP_DISTANCE * EASE_SNAP_DISTANCE) {
-        r->shown_x = target->x; r->shown_y = target->y; r->shown_z = target->z; r->shown = 1;
-    } else {
-        float dt = (float)elapsed, alpha = dt / (dt + EASE_TAU_MS);
-        r->shown_x += dx * alpha; r->shown_y += dy * alpha; r->shown_z += dz * alpha;
-    }
-    r->shown_at = now;
-    target->x = r->shown_x; target->y = r->shown_y; target->z = r->shown_z;
+    pose_push(&r->pose, state->sequence, state->tick, now, state->x, state->y, state->z);
+    pose_sample(&r->pose, now, &target->x, &target->y, &target->z);
 }
 static void forget_weapon(Remote* r) { r->last_weapon = r->rejected_weapon = -1; r->weapon_retry_at = 0; }
 static void report(MultiplayerFrame* frame, unsigned int id, const Remote* r, const ActorResult* update, int cleanup_failed)
@@ -277,7 +263,7 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
                     }
                 }
                 if (r->state == RS_SPAWNED) {
-                    ease_toward_target(r, &target, now);
+                    interpolate_pose(r, s, &target, now);
                     ActorResult pose = actor_apply(&r->actor, &target);
                     if (pose.event == ACTOR_FAULT) { update = pose; abandon(r, local->game, &update, &cleanup_failed); }
                     else if (pose.event == ACTOR_LOST) { update = pose; r->state = RS_IDLE; forget_weapon(r); }
@@ -287,7 +273,7 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
                 }
             }
         }
-        if (r->state != RS_SPAWNED) r->shown = 0;
+        if (r->state != RS_SPAWNED) pose_reset(&r->pose);
         if (update.event != ACTOR_NONE) report(&result, id, r, &update, cleanup_failed);
         if (actor_live(&r->actor, local->game)) any_live = 1;
     }

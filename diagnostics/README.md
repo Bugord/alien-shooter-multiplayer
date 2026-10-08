@@ -131,6 +131,9 @@ In one Git Bash terminal, from the repository root:
 bash diagnostics/start-server.sh
 ```
 
+On Windows, double-click `diagnostics\start-server.bat` for the same thing in its own window;
+closing that window stops the server. It takes an optional UDP port argument.
+
 The relay runs in that terminal on UDP 27020; Ctrl+C stops it. An occupied port
 is reported without replacing or stopping its owner. If the matching relay is
 already running, use it and proceed directly to the clients command.

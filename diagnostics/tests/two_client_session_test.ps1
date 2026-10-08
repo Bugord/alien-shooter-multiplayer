@@ -187,6 +187,9 @@ try {
     # Entry points refuse before changing anything (only when no real session is recorded).
     $realManifest = Join-Path $diagnosticsRoot 'build\two-client\session.json'
     if (!(Test-Path -LiteralPath $realManifest) -and (Test-Path -LiteralPath (Join-Path $diagnosticsRoot 'build\asmp-server.exe'))) {
+        # Windows PowerShell 5.1 turns a child's stderr into a terminating error under Stop;
+        # these calls are expected to fail and are judged by exit code and text.
+        $ErrorActionPreference = 'Continue'
         $udp = New-Object Net.Sockets.UdpClient(0)
         try {
             $busyPort = ([Net.IPEndPoint]$udp.Client.LocalEndPoint).Port
@@ -198,6 +201,7 @@ try {
         Check ($LASTEXITCODE -ne 0 -and $output -match 'CloseGames') '-Force alone is refused'
         $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $diagnosticsRoot 'stop-two-client-test.ps1') 2>&1 | Out-String
         Check ($LASTEXITCODE -eq 0 -and $output -match 'No two-client session') 'stop without a session is harmless'
+        $ErrorActionPreference = 'Stop'
     }
     Write-Output 'Two-client session checks passed.'
 } finally {
