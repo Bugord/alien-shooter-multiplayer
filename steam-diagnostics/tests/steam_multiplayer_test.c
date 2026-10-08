@@ -8,7 +8,7 @@ static unsigned char game[0x2300], army[0x30], player[0xBC], vid[0x490];
 static unsigned char entity[0xBC], torso[0x74], weapons[10][8];
 static uintptr_t entries[16], base;
 static unsigned int created, destroyed, shots, selected;
-static int shot_x, shot_y, health, armed, fail_weapon, fail_factory, fault_apply, fault_remove, missing_weapon;
+static int shot_x, shot_y, health, armed, fail_weapon, fail_factory, fault_apply, fault_remove, missing_weapon, fault_shot;
 static unsigned int granted;
 static SteamPeerState peers[STEAM_MAX_PEERS];
 static Snapshot local;
@@ -40,7 +40,7 @@ static int __fastcall action(void* e, void* u, unsigned int kind, intptr_t a, in
     if (kind == 0x61) { CHECK(a == 0); return 0; }
     if (kind == 0x38) return !missing_weapon;
     if (kind == 0x36) { CHECK(a >= 260 && a < 270); ++granted; return 0; }
-    if (kind == 0x5C) return *(int*)(entity + 0x84) / 64;
+    if (kind == 0x5C) { if (fault_shot) RaiseException(0xE0000001u, 0, 0, NULL); return *(int*)(entity + 0x84) / 64; }
     if (kind == 0x5D) { *(int*)(entity + 0x84) += (int)a * 64; return 0; }
     if (kind == 0x25) { CHECK(*(int*)(entity + 0x84) >= 2 * 64); ++shots; shot_x = (int)a; shot_y = (int)b; return 0; }
     CHECK(0); return 0;
@@ -128,10 +128,21 @@ int main(void) {
     local.health = 110; CHECK(step(4350).world_epoch == 2 && destroyed == 1);
     steam_multiplayer_tick(&local, PROBE_OK, 5400); CHECK(destroyed == 2); /* Expired worker data. */
     step(5420); step(5440); step(7440); attach_torso(); step(7460); CHECK(created == 3);
-    s->weapon_slot = 5; fail_weapon = 1; step(7480); step(7500);
+    s->weapon_slot = 5; fail_weapon = 1;
+    SteamMultiplayerFrame rejected = step(7480);
+    CHECK(rejected.count == 1 && rejected.remote[0].actor.event == ACTOR_REJECTED &&
+        rejected.remote[0].actor.reason == ACTOR_REASON_WEAPON);
+    CHECK(step(7500).count == 0); /* Reported once per slot. */
     CHECK(destroyed == 2 && steam_multiplayer_remote_state(0) == RS_SPAWNED && armed == 2);
-    fail_weapon = 0; s->weapon_slot = 6; step(7510); CHECK(armed == 6);
-    steam_multiplayer_request_stop(); step(7520); CHECK(steam_multiplayer_stopped());
+    fail_weapon = 0; step(7510); CHECK(armed == 2); /* Retry waits one second. */
+    step(8480); CHECK(armed == 5); /* A rejected arm is retried. */
+    s->weapon_slot = 6; step(8490); CHECK(armed == 6);
+    fault_shot = 1; steam_multiplayer_receive_shot(&event, 8495);
+    SteamMultiplayerFrame shot_fault = step(8500); fault_shot = 0;
+    CHECK(shot_fault.shots_discarded == 1 && shot_fault.count == 1 && shot_fault.remote[0].id == 0 &&
+        shot_fault.remote[0].actor.event == ACTOR_FAULT && shot_fault.remote[0].state == RS_ABANDONED &&
+        !shot_fault.remote[0].cleanup_failed && destroyed == 3);
+    steam_multiplayer_request_stop(); step(8520); CHECK(steam_multiplayer_stopped());
     CHECK(steam_multiplayer_stop());
     /* Reinitialization clears old queues, stop flags and world identity. */
     CHECK(steam_multiplayer_initialize(base, &api));

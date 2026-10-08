@@ -34,7 +34,7 @@ ActorResult steam_actor_spawn(SteamActor* a, uintptr_t base, const Snapshot* loc
     ActorResult r = {0};
     __try {
         if (a->entity || !local->game || *(uintptr_t*)local->game != base + STEAM_GAME_VTABLE_RVA)
-            return diagnostic(a, ACTOR_REJECTED, ACTOR_REASON_ENTITY_TYPE);
+            return diagnostic(a, ACTOR_REJECTED, ACTOR_REASON_PRECONDITION);
         uintptr_t source = *(uintptr_t*)(local->player + STEAM_ENTITY_VID_OFFSET);
         r.source_class = source ? *(unsigned int*)(source + STEAM_VID_CLASS_OFFSET) : 0;
         if (!source || r.source_class != 7u) { r.event = ACTOR_REJECTED; r.reason = ACTOR_REASON_VID_CLASS; return r; }
@@ -113,6 +113,7 @@ ActorResult steam_actor_apply(SteamActor* a, const Snapshot* target)
             a->engine.rotate((void*)child, NULL, target->torso_direction);
             r.applied_torso = *(unsigned char*)(child + STEAM_ENTITY_DIRECTION_OFFSET); r.torso_present = 1;
         }
+        /* The pose-only diagnostic dummy binds no health call; replicas always do. */
         if (a->engine.health) {
             a->engine.health((void*)a->entity, NULL, target->health);
             int64_t ammo = (int64_t)target->current_ammo * STEAM_AMMO_SCALE;

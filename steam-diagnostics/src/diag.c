@@ -25,7 +25,7 @@ static void log_frame(FILE* log, const FrameSample* frame, Snapshot* last,
     if (frame->actor.event != ACTOR_NONE) {
         static const char* events[] = {"none", "spawned", "removed", "lost", "rejected", "fault", "pose"};
         static const char* reasons[] = {"none", "vid-class", "no-child", "list-category", "factory-null",
-            "unregistered", "entity-type", "local-player-changed", "exception", "weapon"};
+            "unregistered", "entity-type", "local-player-changed", "exception", "weapon", "precondition"};
         fprintf(log, "# DUMMY event=%s entity=%08lX category=%u updates=%u tick=%ld reason=%s source_class=%u\n",
             events[frame->actor.event], (unsigned long)frame->actor.entity,
             frame->actor.category, frame->actor.updates, frame->tick,

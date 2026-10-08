@@ -24,6 +24,24 @@
 #define STEAM_GAME_TICK_SLOT 3u
 #define STEAM_LOAD_MAP_RVA 0x3C7D0u
 #define STEAM_LOAD_MAP_SLOT 6u
+/* Native UI/text bindings used by steam_ui.c. STEXT vtable slots 0 and 1
+   are its destructor and action; its owned text string is at +0x74. */
+#define STEAM_STRING_CREATE_RVA 0x25EA0u
+#define STEAM_STRING_ASSIGN_RVA 0x44CB0u
+#define STEAM_LIST_REMOVE_RVA 0x706A0u
+#define STEAM_ADD_CHILD_RVA 0x6A5F0u
+#define STEAM_DRAW_RECT_RVA 0x271B0u
+#define STEAM_SET_ANIMATION_RVA 0x6B970u
+#define STEAM_STEXT_VTABLE_RVA 0xDA7BCu
+#define STEAM_STEXT_DESTRUCTOR_RVA 0x38550u
+#define STEAM_STEXT_ACTION_RVA 0x260E0u
+#define STEAM_STEXT_TEXT_OFFSET 0x74u
+/* GAME menu entity list uses the same count/capacity/entries layout as world lists. */
+#define STEAM_GAME_MENU_LIST_OFFSET 0x274u
+#define STEAM_GAME_VID_TABLE_OFFSET 0x2BCu
+#define STEAM_FONT_VID_INDEX 4u
+#define STEAM_GAME_CAMERA_X_OFFSET 0x54u
+#define STEAM_GAME_CAMERA_Y_OFFSET 0x58u
 #define STEAM_ARMY_INDEX_OFFSET 0x240u
 #define STEAM_ARMY_ARRAY_OFFSET 0x244u
 #define STEAM_ARMY_PLAYER_OFFSET 0x10u

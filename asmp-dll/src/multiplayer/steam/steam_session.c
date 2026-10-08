@@ -88,9 +88,10 @@ int steam_session_tick(const Snapshot* sample, enum ProbeResult result, DWORD no
                 session.state = SS_REQUESTED; session.engine.status(status, SM_CONNECTING); session.engine.button(button, 1);
             }
         }
-        int ready = 0, connected = 0; char map[128] = {0};
+        /* A contended lock means "no news", not a lost connection. */
+        int observed = 0, ready = 0, connected = 0; char map[128] = {0};
         if (TryAcquireSRWLockShared(&lock)) {
-            ready = session.result_ready && session.result_generation == session.generation;
+            observed = 1; ready = session.result_ready && session.result_generation == session.generation;
             connected = session.connection; memcpy(map, session.server_map, sizeof(map));
             ReleaseSRWLockShared(&lock);
         }
@@ -109,7 +110,12 @@ int steam_session_tick(const Snapshot* sample, enum ProbeResult result, DWORD no
             break;
         case SS_RELEASE_MENU: session.state = SS_LOADING; break;
         case SS_LOADING:
-            if (!ready || !connected) { disconnect(SS_FAILED); break; }
+            if (!observed) break;
+            if (!ready || !connected) {
+                if (status) session.engine.status(status, SM_FAILED);
+                if (button) session.engine.button(button, 0);
+                disconnect(SS_FAILED); break;
+            }
             if (!session.engine.load_map(game, map)) { disconnect(SS_ABANDONED); return -1; }
             session.entered_at = now; session.state = SS_WAIT_LEVEL; return 1;
         case SS_WAIT_LEVEL:

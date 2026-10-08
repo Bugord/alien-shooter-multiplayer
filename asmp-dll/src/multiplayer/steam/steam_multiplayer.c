@@ -10,8 +10,10 @@ typedef struct Remote {
     uint32_t world_low, world_high, local_epoch;
     enum SteamRemoteState state;
     DWORD entered_at, retry_at, last_pose;
+    DWORD weapon_retry_at;
     unsigned int failures;
-    int last_weapon;
+    /* Last slot armed natively and last slot reported as rejected. */
+    int last_weapon, rejected_weapon;
 } Remote;
 typedef struct PendingShot { SteamShotEvent event; DWORD received; } PendingShot;
 static uintptr_t base, local_game, local_player;
@@ -37,7 +39,7 @@ int steam_multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
     engine = *api; base = image_base;
     memset(remote, 0, sizeof(remote));
     for (unsigned int i = 0; i < STEAM_MAX_PEERS; ++i) {
-        steam_actor_init(&remote[i].actor, &engine); remote[i].last_weapon = -1;
+        steam_actor_init(&remote[i].actor, &engine); remote[i].last_weapon = remote[i].rejected_weapon = -1;
     }
     local_game = local_player = 0; local_low = local_high = world_epoch = map_started = world_load = 0;
     memset(incoming, 0, sizeof(incoming)); memset(current, 0, sizeof(current));
@@ -111,6 +113,16 @@ static void abandon(Remote* r, uintptr_t game, ActorResult* update, int* cleanup
     r->state = RS_ABANDONED;
     update->event = ACTOR_FAULT; update->reason = ACTOR_REASON_EXCEPTION;
 }
+static void forget_weapon(Remote* r) { r->last_weapon = r->rejected_weapon = -1; r->weapon_retry_at = 0; }
+static void report(SteamMultiplayerFrame* frame, unsigned int id, const Remote* r, const ActorResult* update, int cleanup_failed)
+{
+    /* One entry per peer: a later event in the same tick replaces the earlier one. */
+    unsigned int i = 0;
+    while (i < frame->count && frame->remote[i].id != id) ++i;
+    if (i == frame->count) ++frame->count;
+    frame->remote[i].id = id; frame->remote[i].actor = *update;
+    frame->remote[i].state = r->state; frame->remote[i].cleanup_failed = cleanup_failed;
+}
 static void backoff(Remote* r, DWORD now)
 {
     DWORD delay = r->failures < 4u ? (2000u << r->failures) : 30000u;
@@ -172,7 +184,7 @@ SteamMultiplayerFrame steam_multiplayer_tick(const Snapshot* local, enum ProbeRe
         if (r->state != RS_ABANDONED && (!wanted || changed || world_changed)) {
             update = steam_actor_remove(&r->actor, local->game);
             if (update.event == ACTOR_FAULT) abandon(r, local->game, &update, &cleanup_failed);
-            else { r->state = RS_IDLE; r->failures = 0; r->last_weapon = -1; }
+            else { r->state = RS_IDLE; r->failures = 0; forget_weapon(r); }
         }
         if (r->state == RS_ABANDONED) {
             if (stopping && steam_actor_live(&r->actor, local->game)) {
@@ -182,7 +194,7 @@ SteamMultiplayerFrame steam_multiplayer_tick(const Snapshot* local, enum ProbeRe
         } else if (wanted) {
             if ((r->state == RS_SPAWNING || r->state == RS_SPAWNED) && !steam_actor_live(&r->actor, local->game)) {
                 update.event = ACTOR_LOST; update.entity = r->actor.entity;
-                r->actor.entity = 0; r->state = RS_IDLE; r->last_weapon = -1;
+                r->actor.entity = 0; r->state = RS_IDLE; forget_weapon(r);
             }
             if (r->state == RS_IDLE) {
                 r->session = peer->session; r->epoch = s->world_epoch;
@@ -213,28 +225,31 @@ SteamMultiplayerFrame steam_multiplayer_tick(const Snapshot* local, enum ProbeRe
                 }
             }
             if (r->state == RS_SPAWNED) {
-                if (target.weapon_slot != r->last_weapon) {
-                    r->last_weapon = target.weapon_slot;
+                /* A rejected arm is retried at most once per second and reported once per slot. */
+                if (target.weapon_slot < 0) r->last_weapon = target.weapon_slot;
+                else if (target.weapon_slot != r->last_weapon &&
+                    (target.weapon_slot != r->rejected_weapon || (int32_t)(now - r->weapon_retry_at) >= 0)) {
                     int armed = steam_actor_arm(&r->actor, target.weapon_slot);
                     if (armed < 0) abandon(r, local->game, &update, &cleanup_failed);
-                    else if (!armed && target.weapon_slot >= 0) { update.event = ACTOR_REJECTED; update.reason = ACTOR_REASON_WEAPON; update.entity = r->actor.entity; }
+                    else if (armed) { r->last_weapon = target.weapon_slot; r->rejected_weapon = -1; }
+                    else {
+                        if (target.weapon_slot != r->rejected_weapon) {
+                            update.event = ACTOR_REJECTED; update.reason = ACTOR_REASON_WEAPON; update.entity = r->actor.entity;
+                        }
+                        r->rejected_weapon = target.weapon_slot; r->weapon_retry_at = now + 1000u;
+                    }
                 }
                 if (r->state == RS_SPAWNED) {
                     ActorResult pose = steam_actor_apply(&r->actor, &target);
                     if (pose.event == ACTOR_FAULT) { update = pose; abandon(r, local->game, &update, &cleanup_failed); }
-                    else if (pose.event == ACTOR_LOST) { update = pose; r->state = RS_IDLE; }
+                    else if (pose.event == ACTOR_LOST) { update = pose; r->state = RS_IDLE; forget_weapon(r); }
                     else if (now - r->last_pose >= 1000u && update.event == ACTOR_NONE) { update = pose; r->last_pose = now; }
                     if (r->state == RS_SPAWNED && steam_ui_name(&r->actor, peer->name) < 0)
                         abandon(r, local->game, &update, &cleanup_failed);
                 }
             }
         }
-        if (update.event != ACTOR_NONE) {
-            result.remote[result.count].id = id;
-            result.remote[result.count].actor = update;
-            result.remote[result.count].state = r->state;
-            result.remote[result.count++].cleanup_failed = cleanup_failed;
-        }
+        if (update.event != ACTOR_NONE) report(&result, id, r, &update, cleanup_failed);
         if (steam_actor_live(&r->actor, local->game)) any_live = 1;
     }
     unsigned int keep = 0; unsigned int fired = 0;
@@ -252,7 +267,11 @@ SteamMultiplayerFrame steam_multiplayer_tick(const Snapshot* local, enum ProbeRe
             if (applied) {
                 fired |= 1u << e->id;
                 if (applied > 0) ++result.shots_applied;
-                else { ActorResult fault = {0}; int failed = 0; abandon(r, local->game, &fault, &failed); ++result.shots_discarded; }
+                else {
+                    ActorResult fault = {0}; int failed = 0; fault.entity = r->actor.entity;
+                    abandon(r, local->game, &fault, &failed); report(&result, e->id, r, &fault, failed);
+                    ++result.shots_discarded;
+                }
                 continue;
             }
         }

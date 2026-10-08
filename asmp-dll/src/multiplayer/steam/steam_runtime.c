@@ -131,7 +131,9 @@ void steam_runtime_worker_step(DWORD now) {
     if (frame.tick) publish_frame(&frame);
     state_client_update(runtime.client, now);
     if (runtime.client && state_client_connected(runtime.client)) {
-        runtime.network = NS_CONNECTED; steam_session_result(runtime.generation, 1, state_client_map(runtime.client));
+        /* Publish once per connection; the session keeps the result. */
+        if (runtime.network != NS_CONNECTED) steam_session_result(runtime.generation, 1, state_client_map(runtime.client));
+        runtime.network = NS_CONNECTED;
     } else if (runtime.network == NS_CONNECTED || (runtime.network == NS_CONNECTING && now - runtime.connecting_at >= 10000u)) {
         steam_session_result(runtime.generation, 0, NULL);
         state_client_destroy(runtime.client); runtime.client = NULL; runtime.network = NS_OFF;
