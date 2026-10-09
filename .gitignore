@@ -45,6 +45,7 @@
 /diagnostics/*
 !/diagnostics/README.md
 !/diagnostics/*.ps1
+!/diagnostics/*.lgc
 !/diagnostics/*.sh
 !/diagnostics/*.bat
 !/diagnostics/src/

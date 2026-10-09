@@ -8,6 +8,7 @@ page for your task.
 | Page | Contents |
 | --- | --- |
 | [Build, test and review](../diagnostics/README.md) | Build, preparing test copies and isolated DLL pairs, Git Bash server/two-client launch, managed two-client session (start, stop, restart, live checklist), one-PC Mirror test, two-copy launch verification, multiplayer menu and two-PC sessions, window and diagnostic modes, what the automated tests cover |
+| [Monster checkpoints](monster-sync-stages.md) | Authoritative game-host design, separate implementation stages and the offline stage-1 UNIT control experiment |
 
 ## How it works
 

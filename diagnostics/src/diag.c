@@ -24,6 +24,18 @@ static void log_frame(FILE* log, const FrameSample* frame, Snapshot* last,
     enum ProbeResult* previous, DWORD* last_log)
 {
     const Snapshot* sample = &frame->snapshot;
+    if (frame->monster.event) {
+        const MonsterProbeFrame* m = &frame->monster;
+        const UnitPuppetSample* u = &m->unit;
+        fprintf(log, "# MONSTER state=%d phase=%u cleanup=%d entity=%08lX vid=%u class=%u anim=%u frame=%u frame_changes=%u decisions=%u movements=%u blocked=%u violations=%u behavior=%u goal=%08lX command=%u stack=%u moving=%u direction=%u velocity=%.5f x=%.2f y=%.2f z=%.2f child=%08lX child_goal=%08lX child_command=%u child_stack=%u\n",
+            m->state, m->phase, m->cleanup, (unsigned long)u->entity, u->vid, u->class_id, u->animation, u->frame,
+            u->frame_changes, u->decisions, u->movements, u->blocked, m->violations, u->behavior,
+            (unsigned long)u->goal, u->command, u->stack, u->moving, u->direction, u->velocity, u->x, u->y, u->z,
+            (unsigned long)u->child, (unsigned long)u->child_goal, u->child_command, u->child_stack);
+        fprintf(log, "# MONSTER_FRAMES first=%u last=%u child_first=%u child_frame=%u child_last=%u child_frame_changes=%u\n",
+            u->frame_first, u->frame_last, u->child_frame_first, u->child_frame, u->child_frame_last, u->child_frame_changes);
+        if (m->reloaded) fprintf(log, "# MONSTER_RELOAD completed cleanup=%d violations=%u\n", m->cleanup, m->violations);
+    }
     if (frame->actor.event != ACTOR_NONE) {
         static const char* events[] = {"none", "spawned", "removed", "lost", "rejected", "fault", "pose"};
         static const char* reasons[] = {"none", "vid-class", "no-child", "list-category", "factory-null",
@@ -87,6 +99,7 @@ static DWORD WINAPI run(LPVOID unused)
     DWORD last_stats = clock_ms();
     int hook_attempted = 0;
     int runtime_attempted = 0;
+    int monster_attempted = 0;
     (void)unused;
     if (!GetModuleFileNameW(self, directory, MAX_PATH) || !GetModuleFileNameW(NULL, exe, MAX_PATH)) goto fail;
     wchar_t* slash = wcsrchr(directory, L'\\');
@@ -143,6 +156,12 @@ static DWORD WINAPI run(LPVOID unused)
     char host[16] = {0}, port_text[16] = {0}, name[16] = {0};
     DWORD host_length = GetEnvironmentVariableA("ASMP_DIAG_SERVER", host, sizeof(host));
     int multiplayer_enabled = host_length || (multiplayer_length == 1 && multiplayer_option[0] == '1');
+    char monster_option[8] = {0};
+    DWORD monster_length = GetEnvironmentVariableA("ASMP_DIAG_MONSTER", monster_option, sizeof(monster_option));
+    int monster_enabled = monster_length == 1 && (monster_option[0] == '1' || monster_option[0] == '2' || monster_option[0] == '3');
+    enum MonsterProbeKind monster_kind = monster_option[0] == '3' ? MONSTER_PROBE_FLYING_RELOAD :
+        (monster_option[0] == '2' ? MONSTER_PROBE_FLYING : MONSTER_PROBE_GROUND);
+    if (monster_enabled && (dummy_enabled || multiplayer_enabled)) { fprintf(log, "ERROR monster experiment is offline and exclusive\n"); goto fail; }
     if (dummy_enabled && multiplayer_enabled) { fprintf(log, "ERROR dummy and multiplayer are mutually exclusive\n"); goto fail; }
     if (multiplayer_enabled) {
         RuntimeConfig config = {0}; config.log = log; config.observer = diag_tick_observe;
@@ -168,6 +187,14 @@ static DWORD WINAPI run(LPVOID unused)
         fprintf(log, "# DUMMY enabled offset_x=80 lifetime_seconds=60\n");
     }
     enum DiagTickResult hook_result = DIAG_TICK_OK;
+    if (monster_enabled) {
+        monster_attempted = 1;
+        if (!diag_tick_enable_monster_kind(base, monster_kind)) { fprintf(log, "REJECTED monster bindings/hooks\n"); goto fail; }
+        fprintf(log, "# MONSTER enabled stage=%u auto_map=%s duration=30s\n",
+            monster_kind != MONSTER_PROBE_GROUND ? 2u : 1u,
+            monster_kind != MONSTER_PROBE_GROUND ? "maps/survive_01.map waves=off flying_UNIT_vid290" : "maps/survive_01.map UNIT");
+        if (monster_kind == MONSTER_PROBE_FLYING_RELOAD) fprintf(log, "# MONSTER reload_check=1 after_seconds=10\n");
+    }
     if (!multiplayer_enabled) {
         hook_attempted = 1;
         hook_result = diag_tick_install(
@@ -199,13 +226,14 @@ static DWORD WINAPI run(LPVOID unused)
     if (runtime_attempted) cleanup_ok = runtime_stop(5000u);
     else {
         diag_tick_request_dummy_stop();
+        diag_tick_request_monster_stop();
         DWORD cleanup_started = GetTickCount();
-        while (!diag_tick_dummy_stopped() && GetTickCount() - cleanup_started < 5000u) {
+        while ((!diag_tick_dummy_stopped() || !diag_tick_monster_stopped()) && GetTickCount() - cleanup_started < 5000u) {
             FrameSample pending[64]; unsigned int available = diag_tick_drain(pending, 64);
             for (unsigned int i = 0; i < available; ++i) log_frame(log, &pending[i], &last, &previous, &last_log);
             Sleep(20);
         }
-        if (!diag_tick_dummy_stopped()) { fprintf(log, "# DUMMY cleanup timeout; hook retained\n"); cleanup_ok = 0; }
+        if (!diag_tick_dummy_stopped() || !diag_tick_monster_stopped()) { fprintf(log, "# DIAGNOSTIC cleanup timeout; hook retained\n"); cleanup_ok = 0; }
         else { hook_result = diag_tick_stop(); cleanup_ok = hook_result == DIAG_TICK_OK; }
     }
     FrameSample frames[64];
@@ -222,7 +250,7 @@ fail:
         int restored = runtime_stop(5000u);
         if (log) fprintf(log, "# ERROR runtime cleanup=%d\n", restored);
     }
-    if (hook_attempted) {
+    if (hook_attempted || monster_attempted) {
         enum DiagTickResult restored = diag_tick_stop();
         if (log) fprintf(log, "# ERROR diagnostic hook cleanup=%d\n", restored);
     }

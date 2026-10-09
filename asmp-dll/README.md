@@ -13,3 +13,11 @@ diagnostic launcher; see [Build, test and review](../diagnostics/README.md).
 `game/` does not include `multiplayer/` headers; it receives callbacks instead.
 Layers, threading and replica lifecycle are described in
 [Architecture and behavior](../docs/architecture.md).
+
+`game/unit_puppet.*` provides the bounded ground/flying UNIT experiments (optionally
+one linked class-9 weapon part):
+validated Steam bindings, a single borrowed-entity registry and selective
+action/movement/destructor hooks.
+`diagnostics/src/monster_probe.*` feeds its
+offline test poses; production networking does not enable it. See
+[Monster checkpoints](../docs/monster-sync-stages.md) for ownership and limits.

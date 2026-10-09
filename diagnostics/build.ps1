@@ -27,15 +27,24 @@ $actorSources = @("$repo\asmp-dll\src\game\actor.c", "$repo\asmp-dll\src\game\ac
 $multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", "$repo\asmp-dll\src\game\action_hook.c", "$repo\asmp-dll\src\game\ui.c", "$repo\asmp-dll\src\game\display_hook.c", "$repo\asmp-dll\src\multiplayer\session.c")
 $hookSources = @("$repo\asmp-dll\src\game\slot_hook.c", "$repo\asmp-dll\src\game\tick_hook.c", "$repo\asmp-dll\src\game\world_hook.c")
 $runtimeSource = "$repo\asmp-dll\src\multiplayer\runtime.c"
+$monsterSources = @("$repo\asmp-dll\src\game\unit_puppet.c", "$root\src\monster_probe.c")
 Push-Location $build
 try {
     # Compile the existing networking library separately with its warning level.
     Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $netCommon + $netClient)
     $netObjects = @($netCommon + $netClient | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
-    Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @($runtimeSource) + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\diag_tick.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'winmm.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
+    Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $monsterSources + @($runtimeSource) + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\diag_tick.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'winmm.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     Compile ($flags + $netIncludes + @("$root\src\state_peer.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:state-peer.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
     Compile ($flags + @("$root\src\launcher.c", "$root\src\window_mode.c", "$root\src\hash.c", '/Fe:asmp-diag-launch.exe', '/link', 'bcrypt.lib', 'user32.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     if (!$SkipTests) {
+        Compile ($flags + @("$root\tests\unit_puppet_test.c", "$repo\asmp-dll\src\game\unit_puppet.c", "$repo\asmp-dll\src\game\slot_hook.c", '/Fe:unit-puppet-test.exe', '/link', '/MACHINE:X86'))
+        & .\unit-puppet-test.exe
+        if ($LASTEXITCODE) { throw 'UNIT puppet checks failed.' }
+        Compile ($flags + @("$root\tests\monster_probe_test.c", "$root\src\monster_probe.c", '/Fe:monster-probe-test.exe', '/link', '/MACHINE:X86'))
+        & .\monster-probe-test.exe
+        if ($LASTEXITCODE) { throw 'Monster probe checks failed.' }
+        & .\monster-probe-test.exe flying
+        if ($LASTEXITCODE) { throw 'Flying UNIT probe checks failed.' }
         & "$root\tests\test_instance_scripts_test.ps1"
         & "$root\tests\test_resource_isolation_test.ps1"
         & "$root\tests\bash_wrappers_test.ps1"
@@ -54,7 +63,7 @@ try {
         Compile ($flags + @("$root\tests\ui_icons_test.c", "$repo\asmp-dll\src\game\ui.c", '/Fe:ui-icons-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + @("$root\tests\probe_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:probe-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + @("$root\tests\dll_load_test.c", '/Fe:dll-load-test.exe', '/link', '/MACHINE:X86'))
-        Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\tick_hook_test.c", "$root\src\diag_tick.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\dummy_actor.c", '/Fe:tick-hook-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $monsterSources + @("$root\tests\tick_hook_test.c", "$root\src\diag_tick.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\dummy_actor.c", '/Fe:tick-hook-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $actorSources + @("$root\tests\dummy_actor_test.c", "$root\src\dummy_actor.c", '/Fe:dummy-actor-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\multiplayer_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:multiplayer-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\session_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:session-test.exe', '/link', '/MACHINE:X86'))

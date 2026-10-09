@@ -11,6 +11,8 @@ static unsigned int head, count;
 static DummyActor dummy;
 static int dummy_enabled;
 static volatile LONG dummy_stop, dummy_done = 1;
+static int monster_enabled;
+static volatile LONG monster_stop, monster_done = 1;
 static void enqueue(const FrameSample* frame) {
     if (TryAcquireSRWLockExclusive(&queue_lock)) {
         if (count < FRAME_QUEUE_CAPACITY) {
@@ -35,6 +37,12 @@ static void on_tick(void* game, LONG tick, DWORD now) {
     (void)game;
     FrameSample frame = {0}; frame.milliseconds = now; frame.tick = tick;
     frame.result = probe_read(base, &frame.snapshot);
+    if (monster_enabled && !InterlockedCompareExchange(&monster_done, 0, 0)) {
+        frame.monster = monster_probe_tick(&frame.snapshot, frame.result, now,
+            InterlockedCompareExchange(&monster_stop, 0, 0) != 0);
+        if (frame.monster.state == MONSTER_PROBE_DONE || frame.monster.state == MONSTER_PROBE_FAILED)
+            InterlockedExchange(&monster_done, 1);
+    }
     if (dummy_enabled && !InterlockedCompareExchange(&dummy_done, 0, 0)) {
         int stopping = InterlockedCompareExchange(&dummy_stop, 0, 0) != 0;
         frame.actor = dummy_actor_tick(&dummy, base, &frame.snapshot, frame.result, now, stopping);
@@ -52,6 +60,8 @@ enum DiagTickResult diag_tick_install(void* volatile* slot, void* expected, uint
     return (enum DiagTickResult)result;
 }
 enum DiagTickResult diag_tick_stop(void) {
+    if (monster_enabled && !monster_probe_stop()) return DIAG_TICK_BUSY;
+    monster_enabled = 0;
     enum SlotResult result = tick_hook_stop();
     if (result == SLOT_OK) {
         InterlockedExchange(&used, 0); base = 0; dummy_enabled = 0;
@@ -93,3 +103,12 @@ int diag_tick_enable_dummy(uintptr_t image_base)
 }
 void diag_tick_request_dummy_stop(void) { InterlockedExchange(&dummy_stop, 1); }
 int diag_tick_dummy_stopped(void) { return InterlockedCompareExchange(&dummy_done, 0, 0) != 0; }
+int diag_tick_enable_monster_kind(uintptr_t image_base, enum MonsterProbeKind kind) {
+    if (InterlockedCompareExchange(&used, 0, 0) || dummy_enabled || monster_enabled) return 0;
+    monster_enabled = 1; /* Retain cleanup ownership even if initialization fails. */
+    if (!monster_probe_enable_kind(image_base, kind)) return 0;
+    InterlockedExchange(&monster_stop, 0); InterlockedExchange(&monster_done, 0); return 1;
+}
+int diag_tick_enable_monster(uintptr_t image_base) { return diag_tick_enable_monster_kind(image_base, MONSTER_PROBE_GROUND); }
+void diag_tick_request_monster_stop(void) { InterlockedExchange(&monster_stop, 1); }
+int diag_tick_monster_stopped(void) { return InterlockedCompareExchange(&monster_done, 0, 0) != 0; }

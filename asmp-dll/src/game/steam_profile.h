@@ -15,6 +15,35 @@
 #define STEAM_RENDER_WIDTH_OPERAND_RVA 0x2DC3Cu
 #define STEAM_GAME_VTABLE_RVA 0xDB034u
 #define STEAM_MAN_VTABLE_RVA 0xDA438u
+/* REA/Ghidra, supported EXE: UNIT puppet experiment. Live inventory found
+   the flying drone VID290 is also class 2; no loaded class-4 VID was found. */
+#define STEAM_UNIT_VTABLE_RVA 0xDDB08u
+#define STEAM_UNIT_CLASS 2u
+#define STEAM_UNIT_DESTROY_RVA 0x72800u
+#define STEAM_UNIT_ACTION_RVA 0x72870u
+#define STEAM_UNIT_UPDATE_RVA 0x6FDA0u
+#define STEAM_UNIT_MOVEMENT_RVA 0x73290u
+/* Ground UNIT's linked weapon part, observed live as VID108/class9 and
+   verified against the supported EXE's SPRITE table (common action/update). */
+#define STEAM_PUPPET_PART_CLASS 9u
+#define STEAM_SPRITE_VTABLE_RVA 0xDD204u
+#define STEAM_SPRITE_DESTROY_RVA 0x68940u
+#define STEAM_SPRITE_ACTION_RVA 0x68970u
+#define STEAM_ENTITY_PARENT_OFFSET 0x44u
+#define STEAM_ENTITY_GOAL_OFFSET 0x3Cu
+#define STEAM_ENTITY_COMMAND_MASK 0x7Cu
+#define STEAM_ENTITY_COMMAND_TIMER_OFFSET 0x54u
+#define STEAM_ENTITY_STACK_COUNT_OFFSET 0x60u
+#define STEAM_UNIT_AVOIDANCE_OFFSET 0x8Cu
+#define STEAM_UNIT_BEHAVIOR_OFFSET 0x90u
+#define STEAM_ENTITY_Z_VELOCITY_OFFSET 0x24u
+#define STEAM_ACT_NEXT_COMMAND 130u
+#define STEAM_ACT_CLEAR_COMMAND 42u
+#define STEAM_ACT_CLEAR_STACK 72u
+#define STEAM_ACT_STOP 39u
+#define STEAM_ACT_SET_BEHAVIOR 95u
+#define STEAM_ANIM_IDLE 0u
+#define STEAM_ANIM_RUN 2u
 #define STEAM_PLAYER_ACCESSOR_RVA 0x3B5F0u
 /* Entity factory (GAME slot 8), MAN destructor (MAN slot 0), and MAN methods. */
 #define STEAM_ACTOR_CREATE_RVA 0x40680u
@@ -70,6 +99,9 @@
 /* load_map writes the level's start time here at 43CA51..43CA5C. */
 #define STEAM_GAME_MAP_STARTED_OFFSET 0x34u
 #define STEAM_WORLD_LIST_COUNT 19u
+/* MAP::tick (0x440CA0) compares its category index with 0x10. Later MAP
+   members include script lists, not entity lists. Use this bound when scanning. */
+#define STEAM_TICK_ENTITY_LIST_COUNT 16u
 #define STEAM_LIST_SIZE 0x10u
 #define STEAM_VID_CLASS_OFFSET 0x10u
 #define STEAM_VID_CATEGORY_OFFSET 0x38Cu

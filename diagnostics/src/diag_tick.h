@@ -3,6 +3,7 @@
 #include <windows.h>
 #include "probe.h"
 #include "dummy_actor.h"
+#include "monster_probe.h"
 #include "../../asmp-dll/src/multiplayer/runtime.h"
 
 #define FRAME_QUEUE_CAPACITY 1024u
@@ -13,6 +14,7 @@ typedef struct FrameSample {
     enum ProbeResult result;
     Snapshot snapshot;
     ActorResult actor;
+    MonsterProbeFrame monster;
     MultiplayerFrame multiplayer;
     enum SessionState session;
     enum DisplayResult display;
@@ -32,6 +34,10 @@ TickStats diag_tick_stats(void);
 int diag_tick_enable_dummy(uintptr_t image_base);
 void diag_tick_request_dummy_stop(void);
 int diag_tick_dummy_stopped(void);
+int diag_tick_enable_monster(uintptr_t image_base);
+int diag_tick_enable_monster_kind(uintptr_t image_base, enum MonsterProbeKind);
+void diag_tick_request_monster_stop(void);
+int diag_tick_monster_stopped(void);
 void diag_tick_prepare_observer(void);
 void diag_tick_observe(const RuntimeFrame*);
 #endif

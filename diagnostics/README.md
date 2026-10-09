@@ -290,6 +290,26 @@ stored ammo. `-DummyActor` instead creates a local X+80 actor after two seconds
 and removes it after sixty seconds; it is mutually exclusive with multiplayer.
 This earlier lifecycle test does not replicate network combat.
 
+`-MonsterPuppet` runs the separate offline first monster checkpoint: auto-load
+survival, control one ground UNIT and its optional class-9 weapon part for 30 seconds, then restore its
+native AI. It is exclusive with multiplayer, dummy and paired instances.
+See [Monster checkpoints](../docs/monster-sync-stages.md) for counters, expected
+results, limitations and the live checklist. The option changes one monster;
+the ordinary launch remains read-only.
+
+`-MonsterFlying` runs the offline flying UNIT checkpoint. It backs up the
+default test copy's `Maps/survive_01.lgc` under `asmp-monster-backup/`, then
+installs `diagnostics/monster-flying.lgc` as that map's script. One native
+VID290 drone appears; survival waves are disabled. The map file is unchanged.
+The next launch in any other mode restores the saved native script; a failed
+flying launch restores it too. The six phases preserve the drone's altitude.
+The monster modes are exclusive with each other, multiplayer, dummy and paired
+instances. See [Monster checkpoints](../docs/monster-sync-stages.md).
+
+Add `-MonsterReload` to `-MonsterFlying` for the separate one-time same-map
+reload/cleanup check after ten seconds. Its expected phase-2 completion is
+distinct from the normal six-phase pass.
+
 Create `build/asmp-diag.stop` to stop the mod while keeping the game open. Cleanup
 waits up to five seconds for game-thread replica removal, then restores display,
 action, map-load and tick hooks. Startup failures use this same cleanup path in

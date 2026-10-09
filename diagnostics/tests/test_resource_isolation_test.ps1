@@ -37,7 +37,7 @@ function Get-FileHash {
     if ($result.Hash -eq $fixtureExeHash) { $result.Hash = '4DD960458D6FFFCC9D00E9E7BA492739FB6D530D4C0B302F1C6BAA8B55D9B142' }
     $result
 }
-$environmentNames = @('ASMP_DIAG_SERVER', 'ASMP_DIAG_PORT', 'ASMP_DIAG_NAME', 'ASMP_DIAG_DUMMY', 'ASMP_DIAG_MULTIPLAYER')
+$environmentNames = @('ASMP_DIAG_SERVER', 'ASMP_DIAG_PORT', 'ASMP_DIAG_NAME', 'ASMP_DIAG_DUMMY', 'ASMP_DIAG_MULTIPLAYER', 'ASMP_DIAG_MONSTER')
 $previousEnvironment = @{}
 foreach ($name in $environmentNames) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -57,6 +57,9 @@ try {
     foreach ($file in @('test-session.ps1', 'prepare-test-game.ps1', 'prepare-test-runtimes.ps1', 'start-test.ps1', 'start-clients.ps1')) {
         Copy-Item -LiteralPath (Join-Path $diagnosticsRoot $file) -Destination (Join-Path $scripts $file)
     }
+    Copy-Item -LiteralPath (Join-Path $diagnosticsRoot 'monster-flying.lgc') -Destination (Join-Path $scripts 'monster-flying.lgc')
+    Set-Content -LiteralPath (Join-Path $source 'Maps\survive_01.map') -Value 'native survival map' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $source 'Maps\survive_01.lgc') -Value 'native survival script' -Encoding ascii
     Add-Content -LiteralPath (Join-Path $scripts 'test-session.ps1') -Value @'
 function Invoke-TestLauncher([string]$Launcher, [string[]]$Arguments) {
     $testState.Launches.Add([pscustomobject]@{
@@ -64,6 +67,7 @@ function Invoke-TestLauncher([string]$Launcher, [string[]]$Arguments) {
         Server = $env:ASMP_DIAG_SERVER; Port = $env:ASMP_DIAG_PORT
         Name = $env:ASMP_DIAG_NAME; Dummy = $env:ASMP_DIAG_DUMMY
         Multiplayer = $env:ASMP_DIAG_MULTIPLAYER
+        Monster = $env:ASMP_DIAG_MONSTER
     })
     $instance = [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($Arguments[0]))
     if ($testState.FailLaunch -or ($testState.FailInstance -and $instance -eq $testState.FailInstance)) { throw 'Simulated launcher failure.' }
@@ -182,6 +186,46 @@ function Invoke-TestLauncher([string]$Launcher, [string[]]$Arguments) {
     Check ($testState.Launches[$testState.Launches.Count - 1].Arguments[0] -eq (Join-Path $defaultGame 'AlienShooter.exe')) 'default game path preserved'
     Check (!(Test-Path -LiteralPath $commonStop)) 'default clears common stop file'
     Check ((Get-Snapshot $source) -eq $sourceBefore) 'source installation unchanged'
+    Check-Environment
+    $launchCount = $testState.Launches.Count
+    & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet | Out-Null
+    Check ($testState.Launches[$launchCount].Monster -eq '1') 'monster experiment forwarded explicitly'
+    $nativeMapBefore = Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.map') -Raw
+    $nativeScriptBefore = Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.lgc') -Raw
+    & (Join-Path $scripts 'start-test.ps1') -MonsterFlying | Out-Null
+    Check ($testState.Launches[$testState.Launches.Count - 1].Monster -eq '2') 'Flying UNIT experiment forwarded explicitly'
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.map') -Raw) -eq $nativeMapBefore) 'native survival map unchanged'
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'asmp-monster-backup\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'native survival script backed up'
+    $flyingScript = Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.lgc') -Raw
+    Check ($flyingScript -match 'unit=CreateSprite\(290' -and $flyingScript -notmatch '(?m)^\s*SurviveGameTact\s*\(') 'flying script spawns one drone without waves'
+    & (Join-Path $scripts 'start-test.ps1') -MonsterFlying | Out-Null
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'asmp-monster-backup\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'repeat experiment preserves original backup'
+    Check ((Get-Snapshot $source) -eq $sourceBefore) 'flying experiment leaves source installation intact'
+    & (Join-Path $scripts 'start-test.ps1') -MonsterFlying -MonsterReload | Out-Null
+    Check ($testState.Launches[$testState.Launches.Count - 1].Monster -eq '3') 'separate reload check forwarded'
+    Check-Environment
+    $beforeMonsterRejection = Get-Snapshot $defaultGame
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet -Multiplayer } 'monster cannot join multiplayer'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet -DummyActor } 'monster cannot mix with dummy'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying -MonsterPuppet } 'monster modes are exclusive'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying -Multiplayer } 'Flying UNIT cannot join multiplayer'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying -DummyActor } 'Flying UNIT cannot mix with dummy'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterReload } 'reload check needs flying mode'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet -Instance client-a -RuntimeDirectory $pair.ClientA } 'monster cannot join pair instance'
+    Set-Content -LiteralPath (Join-Path $scripts 'build\network-session.json') -Value '{}'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet } 'monster rejects managed session manifest'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying } 'Flying UNIT rejects managed session manifest'
+    Remove-Item -LiteralPath (Join-Path $scripts 'build\network-session.json')
+    Check ((Get-Snapshot $defaultGame) -eq $beforeMonsterRejection) 'mode conflicts rejected before config/menu/stop writes'
+    $testState.FailLaunch = $true
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet } 'monster launcher failure propagated'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying } 'flying launcher failure propagated'
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'failed flying launch restores survival script'
+    $testState.FailLaunch = $false
+    Check-Environment
+    & (Join-Path $scripts 'start-test.ps1') | Out-Null
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'ordinary launch restores survival script'
+    Check (!$testState.Launches[$testState.Launches.Count - 1].Monster) 'ordinary launch clears inherited monster option'
     Check-Environment
     $launchCount = $testState.Launches.Count
     & (Join-Path $scripts 'start-clients.ps1') -NameA TeamA -NameB TeamB | Out-Null

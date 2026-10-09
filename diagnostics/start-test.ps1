@@ -1,6 +1,9 @@
 param(
     [switch]$Fullscreen,
     [switch]$DummyActor,
+    [switch]$MonsterPuppet,
+    [switch]$MonsterFlying,
+    [switch]$MonsterReload,
     [switch]$Multiplayer,
     [ValidateRange(640, 1920)][int]$Width = 800,
     [ValidateRange(480, 1080)][int]$Height = 600,
@@ -14,6 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'test-session.ps1')
 $sessionLock = Enter-TestSessionLock
+$restoreMonsterOnFailure = $false
 try {
 $build = Join-Path $PSScriptRoot 'build'
 $gameDirectory = Assert-TestDirectory (Get-TestGameDirectory $Instance) $PSScriptRoot
@@ -37,8 +41,34 @@ if ($Instance -ne 'default' -and !$RuntimeDirectory) { throw 'Pair instances req
 if (!(Get-Process steam -ErrorAction SilentlyContinue)) { throw 'Open Steam and sign in before starting the test copy.' }
 $multiplayerMode = $Multiplayer -or !!$ServerAddress
 if ($DummyActor -and $multiplayerMode) { throw 'DummyActor and multiplayer modes are mutually exclusive.' }
+$monsterMode = $MonsterPuppet -or $MonsterFlying
+if ($MonsterPuppet -and $MonsterFlying) { throw 'Choose MonsterPuppet or MonsterFlying.' }
+if ($MonsterReload -and !$MonsterFlying) { throw 'MonsterReload requires MonsterFlying.' }
+if ($monsterMode -and ($DummyActor -or $multiplayerMode -or $Instance -ne 'default')) {
+    throw 'MonsterPuppet is an offline, default-instance-only experiment; omit DummyActor and multiplayer options.'
+}
+if ($monsterMode -and (Test-Path -LiteralPath (Join-Path $build 'network-session.json'))) {
+    throw 'Stop the managed network session before running MonsterPuppet.'
+}
 $maps = Join-Path $gameDirectory 'Maps'
 $backup = Join-Path $gameDirectory 'asmp-menu-backup'
+$survivalScript = Join-Path $maps 'survive_01.lgc'
+$monsterBackup = Join-Path $gameDirectory 'asmp-monster-backup'
+$savedSurvival = Join-Path $monsterBackup 'survive_01.lgc'
+if ($MonsterFlying) {
+    $flyingScriptSource = Join-Path $PSScriptRoot 'monster-flying.lgc'
+    if (!(Test-Path -LiteralPath (Join-Path $maps 'survive_01.map') -PathType Leaf) -or
+        !(Test-Path -LiteralPath $survivalScript -PathType Leaf) -or
+        !(Test-Path -LiteralPath $flyingScriptSource -PathType Leaf)) {
+        throw 'MonsterFlying needs the copied survival map/script and diagnostics/monster-flying.lgc.'
+    }
+    New-Item -ItemType Directory -Path $monsterBackup -Force | Out-Null
+    if (!(Test-Path -LiteralPath $savedSurvival)) { Copy-Item -LiteralPath $survivalScript -Destination $savedSurvival }
+    $restoreMonsterOnFailure = $true
+    Copy-Item -LiteralPath $flyingScriptSource -Destination $survivalScript -Force
+} elseif (Test-Path -LiteralPath $savedSurvival -PathType Leaf) {
+    Copy-Item -LiteralPath $savedSurvival -Destination $survivalScript -Force
+}
 if ($multiplayerMode) {
     New-Item -ItemType Directory -Path $backup -Force | Out-Null
     foreach ($file in @('MAINMENU.LGC', 'mainmenu.men')) {
@@ -86,6 +116,7 @@ $previousServer = $env:ASMP_DIAG_SERVER
 $previousPort = $env:ASMP_DIAG_PORT
 $previousName = $env:ASMP_DIAG_NAME
 $previousDummy = $env:ASMP_DIAG_DUMMY
+$previousMonster = $env:ASMP_DIAG_MONSTER
 $previousMultiplayer = $env:ASMP_DIAG_MULTIPLAYER
 $previousLaunchResult = $env:ASMP_LAUNCH_RESULT
 try {
@@ -95,6 +126,7 @@ try {
     $env:ASMP_LAUNCH_RESULT = $LaunchResultPath
     $env:ASMP_DIAG_MULTIPLAYER = if ($multiplayerMode) { '1' } else { '' }
     $env:ASMP_DIAG_DUMMY = if ($DummyActor) { '1' } else { '' }
+    $env:ASMP_DIAG_MONSTER = if ($MonsterReload) { '3' } elseif ($MonsterFlying) { '2' } elseif ($MonsterPuppet) { '1' } else { '' }
     $launchArguments = @($game, (Join-Path $runtime 'asmp-diag.dll'))
     if (!$Fullscreen) { $launchArguments += @("$Width", "$Height") }
     Invoke-TestLauncher $launcher $launchArguments
@@ -103,12 +135,19 @@ try {
     $env:ASMP_DIAG_PORT = $previousPort
     $env:ASMP_DIAG_NAME = $previousName
     $env:ASMP_DIAG_DUMMY = $previousDummy
+    $env:ASMP_DIAG_MONSTER = $previousMonster
     $env:ASMP_DIAG_MULTIPLAYER = $previousMultiplayer
     $env:ASMP_LAUNCH_RESULT = $previousLaunchResult
 }
 if ($ServerAddress) { Write-Output 'The client connects and loads the server map automatically.' }
 elseif ($Multiplayer) { Write-Output 'Open Multiplayer in the main menu; enter a nickname and IPv4:port, then connect.' }
+elseif ($MonsterPuppet) { Write-Output 'Monster stage 1: survival loads automatically. One ground UNIT (optionally with one class-9 weapon part) follows a 30-second idle/run/stop/turn sequence near the player. Keep the player alive; inspect MONSTER records in the log. This mode changes that one monster, then restores native AI.' }
+elseif ($MonsterFlying) { Write-Output 'Monster stage 2: survival loads with one flying UNIT drone (VID290) and no waves. Observe its 30-second idle/run/stop/turn sequence at native altitude. The stock survival script is backed up and restored on the next other-mode launch.' }
 else { Write-Output 'Start a campaign or survival level for the read-only diagnostics.' }
 Write-Output "Combat check: fire, switch weapons, collect ammo, take damage and heal. Logs: $runtime\logs\asmp-diag-<PID>.log"
 if ($DummyActor) { Write-Output 'Dummy test: enter a level, walk and turn. A second actor appears after 2 seconds, follows with an X offset of 80 and is removed after 60 seconds.' }
+if ($MonsterReload) { Write-Output 'Separate cleanup case: reloads the same map once after 10 seconds, then releases control. Expect MONSTER_RELOAD completed cleanup=1; this is not a full phase-6 pass.' }
+} catch {
+    if ($restoreMonsterOnFailure) { Copy-Item -LiteralPath $savedSurvival -Destination $survivalScript -Force }
+    throw
 } finally { if ($sessionLock) { $sessionLock.Dispose() } }
