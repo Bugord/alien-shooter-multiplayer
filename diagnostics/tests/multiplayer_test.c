@@ -100,6 +100,7 @@ int main(void) {
     ActorEngine api = { create, destroy, move, rotate, action, weapon, set_health };
     CHECK(multiplayer_initialize(base, &api));
     CHECK(step(100).world_epoch == 1); CHECK(local_granted == 10); /* All weapon slots, once. */
+    CHECK(*(uint32_t*)(player + STEAM_STORED_AMMO_BASE_OFFSET + 4) == STEAM_GRANT_AMMO && *(uint32_t*)(player + STEAM_STORED_AMMO_BASE_OFFSET + 36) == STEAM_GRANT_AMMO);
     step(120); step(2120); CHECK(created == 1);
     step(2140); CHECK(selected == 0); /* Native torso has not spawned yet. */
     attach_torso(); step(2160);

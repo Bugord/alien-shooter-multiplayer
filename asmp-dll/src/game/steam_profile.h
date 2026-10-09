@@ -107,5 +107,8 @@
 #define STEAM_STORED_AMMO_BASE_OFFSET 0x94u
 #define STEAM_STORED_AMMO_FIRST_SLOT 1u
 #define STEAM_STORED_AMMO_COUNT 9u
+/* Stored counts are plain rounds (a selected slot 5 with 172 rounds stores 172).
+   Granting weapons tops every stored slot up to at least this many. */
+#define STEAM_GRANT_AMMO 500u
 
 #endif
