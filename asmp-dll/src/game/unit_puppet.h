@@ -24,9 +24,12 @@ typedef struct UnitPuppetSample {
     unsigned int frame_first, frame_last, child_frame_first, child_frame, child_frame_last, child_frame_changes;
     uintptr_t goal;
     uintptr_t child, child_goal;
-    unsigned int child_command, child_stack;
+    unsigned int child_command, child_stack, child_animation;
     float x, y, z, velocity;
     unsigned int decisions, movements, blocked, frame_changes;
+    unsigned int replayed, duplicates;
+    unsigned int attack_frame_changes;
+    int health;
 } UnitPuppetSample;
 
 /* Single borrowed class-2 UNIT, optionally one linked class-9 part.
@@ -42,6 +45,10 @@ int unit_puppet_install(uintptr_t base, const UnitPuppetEngine*);
    chains, other classes and death animations. */
 int unit_puppet_attach_first(uintptr_t game, uintptr_t player);
 int unit_puppet_apply(uintptr_t game, const UnitPuppetPose*);
+/* Only sanitized private root/part descriptors are accepted. Sequence is local
+   to this attached entity. Attack is visual only; death uses native SET_HP. */
+int unit_puppet_replay(uintptr_t game, uint32_t sequence, unsigned int animation);
+int unit_puppet_test_damage(uintptr_t game);
 UnitPuppetSample unit_puppet_sample(uintptr_t game);
 int unit_puppet_release(uintptr_t game);
 int unit_puppet_stop(void);

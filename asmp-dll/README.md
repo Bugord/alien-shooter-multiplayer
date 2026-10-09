@@ -21,3 +21,10 @@ action/movement/destructor hooks.
 `diagnostics/src/monster_probe.*` feeds its
 offline test poses; production networking does not enable it. See
 [Monster checkpoints](../docs/monster-sync-stages.md) for ownership and limits.
+
+`game/unit_combat.*` owns the separate offline combat fixture: one native
+VID50 UNIT with a VID108 part, created from private shallow descriptor copies.
+Animation scripts, object creations, damage/death scripts and shared counters
+are isolated before the factory runs. Art/resource pointers remain borrowed;
+the pinned DLL retains the copies through native destruction. This is a
+visual attack/death test, with no networking or authoritative damage replay.

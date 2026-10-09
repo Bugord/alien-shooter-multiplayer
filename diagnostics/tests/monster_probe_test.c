@@ -19,6 +19,14 @@ int unit_puppet_apply(uintptr_t game, const UnitPuppetPose* p) {
 }
 int unit_puppet_release(uintptr_t game) { (void)game; ++released; return release_ok; }
 int unit_puppet_stop(void) { ++stopped; return stop_ok; }
+int unit_puppet_replay(uintptr_t game, uint32_t sequence, unsigned int animation) { (void)game; (void)sequence; (void)animation; return 0; }
+int unit_puppet_test_damage(uintptr_t game) { (void)game; return 0; }
+int unit_combat_bind(uintptr_t base, ActorCreate* out) { (void)base; (void)out; return 0; }
+int unit_combat_init(uintptr_t base, ActorCreate c, ActorDestroy d, UnitAnimation a) { (void)base; (void)c; (void)d; (void)a; return 0; }
+int unit_combat_spawn(const Snapshot* local_sample) { (void)local_sample; return 0; }
+UnitCombatSample unit_combat_sample(uintptr_t game, int compare_sources) { UnitCombatSample s = {0}; (void)game; (void)compare_sources; return s; }
+int unit_combat_remove(uintptr_t game) { (void)game; return 1; }
+int unit_combat_stop(void) { return 1; }
 int ui_bind(uintptr_t base) { (void)base; return 1; }
 void ui_stop(void) {}
 int ui_load_map(uintptr_t game, const char* map) { (void)game; ++loaded;

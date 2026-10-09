@@ -310,6 +310,17 @@ Add `-MonsterReload` to `-MonsterFlying` for the separate one-time same-map
 reload/cleanup check after ten seconds. Its expected phase-2 completion is
 distinct from the normal six-phase pass.
 
+`-MonsterCombat` tests one ground UNIT (VID50 + VID108) without survival waves.
+The C fixture creates private descriptors before spawning, disables gameplay
+scripts/creations, blocks local damage and replays one visual attack and one
+native death. Observe without firing/moving for the initial 20 seconds. Both
+parts must disappear, with no new objects, player damage or shared VID changes.
+Expected: `MONSTER state=4 phase=5 cleanup=1` and `MONSTER_COMBAT` with
+`damage_blocked=1 replayed=2 duplicates=2 private_entities=0 sources_unchanged=1`.
+The script backup is shared with the flying mode; ordinary launches or failed
+launches restore the native survival script. See the
+[combat checklist](../docs/monster-sync-stages.md#stage-3-isolated-combat-fixture).
+
 Create `build/asmp-diag.stop` to stop the mod while keeping the game open. Cleanup
 waits up to five seconds for game-thread replica removal, then restores display,
 action, map-load and tick hooks. Startup failures use this same cleanup path in

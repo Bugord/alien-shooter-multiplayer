@@ -155,3 +155,72 @@ exactly one UNIT VID290 and no other UNIT/PLANE. Separate same-map reload
 (PID93896) and active-control interruption (PID57992) passed with cleanup1
 and successful hook restoration. Visual appearance remains for user acceptance;
 these results do not establish combat replay or other child-class coverage.
+
+## Stage 3: isolated combat fixture
+
+```powershell
+.\diagnostics\build.ps1 -Server
+.\diagnostics\start-test.ps1 -MonsterCombat
+```
+
+This first combat checkpoint covers one ground UNIT VID50 and its single
+linked SPRITE VID108. It exercises visual attack and native death15, with
+local gameplay effects suppressed. It does not complete projectile/melee
+damage replication, death16, mission integration or other monster types.
+
+The copied survival script initializes the player but creates no monsters and
+never calls the wave tick. After map initialization settles for two seconds,
+the diagnostic module makes private 0x490-byte copies of the two loaded VIDs
+and invokes the verified native factory once. Both copies disable all 17
+animation scripts and creation links, delete/damage/collision scripts and
+native radius damage. Private live/killed counters start at zero. The shared
+loaded descriptors are compared byte-for-byte throughout the test.
+
+Art, geometry and borrowed engine resource pointers remain intact; root links
+to the private child descriptor. Unknown per-VID service callbacks, alternate
+factory paths and longer child chains are rejected. The engine owns native
+entity allocations. The fixture owns the private buffers, retained in the
+pinned DLL until the complete native destructors finish; it never frees the
+borrowed resource pointers. Normal death removes both parts through the native
+animation update. Early stop removes the registered fixture once; a native
+removal fault is abandoned until a world with no private entities is observed.
+
+Observe without moving or firing during the automated sequence:
+
+1. Idle for three seconds: no independent movement or attacks.
+2. Inject local damage and a local HP mutation into root and part: both blocked.
+3. Replay visual attack8 once; submit the same event again and reject it.
+   Native attack frames must advance and both parts return to idle.
+4. At ten seconds, replay native `SET_HP(0)` once and reject its duplicate.
+   This selects death15; native death selection need not write the HP field.
+5. Wait for both parts to disappear, with a twenty-second overall timeout.
+
+Acceptance: terminal `MONSTER state=4 phase=5 cleanup=1 violations=0`, and
+`MONSTER_COMBAT damage_blocked=1 replayed=2 duplicates=2 attack_frames>0
+private_entities=0 unexpected_entities=0 sources_unchanged=1 fault=0`.
+No new non-fixture objects may appear, and player health must stay unchanged.
+Existing ambient objects may expire; a bounded baseline of entity/descriptor
+identities detects new objects even if another object disappears.
+A separate stop footer must
+show `hook_restore_result=0 cleanup=1`. An interruption proves cleanup only.
+Visual acceptance still requires watching the attack/death in the copied game.
+
+`unit-puppet-test.exe`, `unit-combat-test.exe` and
+`monster-combat-probe-test.exe` cover event deduplication, native animation
+ownership, private descriptors before the factory, topology/identity checks,
+source preservation, extra world effects, teardown and one-attempt fault
+cleanup. The resource isolation suite covers script switching/rollback and
+exclusive launch modes. Synthetic tests do not replace a live run.
+
+The survival script backup follows the flying-mode mechanism. Switching
+between flying/combat preserves the original backup; a non-fixture launch or
+failed launch restores it. The original Steam installation is untouched.
+
+Live result (2026-10-09, PID100948): terminal state4/phase5/cleanup1 with zero
+violations, blocked local damage, two replayed events and two rejected
+duplicates. Attack8 advanced four native frames and returned to idle. Native
+death15 removed root and private part; read-only world scan confirmed both
+identities absent and no remaining UNIT. No new objects/shared VID changes
+were observed. Death disposal was immediate; multi-frame death art and death16
+are not validated. Stop restored hooks successfully (`hook_restore_result=0
+cleanup=1`). Visual appearance remains for user acceptance.

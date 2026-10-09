@@ -27,7 +27,7 @@ $actorSources = @("$repo\asmp-dll\src\game\actor.c", "$repo\asmp-dll\src\game\ac
 $multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", "$repo\asmp-dll\src\game\action_hook.c", "$repo\asmp-dll\src\game\ui.c", "$repo\asmp-dll\src\game\display_hook.c", "$repo\asmp-dll\src\multiplayer\session.c")
 $hookSources = @("$repo\asmp-dll\src\game\slot_hook.c", "$repo\asmp-dll\src\game\tick_hook.c", "$repo\asmp-dll\src\game\world_hook.c")
 $runtimeSource = "$repo\asmp-dll\src\multiplayer\runtime.c"
-$monsterSources = @("$repo\asmp-dll\src\game\unit_puppet.c", "$root\src\monster_probe.c")
+$monsterSources = @("$repo\asmp-dll\src\game\unit_puppet.c", "$repo\asmp-dll\src\game\unit_combat.c", "$root\src\monster_probe.c")
 Push-Location $build
 try {
     # Compile the existing networking library separately with its warning level.
@@ -40,6 +40,12 @@ try {
         Compile ($flags + @("$root\tests\unit_puppet_test.c", "$repo\asmp-dll\src\game\unit_puppet.c", "$repo\asmp-dll\src\game\slot_hook.c", '/Fe:unit-puppet-test.exe', '/link', '/MACHINE:X86'))
         & .\unit-puppet-test.exe
         if ($LASTEXITCODE) { throw 'UNIT puppet checks failed.' }
+        Compile ($flags + @("$root\tests\unit_combat_test.c", "$repo\asmp-dll\src\game\unit_combat.c", '/Fe:unit-combat-test.exe', '/link', '/MACHINE:X86'))
+        & .\unit-combat-test.exe
+        if ($LASTEXITCODE) { throw 'UNIT combat fixture checks failed.' }
+        Compile ($flags + @("$root\tests\monster_combat_probe_test.c", "$root\src\monster_probe.c", '/Fe:monster-combat-probe-test.exe', '/link', '/MACHINE:X86'))
+        & .\monster-combat-probe-test.exe
+        if ($LASTEXITCODE) { throw 'Monster combat controller checks failed.' }
         Compile ($flags + @("$root\tests\monster_probe_test.c", "$root\src\monster_probe.c", '/Fe:monster-probe-test.exe', '/link', '/MACHINE:X86'))
         & .\monster-probe-test.exe
         if ($LASTEXITCODE) { throw 'Monster probe checks failed.' }

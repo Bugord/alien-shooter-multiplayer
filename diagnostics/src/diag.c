@@ -35,6 +35,9 @@ static void log_frame(FILE* log, const FrameSample* frame, Snapshot* last,
         fprintf(log, "# MONSTER_FRAMES first=%u last=%u child_first=%u child_frame=%u child_last=%u child_frame_changes=%u\n",
             u->frame_first, u->frame_last, u->child_frame_first, u->child_frame, u->child_frame_last, u->child_frame_changes);
         if (m->reloaded) fprintf(log, "# MONSTER_RELOAD completed cleanup=%d violations=%u\n", m->cleanup, m->violations);
+        if (m->combat_event) fprintf(log, "# MONSTER_COMBAT phase=%u damage_blocked=%d replayed=%u duplicates=%u attack_frames=%u health=%d child_anim=%u private_entities=%u other_entities=%u unexpected_entities=%u sources_unchanged=%d fault=%d\n",
+            m->phase, m->damage_blocked, u->replayed, u->duplicates, u->attack_frame_changes, u->health, u->child_animation,
+            m->combat.private_entities, m->combat.other_entities, m->combat.unexpected_entities, m->combat.sources_unchanged, m->combat.fault);
     }
     if (frame->actor.event != ACTOR_NONE) {
         static const char* events[] = {"none", "spawned", "removed", "lost", "rejected", "fault", "pose"};
@@ -158,8 +161,8 @@ static DWORD WINAPI run(LPVOID unused)
     int multiplayer_enabled = host_length || (multiplayer_length == 1 && multiplayer_option[0] == '1');
     char monster_option[8] = {0};
     DWORD monster_length = GetEnvironmentVariableA("ASMP_DIAG_MONSTER", monster_option, sizeof(monster_option));
-    int monster_enabled = monster_length == 1 && (monster_option[0] == '1' || monster_option[0] == '2' || monster_option[0] == '3');
-    enum MonsterProbeKind monster_kind = monster_option[0] == '3' ? MONSTER_PROBE_FLYING_RELOAD :
+    int monster_enabled = monster_length == 1 && monster_option[0] >= '1' && monster_option[0] <= '4';
+    enum MonsterProbeKind monster_kind = monster_option[0] == '4' ? MONSTER_PROBE_COMBAT : monster_option[0] == '3' ? MONSTER_PROBE_FLYING_RELOAD :
         (monster_option[0] == '2' ? MONSTER_PROBE_FLYING : MONSTER_PROBE_GROUND);
     if (monster_enabled && (dummy_enabled || multiplayer_enabled)) { fprintf(log, "ERROR monster experiment is offline and exclusive\n"); goto fail; }
     if (dummy_enabled && multiplayer_enabled) { fprintf(log, "ERROR dummy and multiplayer are mutually exclusive\n"); goto fail; }
@@ -190,9 +193,11 @@ static DWORD WINAPI run(LPVOID unused)
     if (monster_enabled) {
         monster_attempted = 1;
         if (!diag_tick_enable_monster_kind(base, monster_kind)) { fprintf(log, "REJECTED monster bindings/hooks\n"); goto fail; }
-        fprintf(log, "# MONSTER enabled stage=%u auto_map=%s duration=30s\n",
-            monster_kind != MONSTER_PROBE_GROUND ? 2u : 1u,
-            monster_kind != MONSTER_PROBE_GROUND ? "maps/survive_01.map waves=off flying_UNIT_vid290" : "maps/survive_01.map UNIT");
+        fprintf(log, "# MONSTER enabled stage=%u auto_map=%s duration=%s\n",
+            monster_kind == MONSTER_PROBE_COMBAT ? 3u : monster_kind != MONSTER_PROBE_GROUND ? 2u : 1u,
+            monster_kind == MONSTER_PROBE_COMBAT ? "maps/survive_01.map waves=off private_UNIT_vid50 combat_visual_only" :
+                monster_kind != MONSTER_PROBE_GROUND ? "maps/survive_01.map waves=off flying_UNIT_vid290" : "maps/survive_01.map UNIT",
+            monster_kind == MONSTER_PROBE_COMBAT ? "up_to_20s_after_world_settles" : "30s");
         if (monster_kind == MONSTER_PROBE_FLYING_RELOAD) fprintf(log, "# MONSTER reload_check=1 after_seconds=10\n");
     }
     if (!multiplayer_enabled) {

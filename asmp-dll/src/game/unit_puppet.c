@@ -11,6 +11,9 @@ static struct {
     enum UnitPuppetState state;
     UnitPuppetEngine api;
     UnitPuppetPose pose;
+    uint32_t last_event;
+    unsigned int replayed, duplicates, attack_frame_changes;
+    int combat, dying;
     SlotHook action, movement, destroy, part_action, part_destroy;
 } puppet;
 
@@ -83,6 +86,7 @@ static int child_registered(void) {
         if (items[i] == puppet.child)
             return *(uintptr_t*)puppet.child == puppet.base + STEAM_SPRITE_VTABLE_RVA &&
                 *(uintptr_t*)(puppet.child + STEAM_ENTITY_VID_OFFSET) == puppet.child_vid &&
+                !*(uintptr_t*)(puppet.child + STEAM_ENTITY_CHILD_OFFSET) &&
                 *(uintptr_t*)(puppet.child + STEAM_ENTITY_PARENT_OFFSET) == puppet.entity;
     return 0;
 }
@@ -97,7 +101,9 @@ static int __fastcall on_action(void* e, void* unused, unsigned int kind, intptr
         __try {
             if (!registered(puppet.game)) { lost(); }
             else if (kind == STEAM_ACT_NEXT_COMMAND) {
-                ++puppet.decisions; select_animation(e); return 0;
+                ++puppet.decisions;
+                if (!puppet.dying) select_animation(e);
+                return 0;
             } else if (kind != 15u && kind != 0x57u && kind != 0x5Cu && kind != 0x5Eu && kind != 0x60u) {
                 /* This movement-only experiment rejects ALL other actions,
                    including scripts assigning targets/stack, damage and HP.
@@ -129,7 +135,11 @@ static int __fastcall on_part_action(void* e, void* unused, unsigned int kind, i
     if (selected_part(e)) {
         __try {
             if (!child_registered()) { puppet.state = UNIT_PUPPET_FAULT; return 0; }
-            if (kind == STEAM_ACT_NEXT_COMMAND) { ++puppet.decisions; return 0; }
+            if (kind == STEAM_ACT_NEXT_COMMAND) {
+                ++puppet.decisions;
+                if (puppet.combat && !puppet.dying) puppet.api.animation(e, NULL, STEAM_ANIM_IDLE);
+                return 0;
+            }
             if (kind != 15u && kind != 0x57u && kind != 0x5Cu && kind != 0x5Eu && kind != 0x60u) {
                 ++puppet.blocked; return 0;
             }
@@ -139,7 +149,10 @@ static int __fastcall on_part_action(void* e, void* unused, unsigned int kind, i
 }
 static void* __fastcall on_part_destroy(void* e, void* unused, int release) {
     (void)unused;
-    if (puppet.child == (uintptr_t)e) { puppet.child = 0; puppet.state = UNIT_PUPPET_FAULT; }
+    if (puppet.child == (uintptr_t)e) {
+        puppet.child = 0;
+        if (!puppet.dying) puppet.state = UNIT_PUPPET_FAULT;
+    }
     return puppet.api.part_destroy(e, NULL, release);
 }
 int unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api) {
@@ -190,6 +203,9 @@ int unit_puppet_attach_first(uintptr_t game, uintptr_t player) {
                 if (!child_registered()) { puppet.child = puppet.entity = 0; continue; }
                 puppet.behavior = *(unsigned int*)(e + STEAM_UNIT_BEHAVIOR_OFFSET);
                 puppet.state = UNIT_PUPPET_ACTIVE;
+                puppet.combat = puppet.dying = 0;
+                puppet.last_event = puppet.replayed = puppet.duplicates = 0;
+                puppet.attack_frame_changes = 0;
                 /* Original actions preserve goal reference counting and the
                    LIST<ACT> ABI; no raw goal=NULL or list pointer tricks. */
                 puppet.api.action((void*)e, NULL, STEAM_ACT_CLEAR_COMMAND, 0, 0, 0);
@@ -232,27 +248,79 @@ int unit_puppet_apply(uintptr_t game, const UnitPuppetPose* p) {
         *(float*)(puppet.entity + STEAM_ENTITY_VELOCITY_OFFSET) = p->velocity;
         uint32_t* flags = (uint32_t*)(puppet.entity + STEAM_ENTITY_FLAGS_OFFSET);
         *flags = (*flags & ~STEAM_ENTITY_MOVING_FLAG) | (p->moving ? STEAM_ENTITY_MOVING_FLAG : 0);
-        if (*(unsigned int*)(puppet.entity + STEAM_ENTITY_ANIM_OFFSET) !=
+        if (!puppet.combat && *(unsigned int*)(puppet.entity + STEAM_ENTITY_ANIM_OFFSET) !=
             (p->moving && p->velocity != 0 ? STEAM_ANIM_RUN : STEAM_ANIM_IDLE)) select_animation((void*)puppet.entity);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { puppet.state = UNIT_PUPPET_FAULT; return -1; }
+}
+static int sanitized(uintptr_t vid) {
+    if (*(int*)(vid + STEAM_VID_DAMAGE_OFFSET) ||
+        *(int*)(vid + STEAM_VID_DELETE_SCRIPT_OFFSET) != -1 ||
+        *(int*)(vid + STEAM_VID_DAMAGE_SCRIPT_OFFSET) != -1 ||
+        *(int*)(vid + STEAM_VID_COLLISION_SCRIPT_OFFSET) != -1 ||
+        *(uintptr_t*)(vid + STEAM_VID_SERVICE_OFFSET)) return 0;
+    for (unsigned int i = 0; i < STEAM_ANIMATION_COUNT; ++i)
+        if (*(int*)(vid + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + i * 4u) != -1 ||
+            *(uintptr_t*)(vid + STEAM_VID_CREATIONS_OFFSET + i * 4u)) return 0;
+    return 1;
+}
+int unit_puppet_replay(uintptr_t game, uint32_t sequence, unsigned int animation) {
+    if (puppet.state != UNIT_PUPPET_ACTIVE || !sequence ||
+        (animation != STEAM_ANIM_ATTACK && animation != STEAM_ANIM_DEATH)) return 0;
+    __try {
+        if (!registered(game) || !child_registered() || !sanitized(puppet.vid) ||
+            (puppet.child && !sanitized(puppet.child_vid))) return 0;
+        if (sequence <= puppet.last_event) { ++puppet.duplicates; return 0; }
+        if (puppet.dying) return 0;
+        puppet.combat = 1;
+        if (animation == STEAM_ANIM_DEATH) {
+            puppet.dying = 1;
+            puppet.api.action((void*)puppet.entity, NULL, STEAM_ACT_SET_HP, 0, 0, 0);
+        } else {
+            puppet.api.animation((void*)puppet.entity, NULL, animation);
+            if (puppet.child) puppet.api.animation((void*)puppet.child, NULL, animation);
+        }
+        puppet.last_event = sequence; ++puppet.replayed; return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { puppet.state = UNIT_PUPPET_FAULT; return -1; }
+}
+int unit_puppet_test_damage(uintptr_t game) {
+    if (puppet.state != UNIT_PUPPET_ACTIVE) return 0;
+    __try {
+        if (!registered(game) || !child_registered()) return 0;
+        int hp = *(int*)(puppet.entity + STEAM_ENTITY_HEALTH_OFFSET);
+        on_action((void*)puppet.entity, NULL, STEAM_ACT_DAMAGE, 100000, 0, 0);
+        on_action((void*)puppet.entity, NULL, STEAM_ACT_SET_HP, 0, 0, 0);
+        if (*(int*)(puppet.entity + STEAM_ENTITY_HEALTH_OFFSET) != hp) return 0;
+        if (puppet.child) {
+            hp = *(int*)(puppet.child + STEAM_ENTITY_HEALTH_OFFSET);
+            on_part_action((void*)puppet.child, NULL, STEAM_ACT_DAMAGE, 100000, 0, 0);
+            on_part_action((void*)puppet.child, NULL, STEAM_ACT_SET_HP, 0, 0, 0);
+            if (*(int*)(puppet.child + STEAM_ENTITY_HEALTH_OFFSET) != hp) return 0;
+        }
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { puppet.state = UNIT_PUPPET_FAULT; return -1; }
 }
 UnitPuppetSample unit_puppet_sample(uintptr_t game) {
     UnitPuppetSample s = {0}; s.state = puppet.state; s.entity = puppet.entity;
     s.decisions = puppet.decisions; s.movements = puppet.movements; s.blocked = puppet.blocked;
+    s.replayed = puppet.replayed; s.duplicates = puppet.duplicates;
     __try {
         if (puppet.entity && !registered(game)) { lost(); s.state = puppet.state; s.entity = 0; }
         if (s.entity) {
             uintptr_t e = s.entity;
             s.vid = *(unsigned int*)(puppet.vid + STEAM_VID_INDEX_OFFSET);
             s.class_id = STEAM_UNIT_CLASS;
+            s.health = *(int*)(e + STEAM_ENTITY_HEALTH_OFFSET);
             s.animation = *(unsigned int*)(e + STEAM_ENTITY_ANIM_OFFSET);
             s.frame = *(unsigned int*)(e + STEAM_ENTITY_FRAME_CURRENT_OFFSET);
             s.frame_first = *(unsigned int*)(e + STEAM_ENTITY_FRAME_FIRST_OFFSET);
             s.frame_last = *(unsigned int*)(e + STEAM_ENTITY_FRAME_LAST_OFFSET);
             /* A direction change selects another range; that alone is not
                evidence of native frame progression. Single-frame art is valid. */
-            if (s.animation == puppet.last_animation && s.frame_first == puppet.last_first && s.frame != puppet.last_frame) ++puppet.frame_changes;
+            if (s.animation == puppet.last_animation && s.frame_first == puppet.last_first && s.frame != puppet.last_frame) {
+                ++puppet.frame_changes;
+                if (s.animation == STEAM_ANIM_ATTACK) ++puppet.attack_frame_changes;
+            }
             puppet.last_first = s.frame_first;
             puppet.last_frame = s.frame; puppet.last_animation = s.animation;
             s.behavior = *(unsigned int*)(e + STEAM_UNIT_BEHAVIOR_OFFSET);
@@ -274,18 +342,23 @@ UnitPuppetSample unit_puppet_sample(uintptr_t game) {
                 s.child_frame = *(unsigned int*)(puppet.child + STEAM_ENTITY_FRAME_CURRENT_OFFSET);
                 s.child_frame_last = *(unsigned int*)(puppet.child + STEAM_ENTITY_FRAME_LAST_OFFSET);
                 unsigned int child_animation = *(unsigned int*)(puppet.child + STEAM_ENTITY_ANIM_OFFSET);
+                s.child_animation = child_animation;
                 if (child_animation == puppet.child_last_animation && s.child_frame_first == puppet.child_last_first &&
-                    s.child_frame != puppet.child_last_frame) ++puppet.child_frame_changes;
+                    s.child_frame != puppet.child_last_frame) {
+                    ++puppet.child_frame_changes;
+                    if (child_animation == STEAM_ANIM_ATTACK) ++puppet.attack_frame_changes;
+                }
                 puppet.child_last_animation = child_animation; puppet.child_last_frame = s.child_frame;
                 puppet.child_last_first = s.child_frame_first;
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { puppet.state = s.state = UNIT_PUPPET_FAULT; }
-    s.frame_changes = puppet.frame_changes; s.child_frame_changes = puppet.child_frame_changes; return s;
+    s.frame_changes = puppet.frame_changes; s.child_frame_changes = puppet.child_frame_changes;
+    s.attack_frame_changes = puppet.attack_frame_changes; return s;
 }
 int unit_puppet_release(uintptr_t game) {
     __try {
-        if (puppet.entity && registered(game)) {
+        if (puppet.entity && registered(game) && !puppet.dying) {
             puppet.api.action((void*)puppet.entity, NULL, STEAM_ACT_STOP, 1, 0, 0);
             puppet.api.action((void*)puppet.entity, NULL, STEAM_ACT_SET_BEHAVIOR, puppet.behavior, 0, 0);
             puppet.api.animation((void*)puppet.entity, NULL, STEAM_ANIM_IDLE);

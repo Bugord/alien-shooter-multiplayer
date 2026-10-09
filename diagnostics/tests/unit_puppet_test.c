@@ -14,6 +14,11 @@ static int __fastcall original_action(void* e, void* unused, unsigned int k, int
     if (k == STEAM_ACT_CLEAR_STACK) { *(unsigned int*)(p + STEAM_ENTITY_STACK_COUNT_OFFSET) = 0; ++clears; }
     if (k == STEAM_ACT_STOP) { *(float*)(p + STEAM_ENTITY_VELOCITY_OFFSET) = 0;
         *(unsigned int*)(p + STEAM_ENTITY_FLAGS_OFFSET) &= ~STEAM_ENTITY_MOVING_FLAG; ++stops; }
+    if (k == STEAM_ACT_DAMAGE) *(int*)(p + STEAM_ENTITY_HEALTH_OFFSET) -= (int)a;
+    if (k == STEAM_ACT_SET_HP) {
+        *(int*)(p + STEAM_ENTITY_HEALTH_OFFSET) = (int)a;
+        if (a <= 0) *(unsigned int*)(p + STEAM_ENTITY_ANIM_OFFSET) = STEAM_ANIM_DEATH;
+    }
     return 77;
 }
 static void __fastcall original_movement(void* e, void* unused) { (void)e; (void)unused; ++moves; }
@@ -147,6 +152,42 @@ int main(void) {
     *(unsigned int*)(unit + STEAM_UNIT_BEHAVIOR_OFFSET) = 123;
     CHECK(unit_puppet_release((uintptr_t)game));
     CHECK(*(unsigned int*)(unit + STEAM_UNIT_BEHAVIOR_OFFSET) == 123); /* No writes to an unregistered cached pointer. */
+    CHECK(unit_puppet_stop());
+    /* Replay must reject ordinary shared VIDs, even when the entity is ours.
+       Sanitized private-like test VIDs permit visual events, never raw damage. */
+    entries[1] = (uintptr_t)unit;
+    *(int*)(unit + STEAM_ENTITY_HEALTH_OFFSET) = 100;
+    CHECK(unit_puppet_install(base, &api));
+    CHECK(unit_puppet_attach_first((uintptr_t)game, (uintptr_t)other) == 1);
+    CHECK(!unit_puppet_replay((uintptr_t)game, 1u, STEAM_ANIM_ATTACK));
+    CHECK(unit_puppet_test_damage((uintptr_t)game) == 1);
+    CHECK(*(int*)(unit + STEAM_ENTITY_HEALTH_OFFSET) == 100);
+    for (unsigned int i = 0; i < STEAM_ANIMATION_COUNT; ++i) {
+        *(int*)(vid + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + i * 4u) = -1;
+        *(uintptr_t*)(vid + STEAM_VID_CREATIONS_OFFSET + i * 4u) = 0;
+    }
+    *(int*)(vid + STEAM_VID_DELETE_SCRIPT_OFFSET) = -1;
+    *(int*)(vid + STEAM_VID_DAMAGE_SCRIPT_OFFSET) = -1;
+    *(int*)(vid + STEAM_VID_COLLISION_SCRIPT_OFFSET) = -1;
+    CHECK(unit_puppet_replay((uintptr_t)game, 1u, STEAM_ANIM_ATTACK) == 1);
+    *(unsigned int*)(unit + STEAM_ENTITY_FRAME_CURRENT_OFFSET) = 7;
+    CHECK(!unit_puppet_replay((uintptr_t)game, 1u, STEAM_ANIM_ATTACK));
+    CHECK(*(unsigned int*)(unit + STEAM_ENTITY_FRAME_CURRENT_OFFSET) == 7);
+    CHECK(unit_puppet_apply((uintptr_t)game, &p) == 1);
+    CHECK(*(unsigned int*)(unit + STEAM_ENTITY_ANIM_OFFSET) == STEAM_ANIM_ATTACK);
+    CHECK(hooked_action(unit, NULL, STEAM_ACT_NEXT_COMMAND, 0, 0, 0) == 0);
+    CHECK(*(unsigned int*)(unit + STEAM_ENTITY_ANIM_OFFSET) == STEAM_ANIM_IDLE);
+    CHECK(!unit_puppet_replay((uintptr_t)game, 0, STEAM_ANIM_ATTACK));
+    CHECK(!unit_puppet_replay((uintptr_t)game, 2u, STEAM_ANIM_RUN));
+    CHECK(unit_puppet_replay((uintptr_t)game, 2u, STEAM_ANIM_DEATH) == 1);
+    CHECK(!unit_puppet_replay((uintptr_t)game, 2u, STEAM_ANIM_DEATH));
+    CHECK(!unit_puppet_replay((uintptr_t)game, 3u, STEAM_ANIM_ATTACK));
+    s = unit_puppet_sample((uintptr_t)game);
+    CHECK(s.animation == STEAM_ANIM_DEATH && s.replayed == 2u && s.duplicates == 2u);
+    CHECK(hooked_action(unit, NULL, STEAM_ACT_NEXT_COMMAND, 0, 0, 0) == 0);
+    CHECK(*(unsigned int*)(unit + STEAM_ENTITY_ANIM_OFFSET) == STEAM_ANIM_DEATH);
+    CHECK(unit_puppet_release((uintptr_t)game));
+    CHECK(*(unsigned int*)(unit + STEAM_ENTITY_ANIM_OFFSET) == STEAM_ANIM_DEATH);
     CHECK(unit_puppet_stop());
     vt[1] = (void*)foreign;
     CHECK(!unit_puppet_install(base, &api));

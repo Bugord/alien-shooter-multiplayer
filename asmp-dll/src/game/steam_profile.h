@@ -44,6 +44,24 @@
 #define STEAM_ACT_SET_BEHAVIOR 95u
 #define STEAM_ANIM_IDLE 0u
 #define STEAM_ANIM_RUN 2u
+/* REA saved MAP loader and SPRITE update/action/teardown; private combat VIDs.
+   0x440 is also animation script 14. Never edit the shared loaded descriptor. */
+#define STEAM_GAME_VID_TABLE_OFFSET 0x2BCu
+#define STEAM_VID_SIZE 0x490u
+#define STEAM_ANIMATION_COUNT 17u
+#define STEAM_VID_ANIMATION_SCRIPTS_OFFSET 0x408u
+#define STEAM_VID_CREATIONS_OFFSET 0x250u
+#define STEAM_VID_DAMAGE_SCRIPT_OFFSET 0x450u
+#define STEAM_VID_COLLISION_SCRIPT_OFFSET 0x454u
+#define STEAM_VID_DAMAGE_OFFSET 0x48u
+#define STEAM_VID_SERVICE_OFFSET 0x468u
+#define STEAM_VID_RESOURCE_FLAGS_OFFSET 0x47Cu
+#define STEAM_VID_SPECIAL_FACTORY_FLAG 0x10u
+#define STEAM_ACT_DAMAGE 85u
+#define STEAM_ACT_SET_HP 88u
+#define STEAM_ACT_GET_HP 87u
+#define STEAM_ANIM_ATTACK 8u
+#define STEAM_ANIM_DEATH 15u
 #define STEAM_PLAYER_ACCESSOR_RVA 0x3B5F0u
 /* Entity factory (GAME slot 8), MAN destructor (MAN slot 0), and MAN methods. */
 #define STEAM_ACTOR_CREATE_RVA 0x40680u

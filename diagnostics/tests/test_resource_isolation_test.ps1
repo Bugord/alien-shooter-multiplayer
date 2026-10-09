@@ -57,7 +57,9 @@ try {
     foreach ($file in @('test-session.ps1', 'prepare-test-game.ps1', 'prepare-test-runtimes.ps1', 'start-test.ps1', 'start-clients.ps1')) {
         Copy-Item -LiteralPath (Join-Path $diagnosticsRoot $file) -Destination (Join-Path $scripts $file)
     }
-    Copy-Item -LiteralPath (Join-Path $diagnosticsRoot 'monster-flying.lgc') -Destination (Join-Path $scripts 'monster-flying.lgc')
+    foreach ($file in @('monster-flying.lgc', 'monster-combat.lgc')) {
+        Copy-Item -LiteralPath (Join-Path $diagnosticsRoot $file) -Destination (Join-Path $scripts $file)
+    }
     Set-Content -LiteralPath (Join-Path $source 'Maps\survive_01.map') -Value 'native survival map' -Encoding ascii
     Set-Content -LiteralPath (Join-Path $source 'Maps\survive_01.lgc') -Value 'native survival script' -Encoding ascii
     Add-Content -LiteralPath (Join-Path $scripts 'test-session.ps1') -Value @'
@@ -200,32 +202,60 @@ function Invoke-TestLauncher([string]$Launcher, [string[]]$Arguments) {
     Check ($flyingScript -match 'unit=CreateSprite\(290' -and $flyingScript -notmatch '(?m)^\s*SurviveGameTact\s*\(') 'flying script spawns one drone without waves'
     & (Join-Path $scripts 'start-test.ps1') -MonsterFlying | Out-Null
     Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'asmp-monster-backup\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'repeat experiment preserves original backup'
+    & (Join-Path $scripts 'start-test.ps1') -MonsterCombat | Out-Null
+    Check ($testState.Launches[$testState.Launches.Count - 1].Monster -eq '4') 'combat experiment forwarded explicitly'
+    $combatScript = Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.lgc') -Raw
+    Check ($combatScript -eq (Get-Content -LiteralPath (Join-Path $scripts 'monster-combat.lgc') -Raw)) 'combat selects its isolated script'
+    Check ($combatScript -match 'InitGame\(\)' -and $combatScript -match 'InitSurviveGame\(\)' -and $combatScript -match '(?m)^\s*GameTact\s*\(') 'combat preserves native player and game initialization'
+    Check ($combatScript -notmatch '\bCreateSprite\s*\(' -and $combatScript -notmatch '\bSurviveGameTact\s*\(') 'combat script creates no monsters or survival waves'
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.map') -Raw) -eq $nativeMapBefore) 'combat preserves native survival geometry'
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'asmp-monster-backup\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'flying to combat preserves original backup'
+    & (Join-Path $scripts 'start-test.ps1') -MonsterCombat | Out-Null
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'asmp-monster-backup\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'repeat combat preserves original backup'
+    & (Join-Path $scripts 'start-test.ps1') -MonsterFlying | Out-Null
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.lgc') -Raw) -eq $flyingScript) 'combat to flying selects flying script'
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'asmp-monster-backup\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'combat to flying preserves original backup'
     Check ((Get-Snapshot $source) -eq $sourceBefore) 'flying experiment leaves source installation intact'
     & (Join-Path $scripts 'start-test.ps1') -MonsterFlying -MonsterReload | Out-Null
     Check ($testState.Launches[$testState.Launches.Count - 1].Monster -eq '3') 'separate reload check forwarded'
     Check-Environment
     $beforeMonsterRejection = Get-Snapshot $defaultGame
+    $aBefore = Get-Snapshot $a; $bBefore = Get-Snapshot $b
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet -Multiplayer } 'monster cannot join multiplayer'
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet -DummyActor } 'monster cannot mix with dummy'
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying -MonsterPuppet } 'monster modes are exclusive'
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying -Multiplayer } 'Flying UNIT cannot join multiplayer'
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying -DummyActor } 'Flying UNIT cannot mix with dummy'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat -MonsterPuppet } 'combat cannot mix with ground movement'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat -MonsterFlying } 'combat cannot mix with flying movement'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat -MonsterReload } 'combat cannot mix with reload check'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat -Multiplayer } 'combat cannot join multiplayer'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat -ServerAddress '127.0.0.1' } 'combat cannot join a server implicitly'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat -DummyActor } 'combat cannot mix with dummy'
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterReload } 'reload check needs flying mode'
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet -Instance client-a -RuntimeDirectory $pair.ClientA } 'monster cannot join pair instance'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat -Instance client-a -RuntimeDirectory $pair.ClientA } 'combat cannot join pair instance A'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat -Instance client-b -RuntimeDirectory $pair.ClientB } 'combat cannot join pair instance B'
     Set-Content -LiteralPath (Join-Path $scripts 'build\network-session.json') -Value '{}'
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet } 'monster rejects managed session manifest'
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying } 'Flying UNIT rejects managed session manifest'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat } 'combat rejects managed session manifest'
     Remove-Item -LiteralPath (Join-Path $scripts 'build\network-session.json')
     Check ((Get-Snapshot $defaultGame) -eq $beforeMonsterRejection) 'mode conflicts rejected before config/menu/stop writes'
+    Check ((Get-Snapshot $a) -eq $aBefore -and (Get-Snapshot $b) -eq $bBefore) 'combat pair conflicts leave both copies unchanged'
     $testState.FailLaunch = $true
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterPuppet } 'monster launcher failure propagated'
     Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterFlying } 'flying launcher failure propagated'
     Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'failed flying launch restores survival script'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterCombat } 'combat launcher failure propagated'
+    Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'failed combat launch restores survival script'
     $testState.FailLaunch = $false
     Check-Environment
+    & (Join-Path $scripts 'start-test.ps1') -MonsterCombat | Out-Null
     & (Join-Path $scripts 'start-test.ps1') | Out-Null
     Check ((Get-Content -LiteralPath (Join-Path $defaultGame 'Maps\survive_01.lgc') -Raw) -eq $nativeScriptBefore) 'ordinary launch restores survival script'
     Check (!$testState.Launches[$testState.Launches.Count - 1].Monster) 'ordinary launch clears inherited monster option'
+    Check ((Get-Snapshot $source) -eq $sourceBefore) 'combat experiment leaves source installation intact'
     Check-Environment
     $launchCount = $testState.Launches.Count
     & (Join-Path $scripts 'start-clients.ps1') -NameA TeamA -NameB TeamB | Out-Null
