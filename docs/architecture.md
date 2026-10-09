@@ -13,8 +13,9 @@ and running it, see [Build, test and review](../diagnostics/README.md).
 | `diagnostics/src/` | Test DLL configuration and logging, frame observer/queue, read-only/dummy harness, launcher and optional test peer |
 
 Remote replicas have explicit idle, waiting, spawning, spawned, backoff and
-abandoned states. The native factory owns the created MAN; its child chain owns
-the attached name text and destroys it with the MAN. Private VIDs stay owned by
+abandoned states. The native factory owns the created MAN and its child chain. Names are not
+native objects: the display hook draws them with the game's `Render::DrawText`
+above the health bar. Private VIDs stay owned by
 the coordinator until native removal succeeds or the old world unloads. Replicas
 use the local player's army and receive weapons on demand. Factory failures and
 torso timeouts remove and retry with a two-second delay doubling to thirty

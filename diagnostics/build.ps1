@@ -50,6 +50,7 @@ try {
         & .\state-sync-test.exe
         if ($LASTEXITCODE) { throw 'State sync checks failed.' }
         Compile ($flags + @("$root\tests\pose_buffer_test.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", '/Fe:pose-buffer-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + @("$root\tests\ui_label_test.c", "$repo\asmp-dll\src\game\ui.c", '/Fe:ui-label-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + @("$root\tests\probe_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:probe-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + @("$root\tests\dll_load_test.c", '/Fe:dll-load-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\tick_hook_test.c", "$root\src\diag_tick.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\dummy_actor.c", '/Fe:tick-hook-test.exe', '/link', '/MACHINE:X86'))
@@ -69,6 +70,8 @@ try {
         & .\dummy-actor-test.exe
         if ($LASTEXITCODE) { throw 'Dummy actor lifecycle checks failed.' }
         & .\pose-buffer-test.exe
+        & .\ui-label-test.exe
+        if ($LASTEXITCODE) { throw 'UI label checks failed.' }
         & .\probe-test.exe
         if ($LASTEXITCODE) { throw 'Probe checks failed.' }
         & .\dll-load-test.exe "$build\asmp-diag.dll"

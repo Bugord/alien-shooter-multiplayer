@@ -42,9 +42,10 @@
    are its destructor and action; its owned text string is at +0x74. */
 #define STEAM_STRING_CREATE_RVA 0x25EA0u
 #define STEAM_STRING_ASSIGN_RVA 0x44CB0u
-#define STEAM_LIST_REMOVE_RVA 0x706A0u
-#define STEAM_ADD_CHILD_RVA 0x6A5F0u
 #define STEAM_DRAW_RECT_RVA 0x271B0u
+/* Render::DrawText(this=Render, x, y, const char*, argb) draws via the D3D9
+   font at Render+0xE34; verified statically (Ghidra), live use pending. */
+#define STEAM_DRAW_TEXT_RVA 0x306A0u
 #define STEAM_SET_ANIMATION_RVA 0x6B970u
 #define STEAM_STEXT_VTABLE_RVA 0xDA7BCu
 #define STEAM_STEXT_DESTRUCTOR_RVA 0x38550u
@@ -52,8 +53,6 @@
 #define STEAM_STEXT_TEXT_OFFSET 0x74u
 /* GAME menu entity list uses the same count/capacity/entries layout as world lists. */
 #define STEAM_GAME_MENU_LIST_OFFSET 0x274u
-#define STEAM_GAME_VID_TABLE_OFFSET 0x2BCu
-#define STEAM_FONT_VID_INDEX 4u
 #define STEAM_GAME_CAMERA_X_OFFSET 0x54u
 #define STEAM_GAME_CAMERA_Y_OFFSET 0x58u
 #define STEAM_ARMY_INDEX_OFFSET 0x240u

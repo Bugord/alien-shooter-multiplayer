@@ -268,8 +268,6 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
                     if (pose.event == ACTOR_FAULT) { update = pose; abandon(r, local->game, &update, &cleanup_failed); }
                     else if (pose.event == ACTOR_LOST) { update = pose; r->state = RS_IDLE; forget_weapon(r); }
                     else if (now - r->last_pose >= 1000u && update.event == ACTOR_NONE) { update = pose; r->last_pose = now; }
-                    if (r->state == RS_SPAWNED && ui_name(&r->actor, peer->name) < 0)
-                        abandon(r, local->game, &update, &cleanup_failed);
                 }
             }
         }
@@ -321,7 +319,12 @@ void multiplayer_draw(void) {
         if (*(uintptr_t*)(base + STEAM_GAME_PTR_RVA) != local_game) return;
         for (unsigned int i = 0; i < MP_MAX_PEERS; ++i)
             if (remote[i].state == RS_SPAWNED && actor_live(&remote[i].actor, local_game))
+            {
                 ui_health_bar(local_game, remote[i].actor.entity, current[i].state.health);
+                char label[sizeof(current[i].name) + 1];
+                memcpy(label, current[i].name, sizeof(current[i].name)); label[sizeof(current[i].name)] = 0;
+                ui_name_label(local_game, remote[i].actor.entity, label);
+            }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 void multiplayer_request_stop(void) {
