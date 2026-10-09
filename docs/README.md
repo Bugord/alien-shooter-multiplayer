@@ -8,7 +8,7 @@ page for your task.
 | Page | Contents |
 | --- | --- |
 | [Build, test and review](../diagnostics/README.md) | Build, preparing test copies and isolated DLL pairs, Git Bash server/two-client launch, managed two-client session (start, stop, restart, live checklist), one-PC Mirror test, two-copy launch verification, multiplayer menu and two-PC sessions, window and diagnostic modes, what the automated tests cover |
-| [Monster checkpoints](monster-sync-stages.md) | Authoritative game-host design, ground/flying UNIT control and the isolated visual attack/death fixture |
+| [Monster checkpoints](monster-sync-stages.md) | Authoritative game-host design, ground/flying UNIT control, isolated combat and one-monster network test |
 
 ## How it works
 
@@ -19,6 +19,7 @@ page for your task.
 | [asmp-server](../asmp-server/README.md) | Relay server: running it and what it validates |
 | [steam_profile.h](../asmp-dll/src/game/steam_profile.h) | Supported EXE hash, verified RVAs, offsets and layouts (comments record where each was confirmed) |
 | [protocol.h](../common/src/protocol.h) | State and shot packet codecs |
+| [monster_protocol.h](../common/src/monster_protocol.h) | Opt-in monster authority, state and explicit event codecs |
 
 ## Libraries
 

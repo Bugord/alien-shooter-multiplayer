@@ -2,6 +2,7 @@
 #define ASMP_STATE_CLIENT_H
 #include <stdio.h>
 #include "../../../../common/src/protocol.h"
+#include "../../../../common/src/monster_protocol.h"
 typedef struct StateClient StateClient;
 StateClient* state_client_create(const char* host, unsigned short port, const char* name, FILE* log);
 void state_client_destroy(StateClient* client);
@@ -27,4 +28,21 @@ int state_client_peer_info(const StateClient*, unsigned int, unsigned long, Peer
 /* Reject captures from an inactive, expired or replaced local world. */
 int state_client_send_shot(StateClient*, const MpShot*, unsigned long now);
 int state_client_take_shot(StateClient*, ShotEvent*);
+typedef struct MonsterState {
+    MpMonsterState state;
+    uint32_t authority_id, authority_session;
+    int present;
+} MonsterState;
+typedef struct MonsterEvent {
+    MpMonsterEvent event;
+    uint32_t authority_id, authority_session;
+} MonsterEvent;
+/* Opt in before/after handshake. Only the first claimant can publish; the
+   server freezes its id+session until every transport connection leaves. */
+void state_client_monster_claim(StateClient*);
+int state_client_monster_authority(const StateClient*, uint32_t*, uint32_t*, int*);
+int state_client_publish_monster(StateClient*, const MpMonsterState*, unsigned long now);
+int state_client_monster(const StateClient*, unsigned long now, MonsterState*);
+int state_client_send_monster_event(StateClient*, const MpMonsterEvent*, unsigned long now);
+int state_client_take_monster_event(StateClient*, MonsterEvent*);
 #endif

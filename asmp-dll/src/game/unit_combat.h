@@ -7,7 +7,7 @@ typedef struct UnitCombatSample {
     unsigned int private_entities, other_entities, unexpected_entities;
     int sources_unchanged, fault;
 } UnitCombatSample;
-/* Offline fixture only, one VID50 + VID108. Factory owns native allocations;
+/* Scoped offline fixture / network copy, one VID50 + VID108. Factory owns native allocations;
    this module owns private shallow VID copies, never the borrowed resources.
    Buffers stay in the pinned DLL through the complete deleting destructors.
    Every function below runs on the game thread. Init binds only, on worker. */

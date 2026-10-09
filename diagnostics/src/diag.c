@@ -15,6 +15,19 @@
 static HMODULE self;
 static HANDLE worker;
 static volatile LONG status = DIAG_STARTING;
+static DWORD monster_kill_delay, monster_test_started;
+static uint32_t monster_test_epoch;
+static int monster_test_triggered;
+static void observe_runtime(const RuntimeFrame* frame) {
+    diag_tick_observe(frame);
+    if (!monster_kill_delay || frame->monster.role != MONSTER_HOST || !frame->monster.unit.entity) return;
+    if (monster_test_epoch != frame->monster.host_epoch) {
+        monster_test_epoch = frame->monster.host_epoch; monster_test_started = frame->milliseconds; monster_test_triggered = 0;
+    }
+    if (!monster_test_triggered && frame->milliseconds - monster_test_started >= monster_kill_delay) {
+        monster_test_triggered = 1; unit_puppet_host_kill(frame->snapshot.game);
+    }
+}
 #pragma comment(linker, "/EXPORT:AsmpDiagGetStatus=_AsmpDiagGetStatus@0")
 #pragma comment(linker, "/EXPORT:AsmpDiagWait=_AsmpDiagWait@4")
 DWORD WINAPI AsmpDiagGetStatus(void) { return (DWORD)InterlockedCompareExchange(&status, 0, 0); }
@@ -24,6 +37,14 @@ static void log_frame(FILE* log, const FrameSample* frame, Snapshot* last,
     enum ProbeResult* previous, DWORD* last_log)
 {
     const Snapshot* sample = &frame->snapshot;
+    if (frame->monster_network.event) {
+        const MonsterSyncFrame* m = &frame->monster_network;
+        fprintf(log, "# MONSTER_NETWORK role=%d state=%d id=%u epoch=%u entity=%08lX x=%.3f y=%.3f z=%.3f direction=%u moving=%u health=%d anim=%u native_frames=%u behavior=%u attacks=%u deaths=%u dropped=%u rejected=%u cleanup=%u\n",
+            m->role, m->state, m->monster_id, m->host_epoch, (unsigned long)m->unit.entity,
+            m->unit.x, m->unit.y, m->unit.z, m->unit.direction, m->unit.moving, m->unit.health,
+            m->unit.animation, m->unit.frame_changes, m->unit.behavior, m->attacks, m->deaths,
+            m->dropped, m->rejected, m->cleanup);
+    }
     if (frame->monster.event) {
         const MonsterProbeFrame* m = &frame->monster;
         const UnitPuppetSample* u = &m->unit;
@@ -167,7 +188,22 @@ static DWORD WINAPI run(LPVOID unused)
     if (monster_enabled && (dummy_enabled || multiplayer_enabled)) { fprintf(log, "ERROR monster experiment is offline and exclusive\n"); goto fail; }
     if (dummy_enabled && multiplayer_enabled) { fprintf(log, "ERROR dummy and multiplayer are mutually exclusive\n"); goto fail; }
     if (multiplayer_enabled) {
-        RuntimeConfig config = {0}; config.log = log; config.observer = diag_tick_observe;
+        RuntimeConfig config = {0}; config.log = log; config.observer = observe_runtime;
+        char role[16] = {0}; DWORD role_length = GetEnvironmentVariableA("ASMP_DIAG_MONSTER_NETWORK", role, sizeof(role));
+        if (role_length) {
+            if (!host_length || role_length >= sizeof(role) || (strcmp(role, "host") && strcmp(role, "client"))) {
+                fprintf(log, "ERROR invalid monster network role or no direct connection\n"); goto fail;
+            }
+            config.monster_role = !strcmp(role, "host") ? MONSTER_HOST : MONSTER_CLIENT;
+            char delay[16] = {0}; DWORD length = GetEnvironmentVariableA("ASMP_DIAG_MONSTER_KILL_AFTER", delay, sizeof(delay));
+            if (length) {
+                char* end; unsigned long seconds = strtoul(delay, &end, 10);
+                if (length >= sizeof(delay) || *end || seconds < 5u || seconds > 120u) {
+                    fprintf(log, "ERROR invalid monster kill delay\n"); goto fail;
+                }
+                if (config.monster_role == MONSTER_HOST) monster_kill_delay = seconds * 1000u;
+            }
+        }
         diag_tick_prepare_observer();
         if (host_length) {
             DWORD port_length = GetEnvironmentVariableA("ASMP_DIAG_PORT", port_text, sizeof(port_text));

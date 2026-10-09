@@ -334,6 +334,27 @@ restarting the game.
 
 ## Validation and Gitflow
 
+The first real host/client monster test runs with:
+
+```powershell
+.\diagnostics\build.ps1 -Server
+.\diagnostics\start-monster-network-test.ps1
+.\diagnostics\stop-two-client-test.ps1
+```
+
+Host A runs one ordinary VID50 monster with AI; client B creates one controlled
+private copy. Both copied survival scripts disable waves. The launcher waits for
+A's authority confirmation before starting B. Mode/map are preserved in the
+managed manifest, including `-RestartClient B`. Stop restores copied survival
+scripts after verified cleanup; original Steam assets stay untouched.
+
+For the automated native death check, start with `-KillAfterSeconds 20` (5..120).
+This requests native death on the host after the observation interval; normal
+launches leave the monster alive. Observe movement/turning/attack in both windows,
+then kill it on A. B must remove both parts. Client shots do not yet forward
+damage to the host. See [Monster checkpoints](../docs/monster-sync-stages.md)
+for detailed limits and acceptance counters.
+
 The build runs synthetic layout/probe and actor lifecycle checks; update-hook
 ABI, queue overflow, concurrency and restoration checks; actual-DLL rejection
 in an unsupported process; and window-mode instruction/protection checks.

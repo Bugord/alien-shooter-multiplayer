@@ -30,6 +30,7 @@ void diag_tick_observe(const RuntimeFrame* input) {
     frame.milliseconds = input->milliseconds; frame.tick = input->tick;
     frame.session_result = input->session_result; frame.result = input->result;
     frame.snapshot = input->snapshot; frame.multiplayer = input->multiplayer;
+    frame.monster_network = input->monster;
     frame.session = input->session; frame.display = input->display;
     enqueue(&frame);
 }

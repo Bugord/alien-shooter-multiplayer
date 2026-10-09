@@ -224,3 +224,89 @@ identities absent and no remaining UNIT. No new objects/shared VID changes
 were observed. Death disposal was immediate; multi-frame death art and death16
 are not validated. Stop restored hooks successfully (`hook_restore_result=0
 cleanup=1`). Visual appearance remains for user acceptance.
+
+## First network checkpoint: one ordinary host monster and one client copy
+
+```powershell
+.\diagnostics\build.ps1 -Server
+.\diagnostics\start-monster-network-test.ps1
+# Or automate native host death after twenty seconds of host observation:
+# .\diagnostics\start-monster-network-test.ps1 -KillAfterSeconds 20
+.\diagnostics\stop-two-client-test.ps1
+```
+
+The managed pair runs copied survival maps. A's script creates one stock VID50
+UNIT with its original VID108 part; native AI, targeting, movement, attacks and
+damage continue normally. B's script creates no monsters. Neither script runs
+survival waves. A claims server authority before B launches. The server locks
+the first claim to that peer ID and connection generation until the room empties;
+reconnecting does not transfer ownership, and there is no host migration.
+
+`multiplayer/monster_sync.*` maps this one monster to ID1 within the host world
+epoch. Host observation does not clear its behavior, goals or commands. Native
+USE_AMMO actions from root/part capture attack initiation, including zero-cost
+melee; animation snapshots never create attack events. Destruction/death generates
+a separate event, and repeated absent snapshots also retain the authoritative
+death. State includes map key, host epoch, ID, VID, position, direction, movement
+intent/velocity, signed health and an event watermark. Events carry their own
+sequence, world/ID, tick and attack/death kind. Frames and timers stay native.
+
+After the copied world settles, B creates the sanitized private VID50/108 fixture
+through the validated native factory and attaches that specific entity. Positive
+host health is applied through the native action. Local AI, damage and scripted
+gameplay effects are suppressed. Explicit attacks replay native animation8; the
+engine advances its frames and returns to idle/run. Death removes root and part
+immediately, rather than waiting for a client death animation. A death tombstone
+prevents an earlier alive snapshot from recreating the same monster.
+
+Worker networking/logging and game-thread native operations use bounded queues
+and latest-state handoffs. Captured events remain staged through lock contention;
+overflow is counted. Failed creation/application cleans up and retries after
+2,4,8,16,30 seconds, then every30 seconds. A failed guarded native removal abandons
+the copy until a changed world no longer contains its private identities.
+Runtime stop waits for game-thread cleanup before restoring UNIT/SPRITE hooks.
+The pinned DLL retains the shallow private descriptors; borrowed art/resources
+are never freed by the mod. The host monster is game-owned and only observed.
+
+The worker/server validate lengths, versions, ranges, authority/session, world
+and sequence. Fresh snapshots allow late join; historical attack events are not
+replayed. B rejects stale/duplicate events and removes its copy when host data
+expires after one second, on leaving the map, or on a world/session change.
+Local player death is independent of world presence. A late join establishes
+its event baseline from the initial snapshot. Attack packets use the current
+transport without delivery guarantees; a lost attack may be absent visually,
+whereas repeated dead state still removes the copy.
+
+Live checklist:
+
+- Both windows show exactly one UNIT50; no waves or client AI decisions.
+- A's native AI moves and turns; B follows with matching health and ID/epoch.
+- Host native attack captures increment `MONSTER_NETWORK attacks`; B replays
+  those events with native frame progression and returns to idle/run.
+- Kill on A (or use the optional timed native death trigger): B removes both
+  private parts without resurrecting from an older alive snapshot.
+- On separate runs, late join/restart B must create only a living current copy;
+  expire/disconnect A and reload/stop must remove B's copy cleanly.
+- Stop logs `cleanup=1` and successful hook restoration on both clients.
+
+The normal launcher leaves games running for observation. The stop command
+restores their survival scripts after verified cleanup; `-CloseGames` closes
+only the managed pair. `-RestartClient B` preserves the mode/map in the manifest.
+Tests: `monster-sync-test.exe`, `monster-transport-test.exe`, extended native
+watch tests, resource isolation and managed session script suites.
+
+Scope remains VID50 + one VID108, one monster in an opt-in survival test.
+Client damage requests, authoritative damage to players, projectile/effect
+replication, missions, population, other compositions and host migration are
+deferred. Ordinary multiplayer launches do not enable this mode.
+
+Live result (2026-10-09): one native host UNIT50 and one sanitized client UNIT50
+with registered VID108 parts were confirmed by read-only world inventories.
+Position, direction and HP matched; native attack frames progressed on both.
+The first pair captured29/replayed24 attacks after the client's late join and
+settling interval, then timed native host death removed the client copy without
+resurrection. A second untimed run recorded host35/client32 attacks and another
+death/removal. No queue drops or native faults occurred. A final full build and
+all suites passed, including absent-player/army world-preservation tests; the
+user confirmed the repeated two-window behavior visually. Separate live stop,
+reload and disconnection checklists are not established by these runs.

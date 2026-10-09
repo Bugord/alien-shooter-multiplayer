@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include "multiplayer.h"
 #include "session.h"
+#include "monster_sync.h"
 #include "../game/tick_hook.h"
 #include "../game/action_hook.h"
 #include "../game/display_hook.h"
@@ -16,10 +17,12 @@ typedef struct RuntimeFrame {
     enum ProbeResult result;
     Snapshot snapshot;
     MultiplayerFrame multiplayer;
+    MonsterSyncFrame monster;
 } RuntimeFrame;
 typedef void (*FrameObserver)(const RuntimeFrame*);
 typedef struct RuntimeConfig {
     int direct;
+    enum MonsterRole monster_role;
     char host[16], name[16];
     unsigned short port;
     FILE* log; /* Worker only; remains open through stop. */

@@ -16,6 +16,7 @@ typedef struct FrameSample {
     ActorResult actor;
     MonsterProbeFrame monster;
     MultiplayerFrame multiplayer;
+    MonsterSyncFrame monster_network;
     enum SessionState session;
     enum DisplayResult display;
 } FrameSample;

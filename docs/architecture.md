@@ -79,7 +79,14 @@ live counter, not its potentially stale stored slot. Weapon slots are zero-based
 
 The original mod does not implement monster/world synchronization or a working
 scoreboard. This stage adds neither, nor respawning, Steam invitations or
-server-authoritative combat. The existing transport is unreliable: separate
+server-authoritative combat in ordinary multiplayer. The opt-in one-monster
+checkpoint is described in [Monster checkpoints](monster-sync-stages.md).
+Its production `monster_sync` coordinator observes one ordinary host UNIT,
+creates a sanitized client copy, and shares the runtime's world identity and
+game-thread lifecycle. A separate explicit monster protocol locks server
+authority to one peer/session. Attack/death are events; positions, movement and
+health are snapshots. Player/projectile damage replication remains deferred.
+The existing transport is unreliable: separate
 shot events avoid snapshot loss of short-lived attacks but do not guarantee
 delivery under packet loss. Each PC still simulates its own world.
 

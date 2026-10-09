@@ -26,6 +26,8 @@ function Read-TwoClientManifest {
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     try { $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { throw "Session manifest is unreadable: $path" }
     if ($manifest.schema -ne $script:TwoClientSchema) { throw 'Session manifest has an unknown schema; inspect it before continuing.' }
+    if ($manifest.mode -and $manifest.mode -notin @('players', 'monster')) { throw 'Session manifest has an unknown test mode.' }
+    if ($manifest.mode -eq 'monster' -and $manifest.map -cne 'maps\survive_01.map') { throw 'Monster session has an unexpected map; inspect its manifest.' }
     $manifest
 }
 
@@ -62,10 +64,13 @@ function Read-SharedText([string]$Path) {
 }
 
 # ready needs both the transport handshake and an accepted map load; loader success alone is not enough.
-function Get-ClientReadiness([string]$LogsDirectory, [int]$ProcessId) {
+function Get-ClientReadiness([string]$LogsDirectory, [int]$ProcessId, [string]$MonsterRole = '') {
     $text = Read-SharedText (Join-Path $LogsDirectory "asmp-diag-$ProcessId.log")
     if ($text -match '# NET_DISCONNECTED' -or $text -match '# SESSION map_load_result=-') { return 'failed' }
-    if ($text -match '# NET_READY' -and $text -match '# SESSION map_load_result=1') { return 'ready' }
+    if ($text -match '# NET_READY' -and $text -match '# SESSION map_load_result=1') {
+        if ($MonsterRole -eq 'host' -and $text -notmatch '# MONSTER_AUTHORITY ready=1\b') { return 'pending' }
+        return 'ready'
+    }
     'pending'
 }
 
@@ -88,20 +93,28 @@ function Wait-Until([scriptblock]$Condition, [int]$TimeoutSeconds, [int]$PollMil
 }
 
 $script:TwoClientOps = @{
-    StartServer = {
-        param([int]$Port, [string]$LogDirectory)
-        $server = Join-Path $PSScriptRoot 'build\asmp-server.exe'
-        Start-Process -FilePath $server -ArgumentList "$Port" -PassThru -WindowStyle Minimized `
+    LaunchServer = {
+        param([string]$Server, [int]$Port, [string]$LogDirectory)
+        Start-Process -FilePath $Server -ArgumentList "$Port" -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput (Join-Path $LogDirectory 'server.out.log') -RedirectStandardError (Join-Path $LogDirectory 'server.err.log')
+    }
+    StartServer = {
+        param([int]$Port, [string]$LogDirectory, [string]$Map = 'maps\Level_01.map')
+        $server = Join-Path $PSScriptRoot 'build\asmp-server.exe'
+        $previousMap = $env:ASMP_MAP
+        try {
+            $env:ASMP_MAP = $Map
+            & $script:TwoClientOps.LaunchServer $server $Port $LogDirectory
+        } finally { $env:ASMP_MAP = $previousMap }
     }
     WaitUdp = {
         param([int]$Port, [int]$ProcessId, [int]$TimeoutSeconds)
         Wait-Until { @(Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue | Where-Object OwningProcess -eq $ProcessId).Count -gt 0 } $TimeoutSeconds
     }
     StartClient = {
-        param([string]$Instance, [string]$Runtime, [string]$Address, [int]$Port, [string]$Name, [string]$ResultPath)
+        param([string]$Instance, [string]$Runtime, [string]$Address, [int]$Port, [string]$Name, [string]$ResultPath, [string]$MonsterRole = '')
         & (Join-Path $PSScriptRoot 'start-test.ps1') -Instance $Instance -RuntimeDirectory $Runtime -ServerAddress $Address `
-            -Port $Port -Name $Name -LaunchResultPath $ResultPath | Out-Null
+            -Port $Port -Name $Name -LaunchResultPath $ResultPath -MonsterNetworkRole $MonsterRole | Out-Null
     }
 }
 
@@ -112,6 +125,18 @@ function Set-ClientState($Manifest, [string]$Role, [string]$State, [string]$Mess
     Write-TwoClientManifest $Manifest
 }
 
+function Restore-ManagedMonsterScript($Manifest, [string]$Role) {
+    if ($Manifest.mode -ne 'monster') { return }
+    $instance = if ($Role -eq 'A') { 'client-a' } else { 'client-b' }
+    $directory = Get-TestGameDirectory $instance
+    # Only restore a verified physical diagnostic copy, after native cleanup.
+    Assert-TestGameReady $directory
+    $saved = Join-Path $directory 'asmp-monster-backup\survive_01.lgc'
+    if (Test-Path -LiteralPath $saved -PathType Leaf) {
+        Copy-Item -LiteralPath $saved -Destination (Join-Path $directory 'Maps\survive_01.lgc') -Force
+    }
+}
+
 # Launch one client, record its identity immediately, then wait for NET_READY + map load.
 function Start-ManagedClient($Manifest, [string]$Role, [int]$TimeoutSeconds) {
     $client = $Manifest.clients.$Role
@@ -120,7 +145,8 @@ function Start-ManagedClient($Manifest, [string]$Role, [int]$TimeoutSeconds) {
     if (Test-Path -LiteralPath $resultPath) { Remove-Item -LiteralPath $resultPath }
     $game = Join-Path (Get-TestGameDirectory $instance) 'AlienShooter.exe'
     $failure = $null
-    try { & $script:TwoClientOps.StartClient $instance $client.runtime $Manifest.address $Manifest.port $client.name $resultPath }
+    $monsterRole = if ($Manifest.mode -eq 'monster') { if ($Role -eq 'A') { 'host' } else { 'client' } } else { '' }
+    try { & $script:TwoClientOps.StartClient $instance $client.runtime $Manifest.address $Manifest.port $client.name $resultPath $monsterRole }
     catch { $failure = $_.Exception.Message }
     $result = Read-LaunchResult $resultPath
     # Keep the identity of a created process even when a later launcher stage failed.
@@ -142,11 +168,11 @@ function Start-ManagedClient($Manifest, [string]$Role, [int]$TimeoutSeconds) {
     $logs = Join-Path $client.runtime 'logs'
     $state = Wait-Until {
         if ((Get-EntryState $client) -ne 'match') { return 'exited' }
-        $readiness = Get-ClientReadiness $logs ([int]$client.pid)
+        $readiness = Get-ClientReadiness $logs ([int]$client.pid) $monsterRole
         if ($readiness -ne 'pending') { $readiness }
     } $TimeoutSeconds
     if ($state -ne 'ready') {
-        $reason = if ($state) { "client reported '$state'" } else { "no NET_READY and map load within $TimeoutSeconds s" }
+        $reason = if ($state) { "client reported '$state'" } else { "no transport/map/monster authority readiness within $TimeoutSeconds s" }
         Set-ClientState $Manifest $Role 'failed' $reason
         throw "Client $Role is not connected: $reason. Log: $logs\asmp-diag-$($client.pid).log"
     }
@@ -197,6 +223,14 @@ function Stop-TwoClientSession([int]$TimeoutSeconds = 15, [switch]$CloseGames, [
                 Stop-Process -Id ([int]$client.pid) -Force
                 $client | Add-Member -NotePropertyName state -NotePropertyValue 'stopped' -Force
             } else { $unclean.Add("client $role PID $($client.pid): still open (use -Force to terminate it)") }
+        }
+    }
+    foreach ($role in @('A', 'B')) {
+        $client = $manifest.clients.$role
+        $identity = Get-EntryState $client
+        if ($identity -eq 'absent' -or ($identity -eq 'match' -and $client.state -eq 'mod-stopped')) {
+            try { Restore-ManagedMonsterScript $manifest $role }
+            catch { $unclean.Add("client $role survival script restore failed: $($_.Exception.Message)") }
         }
     }
     if ($unclean.Count -eq 0) {

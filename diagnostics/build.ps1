@@ -27,19 +27,23 @@ $actorSources = @("$repo\asmp-dll\src\game\actor.c", "$repo\asmp-dll\src\game\ac
 $multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", "$repo\asmp-dll\src\game\action_hook.c", "$repo\asmp-dll\src\game\ui.c", "$repo\asmp-dll\src\game\display_hook.c", "$repo\asmp-dll\src\multiplayer\session.c")
 $hookSources = @("$repo\asmp-dll\src\game\slot_hook.c", "$repo\asmp-dll\src\game\tick_hook.c", "$repo\asmp-dll\src\game\world_hook.c")
 $runtimeSource = "$repo\asmp-dll\src\multiplayer\runtime.c"
+$monsterCoordinator = "$repo\asmp-dll\src\multiplayer\monster_sync.c"
 $monsterSources = @("$repo\asmp-dll\src\game\unit_puppet.c", "$repo\asmp-dll\src\game\unit_combat.c", "$root\src\monster_probe.c")
 Push-Location $build
 try {
     # Compile the existing networking library separately with its warning level.
     Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $netCommon + $netClient)
     $netObjects = @($netCommon + $netClient | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
-    Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $monsterSources + @($runtimeSource) + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\diag_tick.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'winmm.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
+    Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $monsterSources + @($runtimeSource, $monsterCoordinator) + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\diag_tick.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'winmm.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     Compile ($flags + $netIncludes + @("$root\src\state_peer.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:state-peer.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
     Compile ($flags + @("$root\src\launcher.c", "$root\src\window_mode.c", "$root\src\hash.c", '/Fe:asmp-diag-launch.exe', '/link', 'bcrypt.lib', 'user32.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     if (!$SkipTests) {
         Compile ($flags + @("$root\tests\unit_puppet_test.c", "$repo\asmp-dll\src\game\unit_puppet.c", "$repo\asmp-dll\src\game\slot_hook.c", '/Fe:unit-puppet-test.exe', '/link', '/MACHINE:X86'))
         & .\unit-puppet-test.exe
         if ($LASTEXITCODE) { throw 'UNIT puppet checks failed.' }
+        Compile ($flags + @("$root\tests\monster_sync_test.c", $monsterCoordinator, '/Fe:monster-sync-test.exe', '/link', '/MACHINE:X86'))
+        & .\monster-sync-test.exe
+        if ($LASTEXITCODE) { throw 'Monster coordinator checks failed.' }
         Compile ($flags + @("$root\tests\unit_combat_test.c", "$repo\asmp-dll\src\game\unit_combat.c", '/Fe:unit-combat-test.exe', '/link', '/MACHINE:X86'))
         & .\unit-combat-test.exe
         if ($LASTEXITCODE) { throw 'UNIT combat fixture checks failed.' }
@@ -62,6 +66,9 @@ try {
         Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $serverSupport)
         $serverObjects = @($serverSupport | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
         Compile ($flags + $netIncludes + @("$root\tests\state_sync_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:state-sync-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        Compile ($flags + $netIncludes + @("$root\tests\monster_transport_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:monster-transport-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        & .\monster-transport-test.exe
+        if ($LASTEXITCODE) { throw 'Monster transport checks failed.' }
         & .\state-sync-test.exe
         if ($LASTEXITCODE) { throw 'State sync checks failed.' }
         Compile ($flags + @("$root\tests\pose_buffer_test.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", '/Fe:pose-buffer-test.exe', '/link', '/MACHINE:X86'))
@@ -73,7 +80,7 @@ try {
         Compile ($flags + $actorSources + @("$root\tests\dummy_actor_test.c", "$root\src\dummy_actor.c", '/Fe:dummy-actor-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\multiplayer_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:multiplayer-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\session_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:session-test.exe', '/link', '/MACHINE:X86'))
-        Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $netIncludes + @($runtimeSource, "$root\tests\runtime_test.c", "$repo\asmp-dll\src\game\probe.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:runtime-test.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $netIncludes + $monsterSources + @($monsterCoordinator, $runtimeSource, "$root\tests\runtime_test.c", "$repo\asmp-dll\src\game\probe.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:runtime-test.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\hooks_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:hooks-test.exe', '/link', '/MACHINE:X86'))
         & .\hooks-test.exe
         if ($LASTEXITCODE) { throw 'Hook lifecycle checks failed.' }

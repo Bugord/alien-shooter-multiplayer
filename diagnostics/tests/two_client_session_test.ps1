@@ -20,12 +20,30 @@ $ping = Join-Path $env:SystemRoot 'System32\PING.EXE'
 foreach ($instance in @('client-a', 'client-b')) {
     New-Item -ItemType Directory -Path (Join-Path $fakeGameRoot $instance) -Force | Out-Null
     Copy-Item -LiteralPath $ping -Destination (Join-Path $fakeGameRoot "$instance\AlienShooter.exe")
+    Set-Content -LiteralPath (Join-Path $fakeGameRoot "$instance\asmp-diag-test.marker") -Value 'ASMP diagnostic copy' -Encoding ascii
+    New-Item -ItemType Directory -Path (Join-Path $fakeGameRoot "$instance\Maps"), (Join-Path $fakeGameRoot "$instance\asmp-monster-backup") -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $fakeGameRoot "$instance\Maps\survive_01.lgc") -Value 'diagnostic survival script' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $fakeGameRoot "$instance\asmp-monster-backup\survive_01.lgc") -Value 'native survival script' -Encoding ascii
 }
+$script:fakeExeHash = (Get-FileHash -LiteralPath $ping -Algorithm SHA256).Hash
+function Get-TestExeHash { $script:fakeExeHash }
 function Get-TestGameDirectory([string]$Instance = 'default') { Join-Path $fakeGameRoot $Instance }
 function Start-Fake([string]$Exe) {
     $process = Start-Process -FilePath $Exe -ArgumentList '-n', '120', '127.0.0.1' -PassThru -WindowStyle Hidden
     $script:started.Add($process)
-    $process
+    # Start-Process can return before Windows exposes MainModule.Path. Recording
+    # that transient empty path makes a live helper look like a reused PID and
+    # prevents Stop-TwoClientSession from writing its stop file.
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $ready = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+        if (!$ready -or $ready.HasExited) { throw "Fake process exited before identity became readable: $Exe" }
+        try {
+            if ($ready.Path -ieq [IO.Path]::GetFullPath($Exe) -and $ready.StartTime) { return $ready }
+        } catch { }
+        Start-Sleep -Milliseconds 25
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Fake process identity was not readable within 5 s: $Exe"
 }
 function Entry-For($Process, [string]$Role) {
     New-ProcessEntry $Role $Process.Id $Process.Path $Process.StartTime.ToUniversalTime().Ticks.ToString()
@@ -35,9 +53,10 @@ function New-FakeRuntime([string]$Name) {
     New-Item -ItemType Directory -Path (Join-Path $directory 'logs') -Force | Out-Null
     $directory
 }
-function New-Manifest($Server) {
+function New-Manifest($Server, [string]$Mode = 'players') {
     [pscustomobject]@{
         schema = 1; id = 'test'; state = 'starting'; address = '127.0.0.1'; port = 27999; server = $Server
+        mode = $Mode; map = $(if ($Mode -eq 'monster') { 'maps\survive_01.map' } else { 'maps\Level_01.map' })
         clients = [pscustomobject]@{
             A = [pscustomobject]@{ role = 'A'; name = 'LocalA'; pid = 0; path = ''; started = ''; runtime = (New-FakeRuntime 'a'); state = 'never-started'; message = '' }
             B = [pscustomobject]@{ role = 'B'; name = 'LocalB'; pid = 0; path = ''; started = ''; runtime = (New-FakeRuntime 'b'); state = 'never-started'; message = '' }
@@ -58,6 +77,11 @@ try {
     Write-TwoClientManifest $manifest
     Check ((Read-TwoClientManifest).state -eq 'running') 'manifest round trip and replace'
     Check (!(Test-Path -LiteralPath "$(Get-TwoClientManifestPath).tmp")) 'no temporary manifest left'
+    $monsterManifest = New-Manifest $null 'monster'
+    Write-TwoClientManifest $monsterManifest
+    Check ((Read-TwoClientManifest).mode -eq 'monster' -and (Read-TwoClientManifest).map -eq 'maps\survive_01.map') 'monster mode and map persist for restarts'
+    $monsterManifest.map = 'maps\Level_01.map'; Write-TwoClientManifest $monsterManifest
+    Expect-Throw { Read-TwoClientManifest } 'monster restart cannot silently use a player map'
     Set-Content -LiteralPath (Get-TwoClientManifestPath) -Value '{"schema":99}'
     Expect-Throw { Read-TwoClientManifest } 'unknown schema refused'
     Set-Content -LiteralPath (Get-TwoClientManifestPath) -Value '{broken'
@@ -86,6 +110,10 @@ try {
     Check ((Get-ClientReadiness $logs 77) -eq 'pending') 'connected without a map load is not ready'
     Add-Content -LiteralPath $log -Value '# SESSION map_load_result=1'
     Check ((Get-ClientReadiness $logs 77) -eq 'ready') 'handshake plus map load is ready'
+    Check ((Get-ClientReadiness $logs 77 'host') -eq 'pending') 'monster host needs explicit authority acknowledgement'
+    Add-Content -LiteralPath $log -Value '# MONSTER_AUTHORITY ready=1 generation=8'
+    Check ((Get-ClientReadiness $logs 77 'host') -eq 'ready') 'acknowledged connected host is ready'
+    Check ((Get-ClientReadiness $logs 77 'client') -eq 'ready') 'replica client uses ordinary transport readiness'
     Set-Content -LiteralPath $log -Value "# NET_READY id=1`r`n# SESSION map_load_result=-1"
     Check ((Get-ClientReadiness $logs 77) -eq 'failed') 'failed map load detected'
     Set-Content -LiteralPath $log -Value '# NET_DISCONNECTED reason=2'
@@ -96,17 +124,39 @@ try {
     Set-Content -LiteralPath $log -Value '# STOP requested by asmp-diag.stop; hook_restore_result=0 cleanup=0'
     Check ((Get-CleanupState $logs 77) -eq 'failed') 'cleanup=0'
 
+    # The selected server map is inherited only by the launched child process.
+    $previousMap = $env:ASMP_MAP
+    $launchServer = $script:TwoClientOps.LaunchServer
+    try {
+        $env:ASMP_MAP = 'before-map'
+        $script:TwoClientOps.LaunchServer = { param($Server, $Port, $Directory) $script:observedMap = $env:ASMP_MAP }
+        & $script:TwoClientOps.StartServer 27999 $fixture 'maps\survive_01.map'
+        Check ($script:observedMap -eq 'maps\survive_01.map' -and $env:ASMP_MAP -eq 'before-map') 'monster map forwarded with environment restored'
+        & $script:TwoClientOps.StartServer 27999 $fixture
+        Check ($script:observedMap -eq 'maps\Level_01.map' -and $env:ASMP_MAP -eq 'before-map') 'ordinary pair keeps its map despite inherited environment'
+        $script:TwoClientOps.LaunchServer = { throw 'simulated server launch failure' }
+        Expect-Throw { & $script:TwoClientOps.StartServer 27999 $fixture 'maps\survive_01.map' } 'server launch error propagated'
+        Check ($env:ASMP_MAP -eq 'before-map') 'server launch error restores environment'
+    } finally { $env:ASMP_MAP = $previousMap; $script:TwoClientOps.LaunchServer = $launchServer }
+
     # Client start with substituted launcher.
     $script:mode = 'ok'
+    $script:monsterRoles = New-Object 'Collections.Generic.List[string]'
     $script:TwoClientOps.StartClient = {
-        param($Instance, $Runtime, $Address, $Port, $Name, $ResultPath)
+        param($Instance, $Runtime, $Address, $Port, $Name, $ResultPath, $MonsterRole)
+        $script:monsterRoles.Add([string]$MonsterRole)
         if ($script:mode -eq 'throw') { throw 'launcher crashed' }
         if ($script:mode -eq 'silent') { return }
         $fake = Start-Fake (Join-Path (Get-TestGameDirectory $Instance) 'AlienShooter.exe')
         $late = $script:mode -eq 'late-failure'
         [pscustomobject]@{ schema = 1; stage = $(if ($late) { 'loading-dll' } else { 'dll-loaded' }); ok = !$late; pid = $fake.Id; started = $fake.StartTime.ToUniversalTime().Ticks.ToString() } |
             ConvertTo-Json | Set-Content -LiteralPath $ResultPath
-        $text = switch ($script:mode) { 'ok' { "# NET_READY id=1`r`n# SESSION map_load_result=1" } 'dropped' { '# NET_DISCONNECTED reason=2' } default { '' } }
+        $text = switch ($script:mode) {
+            'ok' { "# NET_READY id=1`r`n# SESSION map_load_result=1" }
+            'authority-ready' { "# NET_READY id=1`r`n# SESSION map_load_result=1`r`n# MONSTER_AUTHORITY ready=1" }
+            'dropped' { '# NET_DISCONNECTED reason=2' }
+            default { '' }
+        }
         if ($text) { Set-Content -LiteralPath (Join-Path $Runtime "logs\asmp-diag-$($fake.Id).log") -Value $text }
     }
     $manifest = New-Manifest $null
@@ -129,11 +179,23 @@ try {
     Expect-Throw { Start-ManagedClient $manifest 'B' 1 } 'readiness timeout is an error'
     Check ($watch.Elapsed.TotalSeconds -lt 10) 'readiness wait is bounded'
 
+    $manifest = New-Manifest $null 'monster'
+    Write-TwoClientManifest $manifest
+    $script:mode = 'ok'
+    Expect-Throw { Start-ManagedClient $manifest 'A' 1 } 'host without authority cannot finish start or unlock client B launch'
+    $script:mode = 'authority-ready'
+    Start-ManagedClient $manifest 'A' 5
+    Check ($script:monsterRoles[$script:monsterRoles.Count - 1] -eq 'host') 'persisted monster mode selects host A'
+    $script:mode = 'ok'
+    Start-ManagedClient $manifest 'B' 5
+    Check ($script:monsterRoles[$script:monsterRoles.Count - 1] -eq 'client') 'persisted monster mode selects replica B'
+    Check ((Read-TwoClientManifest).mode -eq 'monster' -and $manifest.clients.B.state -eq 'running') 'client startup retains monster mode for next restart'
+
     # Stop: clients first, server last, repeatable, identity-checked.
     $server = Start-Fake $exe
     $a = Start-Fake (Join-Path $fakeGameRoot 'client-a\AlienShooter.exe')
     $b = Start-Fake (Join-Path $fakeGameRoot 'client-b\AlienShooter.exe')
-    $manifest = New-Manifest (Entry-For $server 'server')
+    $manifest = New-Manifest (Entry-For $server 'server') 'monster'
     Set-Identity $manifest.clients.A $a
     Set-Identity $manifest.clients.B $b
     Write-TwoClientManifest $manifest
@@ -144,10 +206,13 @@ try {
     Check (Test-Path -LiteralPath (Join-Path $manifest.clients.B.runtime 'asmp-diag.stop')) 'stop file written for B'
     Check ((Get-EntryState (Entry-For $server 'server')) -eq 'match') 'server kept while a client is unclean'
     Check ((Read-TwoClientManifest).state -eq 'partial') 'manifest records the partial stop'
+    Check ((Get-Content -LiteralPath (Join-Path $fakeGameRoot 'client-a\Maps\survive_01.lgc') -Raw).Trim() -eq 'native survival script') 'clean monster host restores its original script'
+    Check ((Get-Content -LiteralPath (Join-Path $fakeGameRoot 'client-b\Maps\survive_01.lgc') -Raw).Trim() -eq 'diagnostic survival script') 'unclean replica keeps its script until cleanup is verified'
     Check ((Get-Process -Id $a.Id -ErrorAction SilentlyContinue) -and (Get-Process -Id $b.Id -ErrorAction SilentlyContinue)) 'stop never closes the games'
     Set-Content -LiteralPath (Join-Path $manifest.clients.B.runtime "logs\asmp-diag-$($b.Id).log") -Value '# STOP requested by asmp-diag.stop; hook_restore_result=1 cleanup=1'
     $unclean = @(Stop-TwoClientSession -TimeoutSeconds 1)
     Check ($unclean.Count -eq 0) 'second stop completes after B cleaned up'
+    Check ((Get-Content -LiteralPath (Join-Path $fakeGameRoot 'client-b\Maps\survive_01.lgc') -Raw).Trim() -eq 'native survival script') 'replica cleanup restores its own original script'
     Start-Sleep -Milliseconds 300
     Check (!(Get-Process -Id $server.Id -ErrorAction SilentlyContinue)) 'server stopped last'
     Check ($null -ne (Get-Process -Id $a.Id -ErrorAction SilentlyContinue)) 'games remain open without -CloseGames'

@@ -7,20 +7,25 @@
 #include <string.h>
 #include "server.h"
 #include "protocol.h"
+#include "monster_protocol.h"
 #include "utils/mem/mem.h"
 #include "utils/time/time.h"
 #include "epnet.h"
 #include "epnet_server.h"
 #include <stdio.h> // TODO: Remove.
+#include <stdlib.h>
 
 typedef struct Player
 {
     char name[MP_MAX_NAME_LEN + 1];
     bool is_connected;
+    bool transport_connected;
     uint32_t session, state_sequence;
     bool state_received;
     uint32_t shot_sequence;
     bool shot_received;
+    MpState latest;
+    unsigned long state_at;
 } Player;
 
 typedef struct MpServer
@@ -33,11 +38,41 @@ typedef struct MpServer
     unsigned long prev_tick_time_ms;
     Player* players;
     unsigned long roster_sent_time_ms;
+    bool monster_claimed, monster_received, monster_event_received;
+    uint32_t monster_host, monster_session, monster_event_sequence;
+    MpMonsterState monster;
+    unsigned long monster_at, monster_relay_at;
 } MpServer;
 
 
 static void process_received_packets_(MpServer* server);
 static void send_roster_(MpServer* server);
+static void send_monster_authority_(MpServer* server, unsigned int recipient) {
+    uint8_t packet[12]; mp_put_u32(packet, MP_MONSTER_VERSION);
+    mp_put_u32(packet + 4, server->monster_claimed ? server->monster_host : UINT32_MAX);
+    mp_put_u32(packet + 8, server->monster_claimed ? server->monster_session : 0);
+    epnet_server_send(server->ns, (uint8_t)recipient, MPT_S_MONSTER_AUTHORITY, packet, sizeof(packet));
+}
+static int monster_owner_(MpServer* server, unsigned int sender, const uint8_t* data, int length) {
+    return length >= 4 && server->monster_claimed && sender == server->monster_host &&
+        server->players[sender].session == server->monster_session && mp_get_u32(data) == server->monster_session;
+}
+static int monster_world_(MpServer* server, unsigned int sender, uint32_t low, uint32_t high, uint32_t epoch) {
+    Player* p = &server->players[sender];
+    return p->state_received && mp_monster_world(p->latest.world_low, p->latest.world_high, p->latest.world_epoch) &&
+        server->tick_time_ms - p->state_at <= MP_MONSTER_EXPIRY_MS &&
+        p->latest.world_low == low && p->latest.world_high == high && p->latest.world_epoch == epoch;
+}
+static void send_monster_state_(MpServer* server, unsigned int recipient) {
+    if (!server->monster_received || server->tick_time_ms - server->monster_at > MP_MONSTER_EXPIRY_MS ||
+        !server->players[server->monster_host].is_connected ||
+        server->players[server->monster_host].session != server->monster_session ||
+        !monster_world_(server, server->monster_host, server->monster.world_low, server->monster.world_high, server->monster.world_epoch)) return;
+    uint8_t packet[MP_MONSTER_STATE_RELAY_SIZE];
+    mp_put_u32(packet, server->monster_host); mp_put_u32(packet + 4, server->monster_session);
+    mp_monster_state_encode(packet + 8, &server->monster);
+    epnet_server_send(server->ns, (uint8_t)recipient, MPT_S_MONSTER_STATE, packet, sizeof(packet));
+}
 
 static void process_hello_(MpServer* server, uint8_t sender, const char* name)
 {
@@ -49,6 +84,8 @@ static void process_hello_(MpServer* server, uint8_t sender, const char* name)
     uint8_t welcome[13 + MP_MAX_MAP_NAME_LEN];
     int length = mp_welcome_encode(welcome, sizeof(welcome), sender, server->max_clients, server->map_name);
     if (length) epnet_server_send(server->ns, sender, MPT_S_WELCOME, welcome, (size_t)length);
+    send_monster_authority_(server, sender);
+    send_monster_state_(server, sender);
     printf("Client %d is %s\n", sender, p->name);
 }
 
@@ -66,6 +103,7 @@ static void process_received_packets_(MpServer* server)
                 uint32_t session = p->session + 1;
                 memset(p, 0, sizeof(*p));
                 p->session = session ? session : 1;
+                p->transport_connected = true;
             }
             printf("Client %d joined (low-level)\n", ev.client_id);
             break;
@@ -76,7 +114,15 @@ static void process_received_packets_(MpServer* server)
             if (ev.client_id < server->max_clients)
             {
                 server->players[ev.client_id].is_connected = false;
+                server->players[ev.client_id].transport_connected = false;
                 server->roster_dirty = true;
+                bool empty = true;
+                for (unsigned int i = 0; i < server->max_clients; ++i)
+                    if (server->players[i].transport_connected) empty = false;
+                if (empty) {
+                    server->monster_claimed = server->monster_received = server->monster_event_received = false;
+                    memset(&server->monster, 0, sizeof(server->monster));
+                }
             }
             break;
         }
@@ -104,6 +150,12 @@ static void process_received_packets_(MpServer* server)
                     (p->state_received && !mp_sequence_newer(state.sequence, p->state_sequence))) break;
                 p->state_sequence = state.sequence;
                 p->state_received = true;
+                if (server->monster_claimed && sender == server->monster_host && p->session == server->monster_session &&
+                    (!mp_monster_world(state.world_low, state.world_high, state.world_epoch) ||
+                     state.world_low != p->latest.world_low || state.world_high != p->latest.world_high ||
+                     state.world_epoch != p->latest.world_epoch))
+                    server->monster_received = server->monster_event_received = false;
+                p->latest = state; p->state_at = server->tick_time_ms;
                 uint8_t relay[MP_STATE_RELAY_SIZE];
                 mp_put_u32(relay, sender);
                 mp_put_u32(relay + 4, p->session);
@@ -111,6 +163,52 @@ static void process_received_packets_(MpServer* server)
                 for (uint8_t i = 0; i < server->max_clients; ++i)
                     if (i != sender && server->players[i].is_connected)
                         epnet_server_send(server->ns, i, MPT_S_STATE, relay, sizeof(relay));
+                break;
+            }
+            case MPT_C_MONSTER_CLAIM:
+            {
+                const uint8_t* data = ev.data.packet.data;
+                Player* p = &server->players[sender];
+                if (length != 8 || mp_get_u32(data) != MP_MONSTER_VERSION || mp_get_u32(data + 4) != p->session) break;
+                if (!server->monster_claimed) {
+                    server->monster_claimed = true; server->monster_host = sender; server->monster_session = p->session;
+                    server->monster_received = server->monster_event_received = false;
+                    printf("Monster authority id=%u session=%u\n", sender, p->session);
+                }
+                for (unsigned int i = 0; i < server->max_clients; ++i)
+                    if (server->players[i].is_connected) send_monster_authority_(server, i);
+                break;
+            }
+            case MPT_C_MONSTER_STATE:
+            {
+                const uint8_t* data = ev.data.packet.data; MpMonsterState state;
+                if (length != MP_MONSTER_STATE_CLIENT_SIZE || !monster_owner_(server, sender, data, length) ||
+                    !mp_monster_state_decode(data + 4, MP_MONSTER_STATE_SIZE, &state) ||
+                    !monster_world_(server, sender, state.world_low, state.world_high, state.world_epoch) ||
+                    (server->monster_received && !mp_sequence_newer(state.sequence, server->monster.sequence))) break;
+                server->monster = state; server->monster_received = true; server->monster_at = server->tick_time_ms;
+                for (unsigned int i = 0; i < server->max_clients; ++i)
+                    if (server->players[i].is_connected) send_monster_state_(server, i);
+                break;
+            }
+            case MPT_C_MONSTER_EVENT:
+            {
+                const uint8_t* data = ev.data.packet.data; MpMonsterEvent event;
+                if (length != MP_MONSTER_EVENT_CLIENT_SIZE || !monster_owner_(server, sender, data, length) ||
+                    !mp_monster_event_decode(data + 4, MP_MONSTER_EVENT_SIZE, &event) ||
+                    !monster_world_(server, sender, event.world_low, event.world_high, event.world_epoch) ||
+                    !server->monster_received || server->tick_time_ms - server->monster_at > MP_MONSTER_EXPIRY_MS ||
+                    event.world_low != server->monster.world_low || event.world_high != server->monster.world_high ||
+                    event.world_epoch != server->monster.world_epoch ||
+                    (event.kind == MP_MONSTER_ATTACK && !server->monster.alive) ||
+                    (server->monster_event_received && !mp_sequence_newer(event.sequence, server->monster_event_sequence))) break;
+                server->monster_event_received = true; server->monster_event_sequence = event.sequence;
+                uint8_t packet[MP_MONSTER_EVENT_RELAY_SIZE];
+                mp_put_u32(packet, sender); mp_put_u32(packet + 4, server->monster_session);
+                memcpy(packet + 8, data + 4, MP_MONSTER_EVENT_SIZE);
+                for (unsigned int i = 0; i < server->max_clients; ++i)
+                    if (server->players[i].is_connected)
+                        epnet_server_send(server->ns, (uint8_t)i, MPT_S_MONSTER_EVENT, packet, sizeof(packet));
                 break;
             }
             case MPT_C_SHOT:
@@ -181,6 +279,10 @@ MpServer* mp_server_create(unsigned short port, int max_clients)
                         sizeof(*server->players) * max_clients);
                 server->max_clients = (unsigned int)max_clients;
                 strcpy_s(server->map_name, MP_MAX_MAP_NAME_LEN, "maps\\Level_01.map");
+                char configured_map[128]; size_t configured_length = 0;
+                if (!getenv_s(&configured_length, configured_map, sizeof(configured_map), "ASMP_MAP") && configured_length &&
+                    strlen(configured_map) < sizeof(server->map_name) && mp_is_level_path(configured_map))
+                    strcpy_s(server->map_name, sizeof(server->map_name), configured_map);
                 server->prev_tick_time_ms = time_get_ms();
                 return server;
             }
@@ -220,11 +322,18 @@ void mp_server_tick(MpServer* server)
     server->prev_tick_time_ms = server->tick_time_ms;
     epnet_server_update(server->ns, dt);
     process_received_packets_(server);
+    if (server->tick_time_ms - server->monster_relay_at >= 250u) {
+        for (unsigned int i = 0; i < server->max_clients; ++i)
+            if (server->players[i].is_connected) send_monster_state_(server, i);
+        server->monster_relay_at = server->tick_time_ms;
+    }
 
     if (server->roster_dirty ||
         (server->tick_time_ms - server->roster_sent_time_ms) >= MP_ROSTER_INTERVAL_MS)
     {
         send_roster_(server);
+        for (unsigned int i = 0; i < server->max_clients; ++i)
+            if (server->players[i].is_connected) send_monster_authority_(server, i);
         server->roster_dirty = false;
         server->roster_sent_time_ms = server->tick_time_ms;
     }

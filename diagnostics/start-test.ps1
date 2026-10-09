@@ -5,6 +5,7 @@ param(
     [switch]$MonsterFlying,
     [switch]$MonsterCombat,
     [switch]$MonsterReload,
+    [ValidateSet('', 'host', 'client')][string]$MonsterNetworkRole = '',
     [switch]$Multiplayer,
     [ValidateRange(640, 1920)][int]$Width = 800,
     [ValidateRange(480, 1080)][int]$Height = 600,
@@ -47,6 +48,18 @@ if (@(@($MonsterPuppet, $MonsterFlying, $MonsterCombat) | Where-Object { $_ }).C
     throw 'Choose MonsterPuppet, MonsterFlying or MonsterCombat.'
 }
 if ($MonsterReload -and !$MonsterFlying) { throw 'MonsterReload requires MonsterFlying.' }
+if ($MonsterNetworkRole) {
+    if ($monsterMode -or $MonsterReload -or $DummyActor -or !$ServerAddress -or $Instance -eq 'default') {
+        throw 'MonsterNetworkRole requires an isolated pair instance and ServerAddress, without offline monster or dummy modes.'
+    }
+    if (($MonsterNetworkRole -eq 'host' -and $Instance -ne 'client-a') -or
+        ($MonsterNetworkRole -eq 'client' -and $Instance -ne 'client-b')) {
+        throw 'Monster network host is client-a; the replica client is client-b.'
+    }
+    if (Test-Path -LiteralPath (Join-Path $build 'network-session.json')) {
+        throw 'Stop the older managed network session before running the monster pair.'
+    }
+}
 if ($monsterMode -and ($DummyActor -or $multiplayerMode -or $Instance -ne 'default')) {
     throw 'Monster experiments require an offline default instance; omit DummyActor and multiplayer options.'
 }
@@ -58,8 +71,9 @@ $backup = Join-Path $gameDirectory 'asmp-menu-backup'
 $survivalScript = Join-Path $maps 'survive_01.lgc'
 $monsterBackup = Join-Path $gameDirectory 'asmp-monster-backup'
 $savedSurvival = Join-Path $monsterBackup 'survive_01.lgc'
-if ($MonsterFlying -or $MonsterCombat) {
-    $monsterScriptName = if ($MonsterCombat) { 'monster-combat.lgc' } else { 'monster-flying.lgc' }
+if ($MonsterFlying -or $MonsterCombat -or $MonsterNetworkRole) {
+    $monsterScriptName = if ($MonsterNetworkRole -eq 'host') { 'monster-host.lgc' }
+        elseif ($MonsterCombat -or $MonsterNetworkRole -eq 'client') { 'monster-combat.lgc' } else { 'monster-flying.lgc' }
     $monsterScriptSource = Join-Path $PSScriptRoot $monsterScriptName
     if (!(Test-Path -LiteralPath (Join-Path $maps 'survive_01.map') -PathType Leaf) -or
         !(Test-Path -LiteralPath $survivalScript -PathType Leaf) -or
@@ -121,6 +135,7 @@ $previousPort = $env:ASMP_DIAG_PORT
 $previousName = $env:ASMP_DIAG_NAME
 $previousDummy = $env:ASMP_DIAG_DUMMY
 $previousMonster = $env:ASMP_DIAG_MONSTER
+$previousMonsterNetwork = $env:ASMP_DIAG_MONSTER_NETWORK
 $previousMultiplayer = $env:ASMP_DIAG_MULTIPLAYER
 $previousLaunchResult = $env:ASMP_LAUNCH_RESULT
 try {
@@ -131,6 +146,7 @@ try {
     $env:ASMP_DIAG_MULTIPLAYER = if ($multiplayerMode) { '1' } else { '' }
     $env:ASMP_DIAG_DUMMY = if ($DummyActor) { '1' } else { '' }
     $env:ASMP_DIAG_MONSTER = if ($MonsterCombat) { '4' } elseif ($MonsterReload) { '3' } elseif ($MonsterFlying) { '2' } elseif ($MonsterPuppet) { '1' } else { '' }
+    $env:ASMP_DIAG_MONSTER_NETWORK = $MonsterNetworkRole
     $launchArguments = @($game, (Join-Path $runtime 'asmp-diag.dll'))
     if (!$Fullscreen) { $launchArguments += @("$Width", "$Height") }
     Invoke-TestLauncher $launcher $launchArguments
@@ -140,6 +156,7 @@ try {
     $env:ASMP_DIAG_NAME = $previousName
     $env:ASMP_DIAG_DUMMY = $previousDummy
     $env:ASMP_DIAG_MONSTER = $previousMonster
+    $env:ASMP_DIAG_MONSTER_NETWORK = $previousMonsterNetwork
     $env:ASMP_DIAG_MULTIPLAYER = $previousMultiplayer
     $env:ASMP_LAUNCH_RESULT = $previousLaunchResult
 }

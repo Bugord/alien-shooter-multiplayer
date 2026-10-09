@@ -61,6 +61,7 @@
 #define STEAM_ACT_SET_HP 88u
 #define STEAM_ACT_GET_HP 87u
 #define STEAM_ANIM_ATTACK 8u
+#define STEAM_ACT_USE_AMMO 0x5Du
 #define STEAM_ANIM_DEATH 15u
 #define STEAM_PLAYER_ACCESSOR_RVA 0x3B5F0u
 /* Entity factory (GAME slot 8), MAN destructor (MAN slot 0), and MAN methods. */

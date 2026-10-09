@@ -37,7 +37,7 @@ function Get-FileHash {
     if ($result.Hash -eq $fixtureExeHash) { $result.Hash = '4DD960458D6FFFCC9D00E9E7BA492739FB6D530D4C0B302F1C6BAA8B55D9B142' }
     $result
 }
-$environmentNames = @('ASMP_DIAG_SERVER', 'ASMP_DIAG_PORT', 'ASMP_DIAG_NAME', 'ASMP_DIAG_DUMMY', 'ASMP_DIAG_MULTIPLAYER', 'ASMP_DIAG_MONSTER')
+$environmentNames = @('ASMP_DIAG_SERVER', 'ASMP_DIAG_PORT', 'ASMP_DIAG_NAME', 'ASMP_DIAG_DUMMY', 'ASMP_DIAG_MULTIPLAYER', 'ASMP_DIAG_MONSTER', 'ASMP_DIAG_MONSTER_NETWORK')
 $previousEnvironment = @{}
 foreach ($name in $environmentNames) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -57,7 +57,7 @@ try {
     foreach ($file in @('test-session.ps1', 'prepare-test-game.ps1', 'prepare-test-runtimes.ps1', 'start-test.ps1', 'start-clients.ps1')) {
         Copy-Item -LiteralPath (Join-Path $diagnosticsRoot $file) -Destination (Join-Path $scripts $file)
     }
-    foreach ($file in @('monster-flying.lgc', 'monster-combat.lgc')) {
+    foreach ($file in @('monster-flying.lgc', 'monster-combat.lgc', 'monster-host.lgc')) {
         Copy-Item -LiteralPath (Join-Path $diagnosticsRoot $file) -Destination (Join-Path $scripts $file)
     }
     Set-Content -LiteralPath (Join-Path $source 'Maps\survive_01.map') -Value 'native survival map' -Encoding ascii
@@ -70,6 +70,7 @@ function Invoke-TestLauncher([string]$Launcher, [string[]]$Arguments) {
         Name = $env:ASMP_DIAG_NAME; Dummy = $env:ASMP_DIAG_DUMMY
         Multiplayer = $env:ASMP_DIAG_MULTIPLAYER
         Monster = $env:ASMP_DIAG_MONSTER
+        MonsterNetwork = $env:ASMP_DIAG_MONSTER_NETWORK
     })
     $instance = [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($Arguments[0]))
     if ($testState.FailLaunch -or ($testState.FailInstance -and $instance -eq $testState.FailInstance)) { throw 'Simulated launcher failure.' }
@@ -131,6 +132,34 @@ function Invoke-TestLauncher([string]$Launcher, [string[]]$Arguments) {
     Check ((Get-Content -LiteralPath (Join-Path $b 'saves\options.ini') -Raw) -match 'ScreenX=800') 'B independent saved options'
     Check ((Get-Content -LiteralPath (Join-Path $b 'Maps\MAINMENU.LGC') -Raw).Trim() -eq 'native menu') 'B keeps native menu'
     Check-Environment
+    & (Join-Path $scripts 'start-test.ps1') -Instance client-a -RuntimeDirectory $pair.ClientA -ServerAddress '127.0.0.1' -MonsterNetworkRole host | Out-Null
+    Check ($testState.Launches[$testState.Launches.Count - 1].MonsterNetwork -eq 'host' -and !$testState.Launches[$testState.Launches.Count - 1].Monster) 'host role uses production networking without offline probe'
+    $hostScript = Get-Content -LiteralPath (Join-Path $a 'Maps\survive_01.lgc') -Raw
+    Check ($hostScript -match 'unit=CreateSprite\(50' -and $hostScript -notmatch '\bSurviveGameTact\s*\(') 'host script creates one ordinary UNIT without waves'
+    & (Join-Path $scripts 'start-test.ps1') -Instance client-b -RuntimeDirectory $pair.ClientB -ServerAddress '127.0.0.1' -MonsterNetworkRole client | Out-Null
+    Check ($testState.Launches[$testState.Launches.Count - 1].MonsterNetwork -eq 'client' -and !$testState.Launches[$testState.Launches.Count - 1].Monster) 'replica role uses production networking without offline probe'
+    $clientScript = Get-Content -LiteralPath (Join-Path $b 'Maps\survive_01.lgc') -Raw
+    Check ($clientScript -notmatch '\bCreateSprite\s*\(' -and $clientScript -notmatch '\bSurviveGameTact\s*\(') 'replica script creates no independent monster or waves'
+    foreach ($copy in @($a, $b)) {
+        Check ((Get-Content -LiteralPath (Join-Path $copy 'asmp-monster-backup\survive_01.lgc') -Raw).Trim() -eq 'native survival script') 'pair instances preserve original survival scripts separately'
+    }
+    Check-Environment
+    $aBefore = Get-Snapshot $a; $bBefore = Get-Snapshot $b
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -MonsterNetworkRole host -ServerAddress '127.0.0.1' } 'network monster cannot use default instance'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -Instance client-a -RuntimeDirectory $pair.ClientA -MonsterNetworkRole host } 'network monster needs a server'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -Instance client-a -RuntimeDirectory $pair.ClientA -ServerAddress '127.0.0.1' -MonsterNetworkRole client } 'replica role cannot use host instance'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -Instance client-b -RuntimeDirectory $pair.ClientB -ServerAddress '127.0.0.1' -MonsterNetworkRole host } 'host role cannot use replica instance'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -Instance client-a -RuntimeDirectory $pair.ClientA -ServerAddress '127.0.0.1' -MonsterNetworkRole host -MonsterCombat } 'network and offline combat cannot mix'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -Instance client-a -RuntimeDirectory $pair.ClientA -ServerAddress '127.0.0.1' -MonsterNetworkRole host -DummyActor } 'network monster and dummy cannot mix'
+    Check ((Get-Snapshot $a) -eq $aBefore -and (Get-Snapshot $b) -eq $bBefore) 'network role conflicts reject before script or settings writes'
+    $testState.FailLaunch = $true
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -Instance client-a -RuntimeDirectory $pair.ClientA -ServerAddress '127.0.0.1' -MonsterNetworkRole host } 'network host launch failure propagated'
+    Expect-Throw { & (Join-Path $scripts 'start-test.ps1') -Instance client-b -RuntimeDirectory $pair.ClientB -ServerAddress '127.0.0.1' -MonsterNetworkRole client } 'network replica launch failure propagated'
+    $testState.FailLaunch = $false
+    Check-Environment
+    foreach ($copy in @($a, $b)) {
+        Check ((Get-Content -LiteralPath (Join-Path $copy 'Maps\survive_01.lgc') -Raw).Trim() -eq 'native survival script') 'failed network launch restores that instance survival script'
+    }
     $launchA = $testState.Launches[0]; $launchB = $testState.Launches[1]
     Check ($launchA.Name -eq 'LocalA' -and $launchA.Server -eq '127.0.0.1' -and $launchA.Port -eq '27021' -and $launchA.Multiplayer -eq '1' -and !$launchA.Dummy) 'A launcher environment'
     Check ($launchB.Name -eq 'LocalB' -and !$launchB.Server -and $launchB.Port -eq '27022' -and !$launchB.Multiplayer -and $launchB.Dummy -eq '1') 'B does not inherit A environment'

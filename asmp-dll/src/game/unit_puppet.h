@@ -30,6 +30,7 @@ typedef struct UnitPuppetSample {
     unsigned int replayed, duplicates;
     unsigned int attack_frame_changes;
     int health;
+    unsigned int captured_attacks, captured_deaths;
 } UnitPuppetSample;
 
 /* Single borrowed class-2 UNIT, optionally one linked class-9 part.
@@ -44,6 +45,14 @@ int unit_puppet_install(uintptr_t base, const UnitPuppetEngine*);
 /* Scans the native tick's 16 entity lists; excludes player, unsupported child
    chains, other classes and death animations. */
 int unit_puppet_attach_first(uintptr_t game, uintptr_t player);
+/* Host observation leaves all original actions, goals and movement untouched.
+   Only the scoped stock VID50 is accepted. Captures native USE_AMMO attack
+   initiation (including a zero-cost melee attack), never inferred snapshots. */
+int unit_puppet_watch_first(uintptr_t game, uintptr_t player);
+int unit_puppet_attach_entity(uintptr_t game, uintptr_t player, uintptr_t entity);
+int unit_puppet_health(uintptr_t game, int health);
+/* Diagnostic host death trigger through the ordinary native SET_HP action. */
+int unit_puppet_host_kill(uintptr_t game);
 int unit_puppet_apply(uintptr_t game, const UnitPuppetPose*);
 /* Only sanitized private root/part descriptors are accepted. Sequence is local
    to this attached entity. Attack is visual only; death uses native SET_HP. */

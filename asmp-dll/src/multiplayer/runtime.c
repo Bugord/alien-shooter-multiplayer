@@ -2,7 +2,7 @@
 #include "runtime.h"
 #include "../game/world_hook.h"
 #include "../game/ui.h"
-enum RuntimeStage { ST_NONE, ST_BOUND, ST_SESSION, ST_COORDINATOR, ST_ACTION, ST_WORLD, ST_TICK };
+enum RuntimeStage { ST_NONE, ST_BOUND, ST_SESSION, ST_COORDINATOR, ST_ACTION, ST_WORLD, ST_MONSTER, ST_TICK };
 enum NetworkState { NS_OFF, NS_CONNECTING, NS_CONNECTED };
 static struct {
     volatile LONG state, game_thread;
@@ -14,7 +14,7 @@ static struct {
     StateClient* client;
     enum NetworkState network;
     unsigned int generation, display_ticks;
-    DWORD connecting_at, stats_at;
+    DWORD connecting_at, stats_at, monster_sent_at;
     RuntimeFrame latest;
     enum DisplayResult display, logged_display;
     enum SessionState logged_session;
@@ -50,6 +50,8 @@ int runtime_start_with_bindings(uintptr_t base, const RuntimeConfig* config, con
         (config->direct && (!memchr(config->host, 0, sizeof(config->host)) || !config->host[0] ||
          !memchr(config->name, 0, sizeof(config->name)) || !config->name[0] || !config->port)) ||
         runtime_state() != RT_OFF) return 0;
+    if (config->monster_role < MONSTER_DISABLED || config->monster_role > MONSTER_CLIENT ||
+        (config->monster_role && !config->direct)) return 0;
     memset(&runtime, 0, sizeof(runtime)); runtime.base = base; runtime.config = *config; runtime.bindings = *bindings;
     runtime.worker_thread = GetCurrentThreadId();
     runtime.display = runtime.logged_display = DISPLAY_PENDING;
@@ -68,6 +70,8 @@ int runtime_start_with_bindings(uintptr_t base, const RuntimeConfig* config, con
     if (!bindings->action_install(base, multiplayer_is_replica, multiplayer_capture_shot)) goto fail;
     runtime.stage = ST_WORLD;
     if (!bindings->world_install(base)) goto fail;
+    runtime.stage = ST_MONSTER;
+    if (config->monster_role && !monster_sync_enable(base, config->monster_role)) goto fail;
     runtime.stage = ST_TICK;
     if (bindings->tick_install((void* volatile*)(base + STEAM_GAME_VTABLE_RVA + STEAM_GAME_TICK_SLOT * sizeof(uintptr_t)),
         (void*)(base + STEAM_GAME_TICK_RVA), on_tick) != SLOT_OK) goto fail;
@@ -96,15 +100,17 @@ void runtime_game_tick(void* game, RuntimeFrame* out) {
     }
     out->session = session_state(); out->display = runtime.display;
     out->multiplayer = multiplayer_tick(&out->snapshot, out->result, out->milliseconds);
+    if (runtime.config.monster_role) out->monster = monster_sync_tick(&out->snapshot, out->result,
+        out->multiplayer.world_epoch, (uint32_t)out->tick, out->milliseconds);
     if (TryAcquireSRWLockExclusive(&frame_lock)) { runtime.latest = *out; ReleaseSRWLockExclusive(&frame_lock); }
     if (runtime.config.observer) runtime.config.observer(out);
 }
 static void publish_frame(const RuntimeFrame* frame) {
     const Snapshot* sample = &frame->snapshot;
     MpState state = {0};
-    if (frame->result == PROBE_OK && sample->in_level) {
+    if ((frame->result == PROBE_OK || frame->result == PROBE_NO_PLAYER || frame->result == PROBE_NO_ARMY) && sample->in_level) {
         state.world_low = sample->world_low; state.world_high = sample->world_high; state.world_epoch = frame->multiplayer.world_epoch;
-        state.active = sample->health > 0; state.tick = (uint32_t)frame->tick;
+        state.active = frame->result == PROBE_OK && sample->health > 0; state.tick = (uint32_t)frame->tick;
         state.x = sample->x; state.y = sample->y; state.z = sample->z; state.health = sample->health; state.max_health = sample->max_health > 0 ? sample->max_health : 0;
         state.animation = sample->animation; state.direction = sample->direction; state.weapon_slot = sample->weapon_slot;
         state.velocity = sample->velocity; state.moving = sample->moving;
@@ -129,6 +135,7 @@ void runtime_worker_step(DWORD now) {
     AcquireSRWLockShared(&frame_lock); frame = runtime.latest; ReleaseSRWLockShared(&frame_lock);
     if (frame.tick) publish_frame(&frame);
     state_client_update(runtime.client, now);
+    if (runtime.config.monster_role == MONSTER_HOST) state_client_monster_claim(runtime.client);
     if (runtime.client && state_client_connected(runtime.client)) {
         /* Publish once per connection; the session keeps the result. */
         if (runtime.network != NS_CONNECTED) session_result(runtime.generation, 1, state_client_map(runtime.client));
@@ -144,6 +151,20 @@ void runtime_worker_step(DWORD now) {
     while (state_client_take_shot(runtime.client, &received)) multiplayer_receive_shot(&received, now);
     MpShot outgoing;
     while (multiplayer_take_local_shot(&outgoing)) state_client_send_shot(runtime.client, &outgoing, now);
+    if (runtime.config.monster_role) {
+        uint32_t authority_id, authority_session; int is_local = 0;
+        state_client_monster_authority(runtime.client, &authority_id, &authority_session, &is_local);
+        MonsterState source = {0}; state_client_monster(runtime.client, now, &source);
+        monster_sync_publish(&source, is_local, now);
+        MonsterEvent event;
+        while (state_client_take_monster_event(runtime.client, &event)) monster_sync_receive(&event, now);
+        MpMonsterState outgoing_state;
+        if (now - runtime.monster_sent_at >= MP_STATE_SEND_MS && monster_sync_take_state(&outgoing_state)) {
+            state_client_publish_monster(runtime.client, &outgoing_state, now); runtime.monster_sent_at = now;
+        }
+        MpMonsterEvent outgoing_event;
+        while (monster_sync_take_event(&outgoing_event)) state_client_send_monster_event(runtime.client, &outgoing_event, now);
+    }
     if (runtime.config.log && frame.display != runtime.logged_display) {
         fprintf(runtime.config.log, "# DISPLAY result=%d\n", frame.display); runtime.logged_display = frame.display;
     }
@@ -158,9 +179,10 @@ int runtime_stop(DWORD timeout_ms) {
     DWORD started = GetTickCount();
     InterlockedExchange(&runtime.state, RT_STOPPING);
     if (runtime.stage >= ST_SESSION) session_stop();
+    if (runtime.config.monster_role && runtime.stage >= ST_MONSTER) monster_sync_request_stop();
     if (runtime.stage >= ST_COORDINATOR) {
         multiplayer_request_stop();
-        while (!multiplayer_stopped()) {
+        while (!multiplayer_stopped() || (runtime.config.monster_role && runtime.stage >= ST_MONSTER && !monster_sync_stopped())) {
             if (GetTickCount() - started >= timeout_ms) {
                 if (runtime.config.log) fprintf(runtime.config.log, "# RUNTIME cleanup timeout; game thread paused or native entities remain; hooks retained\n");
                 state_client_destroy(runtime.client); runtime.client = NULL; runtime.network = NS_OFF; return 0;
@@ -168,6 +190,7 @@ int runtime_stop(DWORD timeout_ms) {
             Sleep(1);
         }
     }
+    if (runtime.config.monster_role && runtime.stage >= ST_MONSTER && !monster_sync_stop()) return 0;
     int display_ok = runtime.stage < ST_TICK || runtime.bindings.display_stop();
     int action_ok = runtime.stage < ST_ACTION || runtime.bindings.action_stop();
     int world_ok = runtime.stage < ST_WORLD || runtime.bindings.world_stop();

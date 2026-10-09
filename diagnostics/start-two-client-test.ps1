@@ -1,5 +1,6 @@
 # Starts the local relay and two isolated real game clients, or restarts one exited client.
 param(
+    [switch]$MonsterNetwork,
     [ValidateRange(1, 65535)][int]$Port = 27020,
     [ValidateLength(1, 15)][string]$NameA = 'LocalA',
     [ValidateLength(1, 15)][string]$NameB = 'LocalB',
@@ -18,7 +19,13 @@ try {
     $existing = Read-TwoClientManifest
     if ($RestartClient) {
         if (!$existing -or $existing.state -in @('stopped', 'failed')) { throw 'No running session to restart a client in. Start a new one first.' }
+        if ($MonsterNetwork -and $existing.mode -ne 'monster') { throw 'The recorded session is not a monster test; start a new pair to change modes.' }
         if ((Get-EntryState $existing.server) -ne 'match') { throw 'The session server is not running; stop and start the pair again.' }
+        if ($RestartClient -eq 'B' -and $existing.mode -eq 'monster' -and
+            ((Get-EntryState $existing.clients.A) -ne 'match' -or
+             (Get-ClientReadiness (Join-Path $existing.clients.A.runtime 'logs') ([int]$existing.clients.A.pid) 'host') -ne 'ready')) {
+            throw 'The monster host must be connected and acknowledged before restarting client B.'
+        }
         $client = $existing.clients.$RestartClient
         if ((Get-EntryState $client) -ne 'absent') { throw "Client $RestartClient is still running or cannot be verified; close it first." }
         $name = if ($RestartClient -eq 'A') { $NameA } else { $NameB }
@@ -43,6 +50,16 @@ try {
         $directory = Get-TestGameDirectory $instance
         Assert-TestGameIdle $directory -AllGames
         Assert-TestGameReady $directory
+        if ($MonsterNetwork) {
+            foreach ($asset in @('Maps\survive_01.map', 'Maps\survive_01.lgc')) {
+                if (!(Test-Path -LiteralPath (Join-Path $directory $asset) -PathType Leaf)) { throw "Monster pair needs $instance/$asset." }
+            }
+        }
+    }
+    if ($MonsterNetwork) {
+        foreach ($asset in @('monster-host.lgc', 'monster-combat.lgc')) {
+            if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $asset) -PathType Leaf)) { throw "Monster pair script missing: $asset." }
+        }
     }
     if (!(Get-Process steam -ErrorAction SilentlyContinue)) { throw 'Open Steam and sign in before starting the test copies.' }
 
@@ -53,6 +70,8 @@ try {
         state = 'starting'
         address = '127.0.0.1'
         port = $Port
+        mode = $(if ($MonsterNetwork) { 'monster' } else { 'players' })
+        map = $(if ($MonsterNetwork) { 'maps\survive_01.map' } else { 'maps\Level_01.map' })
         dllSha256 = $pair.DllSha256
         directory = $pair.Directory
         server = $null
@@ -63,7 +82,7 @@ try {
     }
     Write-TwoClientManifest $manifest
     try {
-        $process = & $script:TwoClientOps.StartServer $Port $pair.Directory
+        $process = & $script:TwoClientOps.StartServer $Port $pair.Directory $manifest.map
         $server = New-ProcessEntry 'server' $process.Id (Join-Path $build 'asmp-server.exe') $process.StartTime.ToUniversalTime().Ticks.ToString()
         $manifest.server = $server
         Write-TwoClientManifest $manifest
