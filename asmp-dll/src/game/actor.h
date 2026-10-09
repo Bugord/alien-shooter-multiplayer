@@ -61,7 +61,7 @@ int actor_set_army(Actor*, unsigned int army);
 /* 1 success, 0 rejected (keep previous weapon), -1 native exception. */
 int actor_arm(Actor*, int slot);
 ActorResult actor_apply(Actor*, const Snapshot* target);
-/* The native destructor cascades through the child chain, including name STEXT.
+/* The native destructor cascades through the child chain, of the replica.
    Map owns MAN, child entities and their strings. VID remains in the pinned DLL.
    Removal reports ACTOR_FAULT and retains the pointer for truthful stop reporting. */
 ActorResult actor_remove(Actor*, uintptr_t game);
