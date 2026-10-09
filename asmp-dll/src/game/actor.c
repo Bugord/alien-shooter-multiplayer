@@ -93,6 +93,20 @@ int actor_arm(Actor* a, int slot)
         a->armed_weapon = slot; return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
+int actor_grant_all_weapons(const ActorEngine* engine, uintptr_t entity)
+{
+    __try {
+        if (!engine || !engine->action || !entity) return 0;
+        for (unsigned int slot = 0; slot < STEAM_WEAPON_SLOT_COUNT; ++slot)
+            if (!engine->action((void*)entity, NULL, 0x38, 260 + slot, 0, 0))
+                engine->action((void*)entity, NULL, 0x36, 260 + slot, 0, 0);
+        for (unsigned int i = 0; i < STEAM_STORED_AMMO_COUNT; ++i) {
+            uint32_t* stored = (uint32_t*)(entity + STEAM_STORED_AMMO_BASE_OFFSET + (i + STEAM_STORED_AMMO_FIRST_SLOT) * sizeof(uint32_t));
+            if (*stored < STEAM_GRANT_AMMO) *stored = STEAM_GRANT_AMMO;
+        }
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
 ActorResult actor_apply(Actor* a, const Snapshot* target)
 {
     __try {

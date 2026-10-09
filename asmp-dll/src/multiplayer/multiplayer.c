@@ -18,7 +18,9 @@ typedef struct Remote {
     PoseBuffer pose;
 } Remote;
 typedef struct PendingShot { ShotEvent event; DWORD received; } PendingShot;
-static uintptr_t base, local_game, local_player;
+static uintptr_t base, local_game, local_player, armory_player;
+static uint32_t armory_epoch;
+static DWORD icons_at;
 static uint32_t local_low, local_high, world_epoch, map_started, world_load;
 static ActorEngine engine;
 static int enabled;
@@ -46,7 +48,7 @@ int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
     for (unsigned int i = 0; i < MP_MAX_PEERS; ++i) {
         actor_init(&remote[i].actor, &engine); remote[i].last_weapon = remote[i].rejected_weapon = -1;
     }
-    local_game = local_player = 0; local_low = local_high = world_epoch = map_started = world_load = 0;
+    local_game = local_player = armory_player = 0; armory_epoch = 0; local_low = local_high = world_epoch = map_started = world_load = 0;
     memset(incoming, 0, sizeof(incoming)); memset(current, 0, sizeof(current));
     published_at = current_at = received_count = pending_count = outgoing_head = outgoing_count = staged_count = 0;
     InterlockedExchange(&stop_requested, 0); InterlockedExchange(&game_thread, 0); InterlockedExchange(&event_drops, 0);
@@ -160,6 +162,16 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
         local_low = local->world_low; local_high = local->world_high;
     }
     if (gameplay) { local_game = local->game; local_player = state == PROBE_OK && local->health > 0 ? local->player : 0; }
+    /* Every player owns every weapon: grant once per local player entity and world. */
+    if (local_player && !stopping && (local_player != armory_player || world_epoch != armory_epoch)) {
+        armory_player = local_player; armory_epoch = world_epoch;
+        actor_grant_all_weapons(&engine, local_player);
+    }
+    /* The native weapon panel is built once per level; keep granted icons visible. */
+    if (local_player && !stopping && (int32_t)(now - icons_at) >= 0) {
+        ui_show_weapon_icons(local_game); icons_at = now + 1000u;
+    }
+    if (!local_player) armory_player = 0;
     /* Drop captures from an old map before the worker can send them; the rest
        wait in the staging array until the outgoing lock is free. */
     if (!gameplay || stopping) staged_count = 0;

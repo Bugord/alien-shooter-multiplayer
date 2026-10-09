@@ -53,6 +53,13 @@
 #define STEAM_STEXT_TEXT_OFFSET 0x74u
 /* GAME menu entity list uses the same count/capacity/entries layout as world lists. */
 #define STEAM_GAME_MENU_LIST_OFFSET 0x274u
+/* common_statebar.lgc builds the weapon panel once per level and hides icons of
+   items not owned at that moment (ACT_HAVE_ITEM). Weapon icon VID 710 (direction
+   byte slot*256/10) and ammo gauge VID 745 (direction byte = ammo fraction);
+   ACT_SET_INVISIBLE (98) with 0 shows one. */
+#define STEAM_STATEBAR_WEAPON_VID 710u
+#define STEAM_STATEBAR_AMMO_VID 745u
+#define STEAM_ACT_SET_INVISIBLE 98u
 #define STEAM_GAME_CAMERA_X_OFFSET 0x54u
 #define STEAM_GAME_CAMERA_Y_OFFSET 0x58u
 #define STEAM_ARMY_INDEX_OFFSET 0x240u
@@ -107,5 +114,8 @@
 #define STEAM_STORED_AMMO_BASE_OFFSET 0x94u
 #define STEAM_STORED_AMMO_FIRST_SLOT 1u
 #define STEAM_STORED_AMMO_COUNT 9u
+/* Stored counts are plain rounds (a selected slot 5 with 172 rounds stores 172).
+   Granting weapons tops every stored slot up to at least this many. */
+#define STEAM_GRANT_AMMO 500u
 
 #endif

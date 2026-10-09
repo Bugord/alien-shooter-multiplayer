@@ -60,6 +60,9 @@ int actor_torso_ready(const Actor*);
 int actor_set_army(Actor*, unsigned int army);
 /* 1 success, 0 rejected (keep previous weapon), -1 native exception. */
 int actor_arm(Actor*, int slot);
+/* Gives an entity every weapon slot (native items 260 + slot) that it does not
+   own yet, without selecting one, and tops the stored ammo of slots 1-9 up to STEAM_GRANT_AMMO. 1 success, -1 native exception. */
+int actor_grant_all_weapons(const ActorEngine* engine, uintptr_t entity);
 ActorResult actor_apply(Actor*, const Snapshot* target);
 /* The native destructor cascades through the child chain, of the replica.
    Map owns MAN, child entities and their strings. VID remains in the pinned DLL.

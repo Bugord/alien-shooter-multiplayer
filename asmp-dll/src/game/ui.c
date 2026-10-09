@@ -73,6 +73,30 @@ int ui_load_map(uintptr_t game, const char* map)
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
+int ui_show_weapon_icons(uintptr_t game)
+{
+    typedef int (__fastcall* EntityAction)(void*, void*, unsigned int, intptr_t, intptr_t, intptr_t);
+    int shown = 0;
+    __try {
+        /* The direction byte cannot identify these: icons store slot*256/10 and
+           the ammo gauges overwrite it with the ammo fraction. All of them are shown. */
+        uintptr_t list = game + STEAM_GAME_MENU_LIST_OFFSET;
+        unsigned int count = *(unsigned int*)(list + 4);
+        unsigned int cap = *(unsigned int*)(list + 8);
+        uintptr_t* items = *(uintptr_t**)(list + 12);
+        if (!items || count > cap || count > 4096) return 0;
+        for (unsigned int i = 0; i < count; ++i) {
+            uintptr_t icon = items[i]; if (!icon) continue;
+            uintptr_t vid = *(uintptr_t*)(icon + STEAM_ENTITY_VID_OFFSET); if (!vid) continue;
+            unsigned int index = *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET);
+            if (index != STEAM_STATEBAR_WEAPON_VID && index != STEAM_STATEBAR_AMMO_VID) continue;
+            EntityAction action = (*(EntityAction**)icon)[1]; /* vtable slot 1: action */
+            action((void*)icon, NULL, STEAM_ACT_SET_INVISIBLE, 0, 0, 0);
+            ++shown;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    return shown;
+}
 void ui_health_bar(uintptr_t game, uintptr_t entity, int health)
 {
     __try {
