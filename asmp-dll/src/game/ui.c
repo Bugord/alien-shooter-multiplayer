@@ -73,16 +73,17 @@ int ui_load_map(uintptr_t game, const char* map)
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-void ui_health_bar(uintptr_t game, uintptr_t entity, int health)
+void ui_health_bar(uintptr_t game, uintptr_t entity, int health, int max_health)
 {
     __try {
         uintptr_t render = *(uintptr_t*)(base + STEAM_RENDER_PTR_RVA);
         if (!render || !entity || health <= 0) return;
         float x = *(float*)(entity + STEAM_ENTITY_X_OFFSET) - *(float*)(game + STEAM_GAME_CAMERA_X_OFFSET) - 40.0f;
         float y = *(float*)(entity + STEAM_ENTITY_Y_OFFSET) - *(float*)(game + STEAM_GAME_CAMERA_Y_OFFSET) - 80.0f;
-        /* Preserve the original prototype's 110 maximum until the protocol
-           carries player stats. Clamp the bar when campaigns give more HP. */
-        float width = (float)(health > 110 ? 110 : health) * 78.0f / 110.0f;
+        /* The owner's real maximum travels with each state; fall back to the
+           stock 110 when unknown. Overhealth fills the bar, never overflows. */
+        int maximum = max_health > 0 ? max_health : STEAM_DEFAULT_MAX_HEALTH;
+        float width = (float)(health > maximum ? maximum : health) * 78.0f / (float)maximum;
         DrawRect draw = (DrawRect)(base + STEAM_DRAW_RECT_RVA);
         draw((void*)render, NULL, x, y, x+80, y+7, 0xFFADA698);
         draw((void*)render, NULL, x+1, y+1, x+78, y+5, 0xFF000000);

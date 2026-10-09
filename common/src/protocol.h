@@ -13,19 +13,21 @@
 #define MPT_S_WELCOME 0x35
 #define MPT_S_ROSTER 0x36
 /* Each packet family versions independently. */
-#define MP_STATE_VERSION 3u
+#define MP_STATE_VERSION 4u
 #define MP_SHOT_VERSION 1u
 #define MP_HANDSHAKE_VERSION 1u
 #define MP_MAX_NAME_LEN 15
 #define MP_MAX_MAP_NAME_LEN 24
 #define MP_ROSTER_INTERVAL_MS 2000u
-#define MP_STATE_SIZE 112
+#define MP_STATE_SIZE 116
+#define MP_MAX_HEALTH_LIMIT 100000
 #define MP_STATE_RELAY_SIZE (8 + MP_STATE_SIZE)
 #define MP_STATE_SEND_MS 33u
 typedef struct MpState {
     uint32_t sequence, active, tick;
     float x, y, z;
     int32_t health, weapon_slot, current_ammo;
+    int32_t max_health; /* 0 = unknown */
     uint32_t animation, direction, stored_ammo[9];
     float velocity;
     uint32_t moving, torso_direction, torso_present;
@@ -64,6 +66,7 @@ static inline void mp_state_encode(uint8_t p[MP_STATE_SIZE], const MpState* s) {
     mp_put_u32(p + 96, s->torso_present);
     mp_put_u32(p + 100, s->world_low); mp_put_u32(p + 104, s->world_high);
     mp_put_u32(p + 108, s->world_epoch);
+    mp_put_u32(p + 112, (uint32_t)s->max_health);
 }
 static inline int mp_state_decode(const uint8_t* p, int length, MpState* s) {
     if (length != MP_STATE_SIZE || mp_get_u32(p) != MP_STATE_VERSION) return 0;
@@ -84,7 +87,8 @@ static inline int mp_state_decode(const uint8_t* p, int length, MpState* s) {
     s->torso_present = mp_get_u32(p + 96);
     s->world_low = mp_get_u32(p + 100); s->world_high = mp_get_u32(p + 104);
     s->world_epoch = mp_get_u32(p + 108);
-    return s->active <= 1 && isfinite(s->x) && isfinite(s->y) && isfinite(s->z) &&
+    bits = mp_get_u32(p + 112); memcpy(&s->max_health, &bits, 4);
+    return s->active <= 1 && s->max_health >= 0 && s->max_health <= MP_MAX_HEALTH_LIMIT && isfinite(s->x) && isfinite(s->y) && isfinite(s->z) &&
         s->weapon_slot >= -1 && s->weapon_slot < 10 && s->torso_present <= 1 &&
         s->direction <= 255u && s->torso_direction <= 255u && s->moving <= 1 && isfinite(s->velocity);
 }

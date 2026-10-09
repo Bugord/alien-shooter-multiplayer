@@ -34,8 +34,8 @@ D3D9 EndScene; installation waits for the renderer to create its device. Pending
 display installation retries at most every thirty ticks; failure is latched
 and logged once.
 
-State packets are version 3, 112 bytes: explicit big-endian words, IEEE 754
-coordinates/velocity, signed 32-bit health/live ammo/weapon slot, tick,
+State packets are version 4, 116 bytes: explicit big-endian words, IEEE 754
+coordinates/velocity, signed 32-bit health and maximum health (0 = unknown), live ammo, weapon slot, tick,
 movement/aim fields, nine stored ammo counters, normalized 64-bit map key and
 world generation. State is published at most once every 33 ms. A 32-byte shot
 event carries sequence, map key/generation, weapon and aim coordinates. The

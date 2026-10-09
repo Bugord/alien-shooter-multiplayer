@@ -18,5 +18,6 @@ void ui_button(uintptr_t entity, int disabled);
 int ui_load_map(uintptr_t game, const char* map);
 /* Draws a name above the entity; call from the display hook, before EndScene. */
 void ui_name_label(uintptr_t game, uintptr_t entity, const char* name);
-void ui_health_bar(uintptr_t game, uintptr_t entity, int health);
+/* max_health <= 0 (unknown) falls back to the default player maximum. */
+void ui_health_bar(uintptr_t game, uintptr_t entity, int health, int max_health);
 #endif

@@ -5,7 +5,7 @@
 typedef struct Snapshot {
     uintptr_t game, army, player;
     uint32_t army_index, animation;
-    int32_t health, weapon_slot, weapon_vid, current_ammo, current_ammo_raw;
+    int32_t health, max_health, weapon_slot, weapon_vid, current_ammo, current_ammo_raw;
     uint32_t stored_ammo[STEAM_STORED_AMMO_COUNT];
     unsigned int direction;
     uint32_t moving, torso_present, torso_direction;

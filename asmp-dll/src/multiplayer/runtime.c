@@ -105,7 +105,7 @@ static void publish_frame(const RuntimeFrame* frame) {
     if (frame->result == PROBE_OK && sample->in_level) {
         state.world_low = sample->world_low; state.world_high = sample->world_high; state.world_epoch = frame->multiplayer.world_epoch;
         state.active = sample->health > 0; state.tick = (uint32_t)frame->tick;
-        state.x = sample->x; state.y = sample->y; state.z = sample->z; state.health = sample->health;
+        state.x = sample->x; state.y = sample->y; state.z = sample->z; state.health = sample->health; state.max_health = sample->max_health > 0 ? sample->max_health : 0;
         state.animation = sample->animation; state.direction = sample->direction; state.weapon_slot = sample->weapon_slot;
         state.velocity = sample->velocity; state.moving = sample->moving;
         state.torso_direction = sample->torso_direction; state.torso_present = sample->torso_present; state.current_ammo = sample->current_ammo;
