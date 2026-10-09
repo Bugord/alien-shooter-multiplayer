@@ -9,7 +9,7 @@ static unsigned char entity[0xBC], torso[0x74], weapons[10][8];
 static uintptr_t entries[16], base;
 static unsigned int created, destroyed, shots, selected;
 static int shot_x, shot_y, health, armed, fail_weapon, fail_factory, fault_apply, fault_remove, missing_weapon, fault_shot;
-static unsigned int granted;
+static unsigned int granted, local_granted;
 static PeerState peers[MP_MAX_PEERS];
 static Snapshot local;
 static void* __fastcall create(void* g, void* u, void* v, float x, float y, float z, int dir, void* parent) {
@@ -36,7 +36,12 @@ static unsigned char __fastcall rotate(void* e, void* u, unsigned int dir) {
     (void)u; CHECK(e == entity || e == torso); ((unsigned char*)e)[0x50] = (unsigned char)dir; return 1;
 }
 static int __fastcall action(void* e, void* u, unsigned int kind, intptr_t a, intptr_t b, intptr_t c) {
-    (void)u; (void)c; CHECK(e == entity);
+    (void)u; (void)c;
+    if (e == player) { /* The local player: armory grants only. */
+        if (kind == 0x38) return 0;
+        CHECK(kind == 0x36 && a >= 260 && a < 270); ++local_granted; return 0;
+    }
+    CHECK(e == entity);
     if (kind == 0x61) { CHECK(a == 0); return 0; }
     if (kind == 0x38) return !missing_weapon;
     if (kind == 0x36) { CHECK(a >= 260 && a < 270); ++granted; return 0; }
@@ -94,7 +99,8 @@ int main(void) {
     s->direction = 168; s->torso_present = 1; s->torso_direction = 220;
     ActorEngine api = { create, destroy, move, rotate, action, weapon, set_health };
     CHECK(multiplayer_initialize(base, &api));
-    CHECK(step(100).world_epoch == 1); step(120); step(2120); CHECK(created == 1);
+    CHECK(step(100).world_epoch == 1); CHECK(local_granted == 10); /* All weapon slots, once. */
+    step(120); step(2120); CHECK(created == 1);
     step(2140); CHECK(selected == 0); /* Native torso has not spawned yet. */
     attach_torso(); step(2160);
     CHECK(armed == 2 && health == 301 && *(int*)(entity + 0x84) == 73 * 64);
@@ -147,6 +153,7 @@ int main(void) {
     CHECK(step(4320).world_epoch == 2 && destroyed == 1);
     CHECK(multiplayer_tick(&local, PROBE_NO_PLAYER, 4330).world_epoch == 2 && destroyed == 1);
     local.health = 110; CHECK(step(4350).world_epoch == 2 && destroyed == 1);
+    CHECK(local_granted == 30); /* New world, then respawn with a new grant. */
     multiplayer_tick(&local, PROBE_OK, 5400); CHECK(destroyed == 2); /* Expired worker data. */
     step(5420); step(5440); step(7440); attach_torso(); step(7460); CHECK(created == 3);
     s->weapon_slot = 5; fail_weapon = 1;
