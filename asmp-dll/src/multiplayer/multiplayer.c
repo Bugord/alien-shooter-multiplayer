@@ -332,7 +332,7 @@ void multiplayer_draw(void) {
         for (unsigned int i = 0; i < MP_MAX_PEERS; ++i)
             if (remote[i].state == RS_SPAWNED && actor_live(&remote[i].actor, local_game))
             {
-                ui_health_bar(local_game, remote[i].actor.entity, current[i].state.health);
+                ui_health_bar(local_game, remote[i].actor.entity, current[i].state.health, current[i].state.max_health);
                 char label[sizeof(current[i].name) + 1];
                 memcpy(label, current[i].name, sizeof(current[i].name)); label[sizeof(current[i].name)] = 0;
                 ui_name_label(local_game, remote[i].actor.entity, label);

@@ -17,7 +17,7 @@ int main(void)
     unsigned char* game = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x22C8);
     unsigned char* army = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x100);
     unsigned char* player = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0xBC);
-    unsigned char* vid = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x60);
+    unsigned char* vid = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x400);
     unsigned char* weapon = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x08);
     unsigned char* torso = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x70);
     Snapshot s;
@@ -42,6 +42,7 @@ int main(void)
     *(unsigned char*)(player + STEAM_ENTITY_DIRECTION_OFFSET) = 128;
     *(uintptr_t*)(player + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)vid;
     *(uintptr_t*)(vid + STEAM_VID_LINKED_OFFSET) = (uintptr_t)weapon;
+    *(int32_t*)(vid + STEAM_VID_MAX_HEALTH_OFFSET + 3 * sizeof(int32_t)) = 150; /* army 3 */
     *(uintptr_t*)(player + STEAM_ENTITY_CHILD_OFFSET) = (uintptr_t)torso;
     *(uintptr_t*)(torso + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)weapon;
     torso[STEAM_ENTITY_DIRECTION_OFFSET] = 220;
@@ -59,6 +60,7 @@ int main(void)
         s.current_ammo_raw != 511 || s.stored_ammo[1] != 101) ++failures;
     for (unsigned int i = 0; i < STEAM_STORED_AMMO_COUNT; ++i)
         if (s.stored_ammo[i] != 100 + i) ++failures;
+    if (s.max_health != 150) ++failures;
     if (s.velocity != 0.125f || !s.moving || !s.torso_present || s.torso_direction != 220 ||
         s.direction != 128) ++failures;
     *(uint32_t*)(player + STEAM_ENTITY_FLAGS_OFFSET) &= ~STEAM_ENTITY_MOVING_FLAG;

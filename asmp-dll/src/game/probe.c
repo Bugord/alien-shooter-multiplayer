@@ -47,6 +47,7 @@ enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output)
                     }
                     uintptr_t vid = *(uintptr_t*)(s.player + STEAM_ENTITY_VID_OFFSET);
                     if (vid) {
+                        s.max_health = *(int32_t*)(vid + STEAM_VID_MAX_HEALTH_OFFSET + s.army_index * sizeof(int32_t));
                         uintptr_t weapon = *(uintptr_t*)(vid + STEAM_VID_LINKED_OFFSET);
                         if (weapon) {
                             s.weapon_vid = *(int32_t*)(weapon + STEAM_VID_INDEX_OFFSET);

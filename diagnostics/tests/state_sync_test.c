@@ -33,14 +33,14 @@ int main(void) {
     original.world_epoch = 1;
     original.sequence = 0xFFFFFFFFu; original.active = 1; original.tick = 12345;
     original.x = -123.5f; original.y = 567.25f; original.z = 0.125f;
-    original.health = -17; original.weapon_slot = 9; original.current_ammo = 999999;
+    original.max_health = 250; original.health = -17; original.weapon_slot = 9; original.current_ammo = 999999;
     original.animation = 2; original.direction = 11;
     original.velocity = 0.125f; original.moving = 1;
     original.torso_present = 1; original.torso_direction = 220;
     for (int i = 0; i < 9; ++i) original.stored_ammo[i] = 0xFFFFFFFFu - (uint32_t)i;
     uint8_t packet[MP_STATE_SIZE];
     mp_state_encode(packet, &original);
-    CHECK(packet[3] == 3 && packet[4] == 255 && packet[28] == 255);
+    CHECK(packet[3] == 4 && packet[4] == 255 && packet[28] == 255);
     CHECK(mp_state_decode(packet, sizeof(packet), &decoded));
     CHECK(!memcmp(&original, &decoded, sizeof(original)));
     CHECK(!mp_state_decode(packet, sizeof(packet) - 1, &decoded));
@@ -60,6 +60,12 @@ int main(void) {
     CHECK(!mp_state_decode(packet, sizeof(packet), &decoded)); original.direction = 11;
     original.x = NAN; mp_state_encode(packet, &original);
     CHECK(!mp_state_decode(packet, sizeof(packet), &decoded)); original.x = -123.5f;
+    original.max_health = -1; mp_state_encode(packet, &original);
+    CHECK(!mp_state_decode(packet, sizeof(packet), &decoded));
+    original.max_health = MP_MAX_HEALTH_LIMIT + 1; mp_state_encode(packet, &original);
+    CHECK(!mp_state_decode(packet, sizeof(packet), &decoded)); original.max_health = 250;
+    original.max_health = 0; mp_state_encode(packet, &original); /* unknown is allowed */
+    CHECK(mp_state_decode(packet, sizeof(packet), &decoded)); original.max_health = 250;
     original.weapon_slot = 10; mp_state_encode(packet, &original);
     CHECK(!mp_state_decode(packet, sizeof(packet), &decoded)); original.weapon_slot = 9;
     CHECK(mp_sequence_newer(0, UINT32_MAX) && !mp_sequence_newer(7, 7) && !mp_sequence_newer(6, 7));
@@ -109,6 +115,7 @@ int main(void) {
     pump(server, a, b, 1200, &original, &original);
     CHECK(state_client_connected(a) && state_client_connected(b));
     CHECK(state_client_peer(b, 0, GetTickCount(), &decoded));
+    CHECK(decoded.max_health == 250);
     CHECK(decoded.active && decoded.health == -17 && decoded.current_ammo == 999999 && decoded.weapon_slot == 9);
     CHECK(decoded.x == -123.5f && decoded.stored_ammo[8] == original.stored_ammo[8]);
     CHECK(decoded.velocity == 0.125f && decoded.moving && decoded.torso_present && decoded.torso_direction == 220);

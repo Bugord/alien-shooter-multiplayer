@@ -21,5 +21,6 @@ void ui_name_label(uintptr_t game, uintptr_t entity, const char* name);
 /* Shows every weapon icon and ammo bar of the native state bar (they stay hidden
    for weapons granted after the level started). Returns how many were shown. */
 int ui_show_weapon_icons(uintptr_t game);
-void ui_health_bar(uintptr_t game, uintptr_t entity, int health);
+/* max_health <= 0 (unknown) falls back to the default player maximum. */
+void ui_health_bar(uintptr_t game, uintptr_t entity, int health, int max_health);
 #endif

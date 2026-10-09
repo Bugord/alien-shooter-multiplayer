@@ -104,6 +104,9 @@
 #define STEAM_ENTITY_VID_OFFSET 0x1Cu
 #define STEAM_VID_LINKED_OFFSET 0x5Cu
 #define STEAM_VID_INDEX_OFFSET 0x04u
+/* VID maximum health per army: int32 at +0x3D8 + army*4 (read by 0x46BFB0). */
+#define STEAM_VID_MAX_HEALTH_OFFSET 0x3D8u
+#define STEAM_DEFAULT_MAX_HEALTH 110
 #define STEAM_WEAPON_VID_FIRST 10
 #define STEAM_WEAPON_SLOT_COUNT 10u
 /* UNIT::action(0x5C), 0x47292E: signed fixed-point ammo / 64, toward zero.
