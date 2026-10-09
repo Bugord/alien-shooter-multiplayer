@@ -32,7 +32,7 @@ int main(void)
     vtable[1] = (uintptr_t)code; *(uintptr_t*)icon = (uintptr_t)vtable;
     *(uintptr_t*)(icon + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)icon_vid;
     *(unsigned int*)(icon_vid + STEAM_VID_INDEX_OFFSET) = STEAM_STATEBAR_WEAPON_VID;
-    icon[STEAM_ENTITY_DIRECTION_OFFSET] = 6;
+    icon[STEAM_ENTITY_DIRECTION_OFFSET] = 153; /* slot 6 is stored as 6*256/10 */
     items[0] = (uintptr_t)icon;
     *(unsigned int*)(game + STEAM_GAME_MENU_LIST_OFFSET + 4) = 1;
     *(unsigned int*)(game + STEAM_GAME_MENU_LIST_OFFSET + 8) = 4;
