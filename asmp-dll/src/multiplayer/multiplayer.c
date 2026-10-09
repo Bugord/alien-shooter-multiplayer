@@ -20,6 +20,7 @@ typedef struct Remote {
 typedef struct PendingShot { ShotEvent event; DWORD received; } PendingShot;
 static uintptr_t base, local_game, local_player, armory_player;
 static uint32_t armory_epoch;
+static DWORD icons_at;
 static uint32_t local_low, local_high, world_epoch, map_started, world_load;
 static ActorEngine engine;
 static int enabled;
@@ -165,6 +166,10 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
     if (local_player && !stopping && (local_player != armory_player || world_epoch != armory_epoch)) {
         armory_player = local_player; armory_epoch = world_epoch;
         actor_grant_all_weapons(&engine, local_player);
+    }
+    /* The native weapon panel is built once per level; keep granted icons visible. */
+    if (local_player && !stopping && (int32_t)(now - icons_at) >= 0) {
+        ui_show_weapon_icons(local_game); icons_at = now + 1000u;
     }
     if (!local_player) armory_player = 0;
     /* Drop captures from an old map before the worker can send them; the rest

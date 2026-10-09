@@ -18,5 +18,8 @@ void ui_button(uintptr_t entity, int disabled);
 int ui_load_map(uintptr_t game, const char* map);
 /* Draws a name above the entity; call from the display hook, before EndScene. */
 void ui_name_label(uintptr_t game, uintptr_t entity, const char* name);
+/* Shows every weapon icon and ammo bar of the native state bar (they stay hidden
+   for weapons granted after the level started). Returns how many were shown. */
+int ui_show_weapon_icons(uintptr_t game);
 void ui_health_bar(uintptr_t game, uintptr_t entity, int health);
 #endif

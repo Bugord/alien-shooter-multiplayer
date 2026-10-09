@@ -73,6 +73,23 @@ int ui_load_map(uintptr_t game, const char* map)
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
+int ui_show_weapon_icons(uintptr_t game)
+{
+    typedef int (__fastcall* EntityAction)(void*, void*, unsigned int, intptr_t, intptr_t, intptr_t);
+    static const unsigned int vids[] = {STEAM_STATEBAR_WEAPON_VID, STEAM_STATEBAR_AMMO_VID};
+    int shown = 0;
+    __try {
+        for (unsigned int slot = 0; slot < STEAM_WEAPON_SLOT_COUNT; ++slot)
+            for (unsigned int v = 0; v < sizeof(vids) / sizeof(vids[0]); ++v) {
+                uintptr_t icon = ui_menu_item(game, vids[v], slot);
+                if (!icon) continue;
+                EntityAction action = (*(EntityAction**)icon)[1]; /* vtable slot 1: action */
+                action((void*)icon, NULL, STEAM_ACT_SET_INVISIBLE, 0, 0, 0);
+                ++shown;
+            }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    return shown;
+}
 void ui_health_bar(uintptr_t game, uintptr_t entity, int health)
 {
     __try {
