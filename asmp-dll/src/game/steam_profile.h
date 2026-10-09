@@ -81,6 +81,13 @@
 #define STEAM_ENTITY_FRAME_FIRST_OFFSET 0x08u
 #define STEAM_ENTITY_FRAME_CURRENT_OFFSET 0x0Cu
 #define STEAM_ENTITY_FRAME_LAST_OFFSET 0x10u
+/* Torso attack readiness, mirrored from MAN::action(0x25) at 0x434D10 and the
+   torso attack at 0x46A94C: a new target is ignored while the cooldown is above
+   the idle value (0x46AAC5 sets weapon delay + idle when it fires) or while the
+   attack animation is still playing. */
+#define STEAM_TORSO_COOLDOWN_OFFSET 0x54u
+#define STEAM_TORSO_COOLDOWN_IDLE 5000u
+#define STEAM_TORSO_ATTACK_ANIM 8u
 #define STEAM_ENTITY_VELOCITY_OFFSET 0x20u
 #define STEAM_ENTITY_FLAGS_OFFSET 0x28u
 /* ENTITY::calculate_movement (0x46E7B0) accelerates with this flag set;

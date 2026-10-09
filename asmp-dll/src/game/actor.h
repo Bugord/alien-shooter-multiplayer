@@ -66,5 +66,6 @@ ActorResult actor_apply(Actor*, const Snapshot* target);
    Removal reports ACTOR_FAULT and retains the pointer for truthful stop reporting. */
 ActorResult actor_remove(Actor*, uintptr_t game);
 int actor_live(const Actor* actor, uintptr_t game);
+/* 1 fired, 0 not ready yet (keep the event), -1 native exception. */
 int actor_shoot(Actor* actor, uintptr_t game, int x, int y, int weapon);
 #endif

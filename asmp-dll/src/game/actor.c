@@ -128,6 +128,13 @@ int actor_shoot(Actor* a, uintptr_t game, int x, int y, int weapon)
     __try {
         if (!registered(a, game) || actor_torso_ready(a) != 1) return 0;
         int armed = actor_arm(a, weapon); if (armed != 1) return armed;
+        /* Native 0x25 silently drops a target while the torso is busy, so wait
+           instead of consuming the event; the sender's cadence stays authoritative. */
+        uintptr_t torso = *(uintptr_t*)(a->entity + STEAM_ENTITY_CHILD_OFFSET);
+        if (*(uint32_t*)(torso + STEAM_TORSO_COOLDOWN_OFFSET) > STEAM_TORSO_COOLDOWN_IDLE ||
+            (*(uint32_t*)(torso + STEAM_ENTITY_ANIM_OFFSET) == STEAM_TORSO_ATTACK_ANIM &&
+             *(int32_t*)(torso + STEAM_ENTITY_FRAME_CURRENT_OFFSET) <= *(int32_t*)(torso + STEAM_ENTITY_FRAME_LAST_OFFSET)))
+            return 0;
         int ammo = a->engine.action((void*)a->entity, NULL, 0x5C, 0, 0, 0);
         if (ammo < 2) a->engine.action((void*)a->entity, NULL, 0x5D, 2 - (intptr_t)ammo, 0, 0);
         a->engine.action((void*)a->entity, NULL, 0x25, x, y, 0); return 1;
