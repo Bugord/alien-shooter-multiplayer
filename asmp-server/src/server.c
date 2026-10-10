@@ -196,7 +196,7 @@ static void process_received_packets_(MpServer* server)
                 if (length != MP_MONSTER_STATE_CLIENT_SIZE || !monster_owner_(server, sender, data, length) ||
                     !mp_monster_state_decode(data + 4, MP_MONSTER_STATE_SIZE, &state) ||
                     !monster_world_(server, sender, state.world_low, state.world_high, state.world_epoch) ||
-                    (server->monster_received[state.monster_id - 1u] && !mp_sequence_newer(state.sequence, server->monster[state.monster_id - 1u].sequence))) break;
+                    (server->monster_received[state.monster_id - 1u] && !mp_monster_state_progresses(&server->monster[state.monster_id - 1u], &state))) break;
                 server->monster[state.monster_id - 1u] = state; server->monster_received[state.monster_id - 1u] = true; server->monster_at[state.monster_id - 1u] = server->tick_time_ms;
                 for (unsigned int i = 0; i < server->max_clients; ++i)
                     if (server->players[i].is_connected) send_monster_state_(server, i, state.monster_id - 1u);
@@ -211,7 +211,7 @@ static void process_received_packets_(MpServer* server)
                     !server->monster_received[event.monster_id - 1u] || server->tick_time_ms - server->monster_at[event.monster_id - 1u] > MP_MONSTER_EXPIRY_MS ||
                     event.world_low != server->monster[event.monster_id - 1u].world_low || event.world_high != server->monster[event.monster_id - 1u].world_high ||
                     event.world_epoch != server->monster[event.monster_id - 1u].world_epoch ||
-                    (event.kind == MP_MONSTER_ATTACK && !server->monster[event.monster_id - 1u].alive) ||
+                    !mp_monster_event_matches(&server->monster[event.monster_id - 1u], &event) ||
                     (server->monster_event_received[event.monster_id - 1u] && !mp_sequence_newer(event.sequence, server->monster_event_sequence[event.monster_id - 1u]))) break;
                 server->monster_event_received[event.monster_id - 1u] = true; server->monster_event_sequence[event.monster_id - 1u] = event.sequence;
                 uint8_t packet[MP_MONSTER_EVENT_RELAY_SIZE];

@@ -36,7 +36,17 @@ typedef struct UnitPuppetSample {
     unsigned int captured_attacks, captured_deaths;
     unsigned int death_animation;
     UnitPuppetPose death_pose;
+    unsigned int form_revision, captured_forms;
+    int transitioning;
+    unsigned int predicted_hits;
+    int predictive;
 } UnitPuppetSample;
+/* Game-thread callback. requested_vid is nonzero immediately before native
+   CHANGE_VID; return a prepared private descriptor for that table entry. A zero
+   request observes settled identity. No native allocation is performed here. */
+typedef int (*UnitFormObserver)(uintptr_t game, uintptr_t entity, uintptr_t* private_vid,
+    unsigned int* current_vid, unsigned int* revision, int* transitioning, unsigned int requested_vid);
+void unit_puppet_set_form_observer(UnitFormObserver);
 
 /* Each selected slot borrows one class-2 UNIT, optionally one class-9 part.
    Longer/different child chains are rejected. No allocation, VID editing or entity
@@ -59,9 +69,19 @@ int unit_puppet_watch_entity(uintptr_t game, uintptr_t player, uintptr_t entity)
 int unit_puppet_watch_stationary(uintptr_t game, uintptr_t player, uintptr_t entity);
 int unit_puppet_attach_entity(uintptr_t game, uintptr_t player, uintptr_t entity);
 int unit_puppet_health(uintptr_t game, int health);
+/* Opt in only after attaching fully sanitized private root/part descriptors.
+   Incoming native damage may change cosmetic health/forms/death; authority is
+   still external. The sample counter counts root DAMAGE calls, not SET_HP. */
+int unit_puppet_prediction(uintptr_t game);
+/* Diagnostic native-hit helper for an enabled predictive copy. freeze follows
+   the verified lethal-DAMAGE/CHANGE_VID action sequence, not weapon collision. */
+int unit_puppet_prediction_test_hit(uintptr_t game, int damage, int freeze);
 /* Diagnostic host death trigger through the ordinary native SET_HP action. */
 int unit_puppet_host_kill(uintptr_t game);
 int unit_puppet_host_kill_variant(uintptr_t game, unsigned int animation);
+/* Diagnostic form-stage trigger through native CHANGE_VID and idle/stop.
+   Tests form ownership/presentation; does not simulate projectile collision. */
+int unit_puppet_host_freeze(uintptr_t game);
 int unit_puppet_apply(uintptr_t game, const UnitPuppetPose*);
 /* Only sanitized private root/part descriptors are accepted. Sequence is local
    to this attached entity. Attack is visual only; death uses native SET_HP. */

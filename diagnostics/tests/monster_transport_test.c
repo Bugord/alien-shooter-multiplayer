@@ -57,6 +57,118 @@ static void raw_state(epnet_client_t* raw, uint32_t session, const MpMonsterStat
     mp_monster_state_encode(packet + 4, state);
     epnet_client_send(raw, MPT_C_MONSTER_STATE, packet, sizeof(packet));
 }
+static void raw_event(epnet_client_t* raw, const MpMonsterEvent* event) {
+    uint8_t packet[MP_MONSTER_EVENT_CLIENT_SIZE]; mp_put_u32(packet, raw_session);
+    mp_monster_event_encode(packet + 4, event);
+    epnet_client_send(raw, MPT_C_MONSTER_EVENT, packet, sizeof(packet));
+}
+static void accept_raw_state(MpServer* server, StateClient* client, epnet_client_t* raw, const MpMonsterState* state) {
+    DWORD start = GetTickCount(); MonsterState observed;
+    raw_state(raw, raw_session, state);
+    do {
+        pump(server, NULL, client, NULL, raw, 10);
+        if (state_client_monster_at(client, state->monster_id - 1u, GetTickCount(), &observed) &&
+            observed.state.sequence == state->sequence && observed.state.vid == state->vid &&
+            observed.state.form_revision == state->form_revision && observed.state.form_phase == state->form_phase) return;
+    } while (GetTickCount() - start < 1000u);
+    fprintf(stderr, "FAIL: accepted form snapshot did not reach observer\n"); exit(1);
+}
+static void reject_raw_state(MpServer* server, StateClient* client, epnet_client_t* raw,
+    const MpMonsterState* bad, const MpMonsterState* expected) {
+    MonsterState observed;
+    raw_state(raw, raw_session, bad); pump(server, NULL, client, NULL, raw, 60);
+    CHECK(state_client_monster_at(client, expected->monster_id - 1u, GetTickCount(), &observed));
+    CHECK(observed.state.sequence == expected->sequence && observed.state.vid == expected->vid &&
+        observed.state.form_revision == expected->form_revision && observed.state.alive == expected->alive);
+}
+static void codec_forms(const MpMonsterState* baseline, const MpMonsterEvent* attack) {
+    uint8_t packet[MP_MONSTER_STATE_SIZE], event_packet[MP_MONSTER_EVENT_SIZE];
+    MpMonsterState s = *baseline, decoded, previous;
+    MpMonsterEvent e = *attack, event_decoded;
+    const uint32_t origins[] = {40u, 50u, 60u, 70u, 80u, 90u};
+    for (unsigned int i = 0; i < 6u; ++i) {
+        s.vid = s.origin_vid = origins[i]; s.form_revision = 1;
+        mp_monster_state_encode(packet, &s); CHECK(mp_monster_state_decode(packet, sizeof(packet), &decoded));
+        s.vid += 9; mp_monster_state_encode(packet, &s);
+        CHECK(mp_monster_state_decode(packet, sizeof(packet), &decoded));
+        e.vid = s.vid; e.origin_vid = s.origin_vid; e.kind = MP_MONSTER_ATTACK;
+        mp_monster_event_encode(event_packet, &e); CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+        e.kind = MP_MONSTER_DEATH; e.death_animation = 15;
+        mp_monster_event_encode(event_packet, &e); CHECK(mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+        e.kind = MP_MONSTER_FORM; e.from_vid = s.origin_vid; e.death_animation = 0; e.form_revision = 2;
+        mp_monster_event_encode(event_packet, &e); CHECK(mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+        e = *attack;
+    }
+    s = *baseline; mp_monster_state_encode(packet, &s);
+    mp_put_u32(packet + 72, 49); CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded));
+    mp_monster_state_encode(packet, &s); mp_put_u32(packet + 76, 0);
+    CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded));
+    mp_monster_state_encode(packet, &s); mp_put_u32(packet + 80, 2);
+    CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded));
+    mp_monster_state_encode(packet, &s); mp_put_u32(packet, 3);
+    CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded));
+    CHECK(!mp_monster_reachable(70, 80) && !mp_monster_reachable(90, 69));
+    for (unsigned int i = 0; i < 2u; ++i) {
+        s = *baseline; s.vid = s.origin_vid = i ? 90u : 70u; previous = s;
+        s.sequence++; s.form_revision++; s.form_phase = MP_MONSTER_FORM_ARMOR; s.health = 1;
+        s.moving = 0; s.velocity = 0;
+        mp_monster_state_encode(packet, &s); CHECK(mp_monster_state_decode(packet, sizeof(packet), &decoded));
+        CHECK(mp_monster_state_progresses(&previous, &s));
+        e = *attack; e.vid = e.origin_vid = e.from_vid = s.vid; e.form_revision = 2;
+        e.kind = MP_MONSTER_FORM; e.form_phase = MP_MONSTER_FORM_ARMOR; e.death_animation = 15;
+        mp_monster_event_encode(event_packet, &e); CHECK(mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+        CHECK(mp_monster_event_matches(&previous, &e)); /* Armor event may precede its snapshot. */
+        s.moving = 1; mp_monster_state_encode(packet, &s); CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded)); s.moving = 0;
+        s.velocity = 1; mp_monster_state_encode(packet, &s); CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded)); s.velocity = 0;
+        s.alive = 0; s.health = 0; s.death_animation = 15;
+        mp_monster_state_encode(packet, &s); CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded));
+        s.alive = 1; s.health = 1; s.death_animation = 0; previous = s;
+        s.sequence++; s.form_revision++; s.form_phase = MP_MONSTER_FORM_ACTIVE;
+        CHECK(!mp_monster_state_progresses(&previous, &s)); /* Pending armor cannot revert to the armored actor. */
+        s.vid -= 10; CHECK(mp_monster_state_progresses(&previous, &s));
+        e.vid = s.vid; e.form_revision = s.form_revision; e.form_phase = MP_MONSTER_FORM_ACTIVE; e.death_animation = 0;
+        mp_monster_event_encode(event_packet, &e); CHECK(mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+        previous = s; s.sequence++; s.form_revision++; s.vid += 9;
+        CHECK(mp_monster_state_progresses(&previous, &s));
+        previous = s; s.sequence++; s.form_revision++; s.vid -= 9;
+        CHECK(!mp_monster_state_progresses(&previous, &s));
+        previous = *baseline; previous.vid = previous.origin_vid = i ? 90u : 70u;
+        s = previous; s.sequence++; s.form_revision += 3; s.vid -= 1;
+        CHECK(mp_monster_state_progresses(&previous, &s)); /* Lost armor and freeze packets. */
+        e.vid = s.vid; e.from_vid = previous.vid; e.form_revision = s.form_revision;
+        mp_monster_event_encode(event_packet, &e);
+        CHECK(mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+        CHECK(mp_monster_event_matches(&previous, &e)); /* Armor finish and freeze coalesce in one tick. */
+        previous.vid += 9; CHECK(!mp_monster_state_progresses(&previous, &s)); /* Frozen armor remains terminal. */
+    }
+    previous = *baseline; s = previous; s.sequence++; s.form_revision = 2; s.vid = 59;
+    CHECK(mp_monster_state_progresses(&previous, &s)); previous = s;
+    s.sequence++; s.form_revision = 1; CHECK(!mp_monster_state_progresses(&previous, &s));
+    s.form_revision = 2; s.vid = 50; CHECK(!mp_monster_state_progresses(&previous, &s));
+    s.form_revision = 3; CHECK(!mp_monster_state_progresses(&previous, &s));
+    s = previous; s.sequence++; s.alive = 0; s.health = 0; s.death_animation = 16;
+    CHECK(mp_monster_state_progresses(&previous, &s)); previous = s;
+    s.sequence++; s.alive = 1; s.health = 90; s.death_animation = 0;
+    CHECK(!mp_monster_state_progresses(&previous, &s)); s.world_epoch++;
+    CHECK(mp_monster_state_progresses(&previous, &s));
+    e = *attack; e.form_revision = 2;
+    CHECK(!mp_monster_event_matches(baseline, &e)); /* Future attacks wait for snapshot context. */
+    e.kind = MP_MONSTER_DEATH; e.death_animation = 15;
+    CHECK(!mp_monster_event_matches(baseline, &e));
+    e.death_animation = 0;
+    e.kind = MP_MONSTER_FORM; e.vid = 59; e.from_vid = 50;
+    CHECK(mp_monster_event_matches(baseline, &e));
+    e.vid = 50; e.from_vid = 59; mp_monster_event_encode(event_packet, &e);
+    CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded)); /* No thaw. */
+    e = *attack; e.from_vid = 50; mp_monster_event_encode(event_packet, &e);
+    CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+    const unsigned int offsets[] = {0u, 52u, 56u, 60u, 64u};
+    const uint32_t values[] = {3u, 290u, 49u, 0u, 2u};
+    for (unsigned int i = 0; i < 5u; ++i) {
+        mp_monster_event_encode(event_packet, attack); mp_put_u32(event_packet + offsets[i], values[i]);
+        CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+    }
+}
 int main(void) {
     memset(&player, 0, sizeof(player)); player.active = 1; player.health = 100;
     player.weapon_slot = -1; player.world_epoch = 1;
@@ -64,6 +176,7 @@ int main(void) {
     MpMonsterState monster = {0}, decoded;
     monster.sequence = 1; monster.world_low = player.world_low; monster.world_high = player.world_high;
     monster.world_epoch = 1; monster.monster_id = 1; monster.vid = 50; monster.tick = 100;
+    monster.origin_vid = 50; monster.form_revision = 1;
     monster.alive = 1; monster.health = 90; monster.x = -123.5f; monster.y = 200.25f;
     monster.direction = 64; monster.moving = 1; monster.velocity = 0.02f;
     uint8_t packet[MP_MONSTER_STATE_SIZE]; mp_monster_state_encode(packet, &monster);
@@ -72,7 +185,8 @@ int main(void) {
     CHECK(!mp_monster_state_decode(packet, sizeof(packet) - 1, &decoded));
     packet[3] = 1; CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded)); /* Reject the old wire version. */
     mp_monster_state_encode(packet, &monster);
-    CHECK(MP_MONSTER_STATE_SIZE == 72 && !mp_monster_state_decode(packet, 68, &decoded));
+    CHECK(MP_MONSTER_STATE_SIZE == 84 && !mp_monster_state_decode(packet, 72, &decoded));
+    CHECK(packet[75] == 50 && packet[79] == 1 && !packet[83]);
     mp_put_u32(packet + 68, 15); CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded)); /* Live state cannot request death. */
     MpMonsterState corpse = monster; corpse.alive = 0; corpse.health = 0; corpse.death_animation = 15;
     mp_monster_state_encode(packet, &corpse);
@@ -92,10 +206,12 @@ int main(void) {
     MpMonsterEvent event = {0}, event_decoded;
     event.sequence = 1; event.world_low = monster.world_low; event.world_high = monster.world_high;
     event.world_epoch = 1; event.monster_id = 1; event.tick = 200; event.kind = MP_MONSTER_ATTACK;
+    event.vid = 50; event.origin_vid = 50; event.form_revision = 1;
     event.x = monster.x; event.y = monster.y; event.z = 3.0f; event.direction = 192;
     uint8_t event_packet[MP_MONSTER_EVENT_SIZE]; mp_monster_event_encode(event_packet, &event);
     CHECK(mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded) && !memcmp(&event, &event_decoded, sizeof(event)));
-    CHECK(MP_MONSTER_EVENT_SIZE == 52 && event_packet[32] == 0xC2 && event_packet[33] == 0xF7 && event_packet[47] == 192);
+    CHECK(MP_MONSTER_EVENT_SIZE == 72 && event_packet[32] == 0xC2 && event_packet[33] == 0xF7 && event_packet[47] == 192);
+    CHECK(event_packet[55] == 50 && event_packet[59] == 50 && event_packet[63] == 1 && !event_packet[71]);
     CHECK(!mp_monster_event_decode(event_packet, 32, &event_decoded) && !mp_monster_event_decode(event_packet, sizeof(event_packet) - 1, &event_decoded));
     event_packet[3] = 1; CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
     mp_monster_event_encode(event_packet, &event); mp_put_u32(event_packet + 48, 15);
@@ -120,7 +236,8 @@ int main(void) {
     death.direction = 256; mp_monster_event_encode(event_packet, &death);
     CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded)); death.direction = event.direction;
     mp_monster_event_encode(event_packet, &event);
-    mp_put_u32(event_packet + 28, 3); CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+    mp_put_u32(event_packet + 28, 4); CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+    codec_forms(&monster, &event);
 
     unsigned short port = (unsigned short)(51000 + GetCurrentProcessId() % 3000);
     CHECK(!_putenv_s("ASMP_MAP", "maps\\survive_01.map"));
@@ -210,6 +327,7 @@ int main(void) {
     const unsigned int row_ids[] = {2u, 9u, 17u, 32u}, row_vids[] = {40u, 50u, 60u, 80u};
     for (unsigned int i = 0; i < 4u; ++i) {
         rows[i] = monster; rows[i].monster_id = row_ids[i]; rows[i].vid = row_vids[i]; rows[i].x = 100.0f + i;
+        rows[i].origin_vid = row_vids[i];
         CHECK(state_client_publish_monster(host, &rows[i], GetTickCount()));
     }
     pump(server, host, client, late, NULL, 100);
@@ -218,6 +336,7 @@ int main(void) {
         CHECK(observed.state.vid == row_vids[i] && observed.state.x == 100.0f + i);
         MpMonsterEvent row_event = event; row_event.sequence = 1; row_event.monster_id = row_ids[i];
         row_event.world_epoch = player.world_epoch; row_event.kind = MP_MONSTER_ATTACK; row_event.death_animation = 0;
+        row_event.vid = row_vids[i]; row_event.origin_vid = row_vids[i];
         CHECK(state_client_send_monster_event(host, &row_event, GetTickCount()));
     }
     pump(server, host, client, late, NULL, 100);
@@ -277,7 +396,110 @@ int main(void) {
         if (state_client_monster(client, GetTickCount(), &observed)) break;
     } while (GetTickCount() - wait_started < 2000u);
     CHECK(state_client_monster(client, GetTickCount(), &observed) && observed.authority_session == raw_session);
+
+    /* Real relay progression: a newer packet is not permission to undo a form. */
+    MpMonsterState form = monster, bad;
+    form.monster_id = 62; form.vid = form.origin_vid = 50; form.form_revision = 1;
+    form.sequence = 1; form.form_phase = MP_MONSTER_FORM_ACTIVE;
+    accept_raw_state(server, client, raw, &form);
+    MpMonsterEvent form_event = {0};
+    form_event.world_low = form.world_low; form_event.world_high = form.world_high;
+    form_event.world_epoch = form.world_epoch; form_event.monster_id = form.monster_id;
+    form_event.sequence = 1; form_event.kind = MP_MONSTER_FORM;
+    form_event.vid = 59; form_event.origin_vid = 50; form_event.form_revision = 2; form_event.from_vid = 50;
+    raw_event(raw, &form_event); memset(&received, 0, sizeof(received));
+    wait_started = GetTickCount();
+    do {
+        pump(server, NULL, client, NULL, raw, 10);
+        if (state_client_take_monster_event(client, &received)) break;
+    } while (GetTickCount() - wait_started < 1000u);
+    CHECK(received.event.monster_id == 62 && received.event.kind == MP_MONSTER_FORM && received.event.form_revision == 2);
+    /* An attack already queued is discarded when a later snapshot freezes its actor. */
+    form_event.sequence = 2; form_event.kind = MP_MONSTER_ATTACK; form_event.vid = 50;
+    form_event.form_revision = 1; form_event.from_vid = 0; raw_event(raw, &form_event);
+    pump(server, NULL, client, NULL, raw, 60);
+    form.vid = 59; form.form_revision = 2; ++form.sequence;
+    accept_raw_state(server, client, raw, &form);
+    CHECK(!state_client_take_monster_event(client, &received));
+    ++form_event.sequence; raw_event(raw, &form_event);
+    pump(server, NULL, client, NULL, raw, 60); CHECK(!state_client_take_monster_event(client, &received));
+    bad = form; ++bad.sequence; bad.form_revision = 1;
+    reject_raw_state(server, client, raw, &bad, &form);
+    bad.form_revision = 2; bad.vid = 50; reject_raw_state(server, client, raw, &bad, &form);
+    bad.form_revision = 3; reject_raw_state(server, client, raw, &bad, &form);
+    bad = form; ++bad.sequence; bad.origin_vid = 60;
+    reject_raw_state(server, client, raw, &bad, &form);
+    form.alive = 0; form.health = 0; form.death_animation = 16; ++form.sequence;
+    accept_raw_state(server, client, raw, &form);
+    bad = form; ++bad.sequence; bad.alive = 1; bad.health = 90; bad.death_animation = 0;
+    reject_raw_state(server, client, raw, &bad, &form);
+
+    form = monster; form.monster_id = 63; form.vid = form.origin_vid = 70;
+    form.sequence = 1; form.form_revision = 1; form.form_phase = MP_MONSTER_FORM_ACTIVE;
+    accept_raw_state(server, client, raw, &form);
+    form_event.monster_id = 63; form_event.sequence = 1; form_event.kind = MP_MONSTER_FORM;
+    form_event.vid = form_event.origin_vid = form_event.from_vid = 70;
+    form_event.form_revision = 2; form_event.form_phase = MP_MONSTER_FORM_ARMOR; form_event.death_animation = 15;
+    raw_event(raw, &form_event); memset(&received, 0, sizeof(received)); wait_started = GetTickCount();
+    do {
+        pump(server, NULL, client, NULL, raw, 10);
+        if (state_client_take_monster_event(client, &received)) break;
+    } while (GetTickCount() - wait_started < 1000u);
+    CHECK(received.event.monster_id == 63 && received.event.form_phase == MP_MONSTER_FORM_ARMOR);
+    form.form_revision = 2; form.form_phase = MP_MONSTER_FORM_ARMOR; form.health = 1;
+    form.moving = 0; form.velocity = 0; ++form.sequence;
+    accept_raw_state(server, client, raw, &form);
+    StateClient* armor_late = state_client_create("127.0.0.1", port, "ArmorLate", NULL); CHECK(armor_late);
+    wait_started = GetTickCount();
+    do {
+        pump(server, NULL, client, armor_late, raw, 10);
+        if (state_client_monster_at(armor_late, 62, GetTickCount(), &observed)) break;
+    } while (GetTickCount() - wait_started < 1000u);
+    CHECK(state_client_monster_at(armor_late, 62, GetTickCount(), &observed) &&
+        observed.state.form_phase == MP_MONSTER_FORM_ARMOR && observed.state.form_revision == 2);
+    CHECK(!state_client_take_monster_event(armor_late, &received)); /* Pending armor survives lost events/late join. */
+    state_client_destroy(armor_late);
+    form_event.sequence = 2; form_event.kind = MP_MONSTER_ATTACK; form_event.from_vid = 0;
+    form_event.form_phase = MP_MONSTER_FORM_ACTIVE; form_event.death_animation = 0;
+    raw_event(raw, &form_event); pump(server, NULL, client, NULL, raw, 60);
+    CHECK(!state_client_take_monster_event(client, &received)); /* Same revision, wrong phase. */
+    form_event.sequence = 3; form_event.vid = 60; form_event.form_revision = 3;
+    raw_event(raw, &form_event); pump(server, NULL, client, NULL, raw, 60);
+    CHECK(!state_client_take_monster_event(client, &received)); /* Future attacks need matching snapshot. */
+    bad = form; bad.sequence++; bad.form_revision++; bad.form_phase = MP_MONSTER_FORM_ACTIVE;
+    reject_raw_state(server, client, raw, &bad, &form);
+    form.sequence++; form.form_revision++; form.form_phase = MP_MONSTER_FORM_ACTIVE; form.vid = 60; form.health = 90;
+    accept_raw_state(server, client, raw, &form);
+    bad = form; ++bad.sequence; bad.origin_vid = 60;
+    reject_raw_state(server, client, raw, &bad, &form); /* Both forms decode, but origin is immutable. */
+    raw_event(raw, &form_event); memset(&received, 0, sizeof(received)); wait_started = GetTickCount();
+    do {
+        pump(server, NULL, client, NULL, raw, 10);
+        if (state_client_take_monster_event(client, &received)) break;
+    } while (GetTickCount() - wait_started < 1000u);
+    CHECK(received.event.monster_id == 63 && received.event.kind == MP_MONSTER_ATTACK && received.event.sequence == 3);
+    /* Rejecting future/stale form context must not consume the event sequence. */
+    bad = form; ++bad.sequence; ++bad.form_revision; bad.vid = 70; bad.form_phase = MP_MONSTER_FORM_ARMOR;
+    bad.health = 1; reject_raw_state(server, client, raw, &bad, &form);
+    form.sequence++; form.form_revision++; form.vid = 69;
+    accept_raw_state(server, client, raw, &form);
+    bad = form; ++bad.sequence; ++bad.form_revision; bad.vid = 79;
+    reject_raw_state(server, client, raw, &bad, &form);
+    form = monster; form.monster_id = 64; form.vid = form.origin_vid = 90;
+    form.sequence = 1; form.form_revision = 1;
+    accept_raw_state(server, client, raw, &form);
+    form_event.monster_id = 64; form_event.sequence = 1; form_event.kind = MP_MONSTER_FORM;
+    form_event.vid = 89; form_event.origin_vid = form_event.from_vid = 90;
+    form_event.form_revision = 4; form_event.form_phase = MP_MONSTER_FORM_ACTIVE; form_event.death_animation = 0;
+    raw_event(raw, &form_event); memset(&received, 0, sizeof(received)); wait_started = GetTickCount();
+    do {
+        pump(server, NULL, client, NULL, raw, 10);
+        if (state_client_take_monster_event(client, &received)) break;
+    } while (GetTickCount() - wait_started < 1000u);
+    CHECK(received.event.monster_id == 64 && received.event.kind == MP_MONSTER_FORM && received.event.vid == 89);
+    form.vid = 89; form.sequence++; form.form_revision = 4;
+    accept_raw_state(server, client, raw, &form); /* Lost armor, unarmored and freeze snapshots. */
     epnet_client_disconnect(raw); epnet_client_destroy(raw); state_client_destroy(client); mp_server_destroy(server);
-    puts("Monster transport authority, session/world validation, explicit events, dedup, late join and expiry checks passed.");
+    puts("Monster transport authority, forms, session/world validation, explicit events, dedup, late join and expiry checks passed.");
     return 0;
 }

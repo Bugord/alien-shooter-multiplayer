@@ -122,8 +122,9 @@ static int prepare(uintptr_t game) {
 typedef struct DeathGraph {
     uintptr_t sources[DEATH_GRAPH_LIMIT];
     unsigned int colors[DEATH_GRAPH_LIMIT], cost[DEATH_GRAPH_LIMIT];
+    int armor;
 } DeathGraph;
-static int graph_visit(uintptr_t game, uintptr_t source, DeathGraph* graph, unsigned int* result) {
+static int graph_visit(uintptr_t game, uintptr_t source, DeathGraph* graph, unsigned int* result, int linked_art) {
     if (!source) return 0;
     unsigned int i;
     for (i = 0; i < death.count; ++i) if (graph->sources[i] == source) break;
@@ -156,7 +157,7 @@ static int graph_visit(uintptr_t game, uintptr_t source, DeathGraph* graph, unsi
     if (linked) {
         unsigned int child;
         if (class_id == 9u || *(unsigned int*)(linked + STEAM_VID_CLASS_OFFSET) != 9u ||
-            *(uintptr_t*)(linked + STEAM_VID_LINKED_OFFSET) || !graph_visit(game, linked, graph, &child)) return 0;
+            *(uintptr_t*)(linked + STEAM_VID_LINKED_OFFSET) || !graph_visit(game, linked, graph, &child, 1)) return 0;
         death.linked[i] = child; *(uintptr_t*)(d + STEAM_VID_LINKED_OFFSET) = (uintptr_t)death.vids[child];
         total += graph->cost[child];
     }
@@ -164,33 +165,52 @@ static int graph_visit(uintptr_t game, uintptr_t source, DeathGraph* graph, unsi
         *(int*)(d + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + a * 4u) = -1;
         uintptr_t target = *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + a * 4u);
         /* A linked SPRITE is borrowed art only, just like scoped VID108. */
-        if (class_id == 9u) {
+        if (linked_art) {
             *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = 0;
             *(unsigned int*)(d + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u) = 0; continue;
         }
         if (!target) continue;
+        if (graph->armor && *(unsigned int*)(target + STEAM_VID_CLASS_OFFSET) == STEAM_UNIT_CLASS) {
+            unsigned int successor = *(unsigned int*)(target + STEAM_VID_INDEX_OFFSET);
+            if ((successor != 60u && successor != 80u) ||
+                *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + successor * 4u) != target) return 0;
+            *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = 0;
+            *(unsigned int*)(d + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u) = 0;
+            continue;
+        }
         unsigned int count = *(unsigned int*)(source + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u), child;
-        if (!count || count > DEATH_CREATION_LIMIT || !graph_visit(game, target, graph, &child) ||
+        if (!count || count > DEATH_CREATION_LIMIT || !graph_visit(game, target, graph, &child, 0) ||
             graph->cost[child] > (DEATH_ENTITY_LIMIT - total) / count) return 0;
         total += count * graph->cost[child];
         *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = (uintptr_t)death.vids[child];
     }
     graph->cost[i] = total; graph->colors[i] = 2; *result = i; return 1;
 }
-static int prepare_type(uintptr_t game, unsigned int source_vid, unsigned int animation) {
+static int prepare_type(uintptr_t game, unsigned int source_vid, unsigned int animation, int armor, unsigned int* multiplicity) {
     if (source_vid >= DEATH_STOCK_VID_LIMIT) return 0;
     uintptr_t source = *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + source_vid * 4u);
     if (!source || *(unsigned int*)(source + STEAM_VID_INDEX_OFFSET) != source_vid ||
         *(unsigned int*)(source + STEAM_VID_CLASS_OFFSET) != STEAM_UNIT_CLASS ||
         *(unsigned int*)(source + STEAM_VID_CATEGORY_OFFSET) >= STEAM_TICK_ENTITY_LIST_COUNT ||
         *(uintptr_t*)(source + STEAM_VID_SERVICE_OFFSET) ||
-        (*(unsigned int*)(source + STEAM_VID_RESOURCE_FLAGS_OFFSET) & STEAM_VID_SPECIAL_FACTORY_FLAG) ||
-        *(unsigned int*)(source + STEAM_VID_CREATION_COUNT_OFFSET + animation * 4u) != 1u) return 0;
+        (*(unsigned int*)(source + STEAM_VID_RESOURCE_FLAGS_OFFSET) & STEAM_VID_SPECIAL_FACTORY_FLAG)) return 0;
+    *multiplicity = *(unsigned int*)(source + STEAM_VID_CREATION_COUNT_OFFSET + animation * 4u);
+    if (!*multiplicity || *multiplicity > 2u || (*multiplicity != 1u &&
+        source_vid != 69u && source_vid != 79u && source_vid != 89u && source_vid != 99u)) return 0;
     uintptr_t root = *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + animation * 4u);
-    DeathGraph graph = {0}; unsigned int root_index;
+    DeathGraph graph = {0}; unsigned int root_index; graph.armor = armor;
     death.count = 0; death.corpse = animation == STEAM_ANIM_DEATH ? 0u : DEATH_GRAPH_LIMIT;
     death.gib = DEATH_GRAPH_LIMIT;
-    return graph_visit(game, root, &graph, &root_index) && root_index == 0u;
+    if (armor && source_vid == 90u && root &&
+        *(unsigned int*)(root + STEAM_VID_INDEX_OFFSET) == 80u &&
+        *(unsigned int*)(root + STEAM_VID_CLASS_OFFSET) == STEAM_UNIT_CLASS &&
+        *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 80u * 4u) == root) {
+        /* Custom large armor feedback: borrow the medium shell's visual graph.
+           Private copies omit its living successor; native90->80 stays intact. */
+        return prepare_type(game, 70u, animation, armor, multiplicity);
+    }
+    return graph_visit(game, root, &graph, &root_index, 0) && root_index == 0u &&
+        graph.cost[root_index] <= DEATH_ENTITY_LIMIT / *multiplicity;
 }
 /* Caller in SEH. Check identity in a map list before following a child pointer. */
 static int find_private(uintptr_t game, uintptr_t wanted, unsigned int index) {
@@ -261,15 +281,21 @@ int unit_death_play(uintptr_t game, const UnitPuppetPose* p, unsigned int animat
         death.state = death.game ? DEATH_FAULT : DEATH_READY; return -1;
     }
 }
-int unit_death_play_type(uintptr_t game, const UnitPuppetPose* p, unsigned int animation, unsigned int source_vid) {
+static int play_type(uintptr_t game, const UnitPuppetPose* p, unsigned int animation, unsigned int source_vid, int armor) {
     if (death.state != DEATH_READY || death.game || !p ||
         (animation != STEAM_ANIM_DEATH && animation != STEAM_ANIM_GIB_DEATH) ||
         !isfinite(p->x) || !isfinite(p->y) || !isfinite(p->z) || p->direction > 255u) return 0;
     __try {
+        unsigned int multiplicity;
         if (!game || *(uintptr_t*)game != death.base + STEAM_GAME_VTABLE_RVA ||
-            !prepare_type(game, source_vid, animation)) return 0;
+            !prepare_type(game, source_vid, animation, armor, &multiplicity)) return 0;
+        if (!death.count) return 1;
         death.game = game; death.state = DEATH_OWNED;
-        void* e = death.create((void*)game, NULL, death.vids[0], p->x, p->y, p->z, p->direction, NULL);
+        void* e = NULL;
+        for (unsigned int i = 0; i < multiplicity; ++i) {
+            e = death.create((void*)game, NULL, death.vids[0], p->x, p->y, p->z, p->direction, NULL);
+            if (!e || !find_private(game, (uintptr_t)e, 0u)) { death.state = DEATH_FAULT; return -1; }
+        }
         UnitDeathSample s = unit_death_sample(game);
         if (!e || s.fault || !s.entities || !find_private(game, (uintptr_t)e, 0u)) {
             death.state = DEATH_FAULT; return -1;
@@ -278,6 +304,13 @@ int unit_death_play_type(uintptr_t game, const UnitPuppetPose* p, unsigned int a
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         death.state = death.game ? DEATH_FAULT : DEATH_READY; return -1;
     }
+}
+int unit_death_play_type(uintptr_t game, const UnitPuppetPose* p, unsigned int animation, unsigned int source_vid) {
+    return play_type(game, p, animation, source_vid, 0);
+}
+int unit_death_play_armor(uintptr_t game, const UnitPuppetPose* p, unsigned int source_vid) {
+    if (source_vid != 70u && source_vid != 90u) return 0;
+    return play_type(game, p, STEAM_ANIM_DEATH, source_vid, 1);
 }
 int unit_death_remove(uintptr_t game) {
     if (death.state == DEATH_OFF || !death.game) return 1;

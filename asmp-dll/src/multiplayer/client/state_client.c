@@ -182,7 +182,7 @@ void state_client_update(StateClient* c, unsigned long now) {
                 mp_get_u32(data) != c->monster_authority_id || mp_get_u32(data + 4) != c->monster_authority_session ||
                 !mp_monster_state_decode(data + 8, MP_MONSTER_STATE_SIZE, &state) ||
                 !monster_remote_world_(c, state.world_low, state.world_high, state.world_epoch, now) ||
-                (c->monster_seen[state.monster_id - 1u] && !mp_sequence_newer(state.sequence, c->monster[state.monster_id - 1u].state.sequence))) { ++c->rejected; continue; }
+                (c->monster_seen[state.monster_id - 1u] && !mp_monster_state_progresses(&c->monster[state.monster_id - 1u].state, &state))) { ++c->rejected; continue; }
             unsigned int slot = state.monster_id - 1u;
             c->monster[slot].state = state; c->monster[slot].authority_id = c->monster_authority_id;
             c->monster[slot].authority_session = c->monster_authority_session; c->monster[slot].present = 1;
@@ -198,7 +198,7 @@ void state_client_update(StateClient* c, unsigned long now) {
                 now - c->monster_received_at[event.event.monster_id - 1u] > MP_MONSTER_EXPIRY_MS ||
                 event.event.world_low != c->monster[event.event.monster_id - 1u].state.world_low || event.event.world_high != c->monster[event.event.monster_id - 1u].state.world_high ||
                 event.event.world_epoch != c->monster[event.event.monster_id - 1u].state.world_epoch ||
-                (event.event.kind == MP_MONSTER_ATTACK && !c->monster[event.event.monster_id - 1u].state.alive) ||
+                !mp_monster_event_matches(&c->monster[event.event.monster_id - 1u].state, &event.event) ||
                 (c->monster_event_seen[event.event.monster_id - 1u] && !mp_sequence_newer(event.event.sequence, c->monster_event_sequence[event.event.monster_id - 1u]))) { ++c->rejected; continue; }
             c->monster_event_seen[event.event.monster_id - 1u] = 1; c->monster_event_sequence[event.event.monster_id - 1u] = event.event.sequence;
             event.authority_id = c->monster_authority_id; event.authority_session = c->monster_authority_session;
@@ -304,9 +304,13 @@ int state_client_send_monster_event(StateClient* c, const MpMonsterEvent* event,
     epnet_client_send(c->transport, MPT_C_MONSTER_EVENT, packet, sizeof(packet)); return 1;
 }
 int state_client_take_monster_event(StateClient* c, MonsterEvent* out) {
-    if (!c || !out || !c->monster_count) return 0;
-    MonsterState current;
-    if (!state_client_monster_at(c, c->monster_events[c->monster_head].event.monster_id - 1u, c->previous, &current)) { c->monster_head = (c->monster_head + 1u) % 64u; --c->monster_count; return state_client_take_monster_event(c, out); }
-    *out = c->monster_events[c->monster_head]; c->monster_head = (c->monster_head + 1u) % 64u; --c->monster_count;
-    return 1;
+    if (!c || !out) return 0;
+    while (c->monster_count) {
+        MonsterState current;
+        MonsterEvent event = c->monster_events[c->monster_head];
+        c->monster_head = (c->monster_head + 1u) % 64u; --c->monster_count;
+        if (state_client_monster_at(c, event.event.monster_id - 1u, c->previous, &current) &&
+            mp_monster_event_matches(&current.state, &event.event)) { *out = event; return 1; }
+    }
+    return 0;
 }

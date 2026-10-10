@@ -22,6 +22,9 @@ static unsigned char* private_vids[NODE_COUNT];
 static unsigned int allocated, factories, destroys, destroyed_entities, parts_destroyed, foreign_destroyed;
 static unsigned int selected_index;
 static int violation, destroy_fault, factory_fault, orphan_only;
+static unsigned char form_sources[6][STEAM_VID_SIZE];
+static unsigned char form_before[6][STEAM_VID_SIZE];
+static unsigned char* form_private_root;
 
 static uintptr_t list(unsigned int category) { return (uintptr_t)game + STEAM_WORLD_LIST_OFFSET + category * STEAM_LIST_SIZE; }
 static void add(unsigned int category, uintptr_t entity) {
@@ -191,6 +194,70 @@ static UnitPuppetPose prepare(void) {
     violation = destroy_fault = factory_fault = orphan_only = 0;
     UnitPuppetPose pose = {180.5f, 200.25f, 3.0f, 0, 192, 0}; return pose;
 }
+static uintptr_t form_spawn(unsigned char* vid, unsigned int depth) {
+    if (depth > 8u || allocated >= ENTITY_COUNT) { violation = 1; return 0; }
+    unsigned int index = *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET);
+    unsigned int c = *(unsigned int*)(vid + STEAM_VID_CLASS_OFFSET);
+    if ((uintptr_t)vid == *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + index*4u) ||
+        (c != 5u && c != 8u && c != 9u) || *(int*)(vid + STEAM_VID_DAMAGE_OFFSET) ||
+        *(unsigned int*)(vid + STEAM_VID_COLLISION_MASK_OFFSET) || *(unsigned int*)(vid + STEAM_VID_HEALTH_OFFSET)) violation = 1;
+    for (unsigned int a = 0; a < STEAM_ANIMATION_COUNT; ++a) {
+        if (*(int*)(vid + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + a*4u) != -1) violation = 1;
+        uintptr_t target = *(uintptr_t*)(vid + STEAM_VID_CREATIONS_OFFSET + a*4u);
+        if (target && *(unsigned int*)(target + STEAM_VID_CLASS_OFFSET) == STEAM_UNIT_CLASS) violation = 1;
+    }
+    unsigned char* e = entities[allocated++]; memset(e,0,0x94);
+    *(uintptr_t*)e = image_base + (c == 5u ? STEAM_CANNON_VTABLE_RVA : c == 8u ? STEAM_TERRAIN_VTABLE_RVA : STEAM_SPRITE_VTABLE_RVA);
+    *(uintptr_t*)(e + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)vid;
+    add(c == 5u ? 6u : c == 8u ? 2u : 4u,(uintptr_t)e);
+    uintptr_t birth = *(uintptr_t*)(vid + STEAM_VID_CREATIONS_OFFSET + 14u*4u);
+    unsigned int count = *(unsigned int*)(vid + STEAM_VID_CREATION_COUNT_OFFSET + 14u*4u);
+    if (birth) for (unsigned int i = 0; i < count; ++i) form_spawn((unsigned char*)birth,depth+1u);
+    return (uintptr_t)e;
+}
+static void* __fastcall form_create(void* world, void* unused, void* descriptor,
+    float x,float y,float z,int direction,void* owner) {
+    (void)unused; (void)x; (void)y; (void)z; (void)direction;
+    if (world != game || owner) violation = 1;
+    ++factories; form_private_root = descriptor;
+    return (void*)form_spawn(descriptor,0);
+}
+static void* __fastcall form_destroy(void* e,void* unused,int release) {
+    (void)unused;
+    if (release != 1 || e == unrelated) violation = 1;
+    unsigned char* vid = *(unsigned char**)((uintptr_t)e + STEAM_ENTITY_VID_OFFSET);
+    for (unsigned int a = 0; a < STEAM_ANIMATION_COUNT; ++a)
+        if (*(uintptr_t*)(vid + STEAM_VID_CREATIONS_OFFSET + a*4u)) violation = 1;
+    ++destroyed_entities; unregister_entity((uintptr_t)e); return e;
+}
+static UnitPuppetPose prepare_forms(int armor) {
+    UnitPuppetPose pose = prepare(); memset(form_sources,0,sizeof(form_sources));
+    const unsigned int ids[6] = {armor ? 70u : 69u, armor ? 771u : 149u,
+        armor ? 763u : 147u, armor ? 764u : 148u,60u,90u};
+    for (unsigned int i = 0; i < 6u; ++i) {
+        unsigned char* d = form_sources[i];
+        *(unsigned int*)(d + STEAM_VID_INDEX_OFFSET) = ids[i];
+        *(unsigned int*)(d + STEAM_VID_CLASS_OFFSET) = i == 0u || i >= 4u ? 2u :
+            i == 1u ? (armor ? 5u : 9u) : i == 2u ? 5u : 8u;
+        *(unsigned int*)(d + STEAM_VID_CATEGORY_OFFSET) = 6u;
+        *(uintptr_t*)(d + STEAM_VID_BEHAVIOR_OFFSET) = 0x12345678u;
+        *(int*)(d + STEAM_VID_DAMAGE_OFFSET) = 42;
+        *(int*)(d + STEAM_VID_HEALTH_OFFSET) = 100;
+        *(unsigned int*)(d + STEAM_VID_COLLISION_MASK_OFFSET) = 0xFFFFFFFFu;
+        *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + ids[i]*4u) = (uintptr_t)d;
+    }
+    *(uintptr_t*)(form_sources[0] + STEAM_VID_CREATIONS_OFFSET + 15u*4u) = (uintptr_t)form_sources[1];
+    *(unsigned int*)(form_sources[0] + STEAM_VID_CREATION_COUNT_OFFSET + 15u*4u) = armor ? 1u : 2u;
+    *(uintptr_t*)(form_sources[1] + STEAM_VID_CREATIONS_OFFSET + 14u*4u) = (uintptr_t)form_sources[2];
+    *(unsigned int*)(form_sources[1] + STEAM_VID_CREATION_COUNT_OFFSET + 14u*4u) = armor ? 14u : 12u;
+    *(uintptr_t*)(form_sources[2] + STEAM_VID_CREATIONS_OFFSET + 15u*4u) = (uintptr_t)form_sources[3];
+    *(unsigned int*)(form_sources[2] + STEAM_VID_CREATION_COUNT_OFFSET + 15u*4u) = 1u;
+    if (armor) {
+        *(uintptr_t*)(form_sources[1] + STEAM_VID_CREATIONS_OFFSET + 15u*4u) = (uintptr_t)form_sources[4];
+        *(unsigned int*)(form_sources[1] + STEAM_VID_CREATION_COUNT_OFFSET + 15u*4u) = 1u;
+    }
+    memcpy(form_before,form_sources,sizeof(form_sources)); form_private_root = NULL; return pose;
+}
 int main(void) {
     image_base = (uintptr_t)VirtualAlloc(NULL, 0x140000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); CHECK(image_base);
     UnitDeathEngine api = {create, destroy_cannon, destroy_terrain, destroy_part}, invalid = api;
@@ -315,6 +382,50 @@ int main(void) {
         CHECK(unit_death_initialize(image_base, &api));
         CHECK(!unit_death_play_type((uintptr_t)game, &pose, 15, 50) && !factories && unit_death_stop());
     }
+    /* Ice149 is a standalone class9 factory root: its birth147x12 must remain,
+       whereas linked sprite art still has every creation suppressed. */
+    UnitDeathEngine form_api = {form_create,form_destroy,form_destroy,form_destroy};
+    pose = prepare_forms(0); CHECK(unit_death_initialize(image_base,&form_api));
+    CHECK(unit_death_play_type((uintptr_t)game,&pose,STEAM_ANIM_DEATH,69u) == 1);
+    CHECK(factories == 2u && allocated == 26u && !violation);
+    CHECK(*(unsigned int*)(form_private_root + STEAM_VID_INDEX_OFFSET) == 149u);
+    CHECK(*(uintptr_t*)(form_private_root + STEAM_VID_CREATIONS_OFFSET + 14u*4u));
+    CHECK(*(unsigned int*)(form_private_root + STEAM_VID_CREATION_COUNT_OFFSET + 14u*4u) == 12u);
+    CHECK(unit_death_sample((uintptr_t)game).entities == 26u);
+    CHECK(unit_death_remove((uintptr_t)game) && destroyed_entities == 26u && !violation);
+    CHECK(!memcmp(form_sources,form_before,sizeof(form_sources)) && !foreign_destroyed && unit_death_stop());
+    /* Both armor sizes use private shell visuals with no live successor.
+       Independent banks may own identical art without sharing private VIDs. */
+    pose = prepare_forms(1); CHECK(unit_death_initialize(image_base,&form_api));
+    CHECK(!unit_death_play_type((uintptr_t)game,&pose,STEAM_ANIM_DEATH,70u) && !factories);
+    CHECK(unit_death_play_armor((uintptr_t)game,&pose,70u) == 1);
+    CHECK(factories == 1u && allocated == 15u && !violation);
+    CHECK(!*(uintptr_t*)(form_private_root + STEAM_VID_CREATIONS_OFFSET + 15u*4u));
+    CHECK(unit_death_sample((uintptr_t)game).entities == 15u);
+    CHECK(!memcmp(form_sources,form_before,sizeof(form_sources)));
+    *(unsigned int*)(form_sources[4] + STEAM_VID_INDEX_OFFSET) = 80u;
+    *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 80u*4u) = (uintptr_t)form_sources[4];
+    *(uintptr_t*)(form_sources[5] + STEAM_VID_CREATIONS_OFFSET + 15u*4u) = (uintptr_t)form_sources[4];
+    *(unsigned int*)(form_sources[5] + STEAM_VID_CREATION_COUNT_OFFSET + 15u*4u) = 1u;
+    memcpy(form_before,form_sources,sizeof(form_sources));
+    unsigned char* medium_private_root = form_private_root;
+    CHECK(unit_death_select(UNIT_DEATH_SLOT_COUNT-1u));
+    *(unsigned int*)(form_sources[5] + STEAM_VID_CREATION_COUNT_OFFSET + 15u*4u) = 2u;
+    CHECK(!unit_death_play_armor((uintptr_t)game,&pose,90u) && factories == 1u);
+    *(unsigned int*)(form_sources[5] + STEAM_VID_CREATION_COUNT_OFFSET + 15u*4u) = 1u;
+    CHECK(unit_death_play_armor((uintptr_t)game,&pose,90u) == 1 && factories == 2u);
+    CHECK(form_private_root != medium_private_root && allocated == 30u && !violation);
+    CHECK(!*(uintptr_t*)(form_private_root + STEAM_VID_CREATIONS_OFFSET + 15u*4u));
+    CHECK(unit_death_sample((uintptr_t)game).entities == 15u && !unit_death_stop());
+    CHECK(!memcmp(form_sources,form_before,sizeof(form_sources)));
+    CHECK(unit_death_select(0) && unit_death_remove((uintptr_t)game));
+    CHECK(destroyed_entities == 15u && !violation && !unit_death_stop());
+    CHECK(unit_death_select(UNIT_DEATH_SLOT_COUNT-1u));
+    CHECK(unit_death_sample((uintptr_t)game).entities == 15u && unit_death_remove((uintptr_t)game));
+    CHECK(destroyed_entities == 30u && !violation);
+    *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 70u*4u) = 0;
+    CHECK(!unit_death_play_armor((uintptr_t)game,&pose,90u) && factories == 2u);
+    CHECK(unit_death_stop());
     CHECK(VirtualFree((void*)image_base, 0, MEM_RELEASE));
     puts("UNIT death graph sanitization, successors, variants and guarded cleanup checks passed."); return 0;
 }

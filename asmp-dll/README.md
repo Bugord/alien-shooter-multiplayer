@@ -34,19 +34,34 @@ world/session guards, bounded worker handoffs and game-thread application.
 Host observation leaves native AI, commands, movement and damage untouched;
 attack initiation is captured from native USE_AMMO actions (including zero-cost
 melee), rather than inferred from snapshots. Client copies use private sanitized
-VIDs, suppressed local AI/damage, native animation progression and immediate
+VIDs, suppressed local AI/scripts, native animation progression and immediate
 removal of the combat entity on authoritative death. `game/unit_death.*` then
 reproduces the host's normal corpse or alternate eight-gib presentation using
 nine private visual VIDs, with scripts/damage/unit collisions disabled. The
 coordinator retains the final pose and deduplicates both event and state death.
 Native terrain stamps last until map reload; transient effects have bounded
 cleanup. Runtime startup/stop includes these hooks and
-waits for game-thread removal before restoring them. Only VID50 + VID108 is
-supported; no network population, player-damage or projectile replication.
+waits for game-thread removal before restoring them. The default single-monster
+fixture uses VID50 + VID108; the gallery below covers additional forms.
+Network population, player-damage and projectile replication remain separate.
 
 The optional death-gallery fixture uses64-capacity game-thread slot pools for
-UNIT observation, private combat descriptors and death visual graphs (32 active
+UNIT observation, private combat descriptors and death visual graphs (48 active
 instances). Hooks remain shared and route by registered identity. Death graphs
 use the selected stock UNIT's CRE15/16, validated before cloning, with32 visual
 VIDs/128 effects per slot. Worker caches and coordinator IDs are independent;
 `monster_sync_gallery` is configured before the first world tick.
+Form revisions keep a frozen form and an armor successor under the same network
+ID. Host armor graphs own bounded private successor descriptors; client armor
+graphs omit living successors. Frozen class9 ice roots retain their sanitized
+birth effects. Private behavior records disable AI before host successor creation.
+Large armor loss borrows the medium shell's14-fragment visual graph on both
+peers, independently of the native90->80 successor. The host owns the extra
+effect in its armor bank; medium host armor already emits native fragments.
+
+Client copies opt into native incoming damage for visual prediction, with zero
+creation links and outgoing gameplay effects. The coordinator keeps provisional
+HP/forms/death separate from host authority, deduplicates confirmation and owns
+correction cleanup. Armor pending states display60/80 immediately. The passive
+offline probes still block damage. See [impact prediction](../docs/monster-sync-stages.md#client-impact-prediction)
+for the750ms grace, confirmation heuristic and remaining combat limitations.

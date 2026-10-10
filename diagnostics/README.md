@@ -387,8 +387,18 @@ Builds, test copies, logs, reports, analysis tools, IDA databases and local hist
 backups are ignored. No push or merge is part of this review preparation.
 
 Death gallery: `./diagnostics/start-monster-network-test.ps1 -Gallery` creates
-four stationary rows (VID40/50/60/80), eight copies each, without waves. Test
-weapons in host A and compare health/death at B. Weapon6 frozen-VID transformations
-are currently unsupported; see [gallery coverage](../docs/monster-sync-stages.md#death-gallery-different-types-and-weapons).
+six stationary rows (VID40/50/60/80/70/90), eight copies each, without waves. Test
+weapons in host A and compare freeze, armor loss and final death at B. Add
+`-Forms` for the timed native form lifecycle check; it uses native actions rather
+than weapon hits. See [gallery coverage](../docs/monster-sync-stages.md#death-gallery-different-types-and-weapons).
 The managed manifest preserves gallery mode when restarting B. Per-ID native
-logs are `MONSTER_GALLERY_UNIT`; aggregate readiness is active32/faults0.
+logs are `MONSTER_GALLERY_UNIT`, including current VID, revision and phase;
+aggregate readiness is active48/faults0. `-Forms` finishes with eight final deaths.
+Use `-Gallery -PredictionTest` to inject five client-only native hits and verify
+correction to the unchanged host: all48 original forms alive, zero faults,
+`MONSTER_PREDICTION_TEST hits=1` and five corrections. It is mutually exclusive
+with `-Forms` and kill timers. Default untimed galleries enable impact prediction;
+test actual weapons from both A and B. This helper is not a projectile test.
+Large armor now emits14 shell fragments on A and B; compare the last gallery
+row with the medium armored row. Direct gib death and direct freeze keep their
+own effects without an extra armor explosion.

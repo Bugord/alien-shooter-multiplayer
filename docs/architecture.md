@@ -81,11 +81,23 @@ The original mod does not implement monster/world synchronization or a working
 scoreboard. This stage adds neither, nor respawning, Steam invitations or
 server-authoritative combat in ordinary multiplayer. The opt-in one-monster
 checkpoint is described in [Monster checkpoints](monster-sync-stages.md).
-Its production `monster_sync` coordinator observes one ordinary host UNIT,
-creates a sanitized client copy, and shares the runtime's world identity and
+Its production `monster_sync` coordinator observes one ordinary host UNIT or
+48 stationary gallery fixtures, creates sanitized client copies, and shares the runtime's world identity and
 game-thread lifecycle. A separate explicit monster protocol locks server
 authority to one peer/session. Attack/death are events; positions, movement and
-health are snapshots. Player/projectile damage replication remains deferred.
+health are snapshots. Form revisions preserve logical identity across native
+freeze and armor successor allocations; armor loss is separate from final death.
+Independent bounded visual slots let armor debris outlive a successor's death.
+Large armor uses the medium shell fragments on both peers as a custom effect;
+the host owns an extra armor visual bank without altering its native successor.
+Client native hits predict HP/freeze/armor/death presentation independently of
+authoritative revisions and tombstones. Confirmation adopts visuals once;
+conflicts or a750ms grace plus a newer host sequence cause owned cleanup and
+recreation. Armor pending immediately displays the unarmored successor.
+See [client impact prediction](monster-sync-stages.md#client-impact-prediction)
+for the heuristic and projectile provenance limits.
+Full authoritative client-origin combat validation remains deferred; existing
+player shot replay can create native projectiles and needs end-to-end testing.
 The existing transport is unreliable: separate
 shot events avoid snapshot loss of short-lived attacks but do not guarantee
 delivery under packet loss. Each PC still simulates its own world.

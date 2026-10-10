@@ -19,8 +19,56 @@ static DWORD monster_kill_delay, monster_test_started;
 static uint32_t monster_test_epoch;
 static int monster_test_triggered;
 static unsigned int monster_test_death = STEAM_ANIM_DEATH;
+static int monster_forms_test;
+static unsigned int monster_forms_phase;
+static volatile LONG monster_forms_results[2];
+static int monster_prediction_test;
+static unsigned int monster_prediction_phase;
+static volatile LONG monster_prediction_result;
 static void observe_runtime(const RuntimeFrame* frame) {
     diag_tick_observe(frame);
+    if (monster_prediction_test && frame->monster.role == MONSTER_CLIENT && frame->monster.gallery_active) {
+        if (monster_test_epoch != frame->monster.host_epoch) {
+            monster_test_epoch = frame->monster.host_epoch; monster_test_started = frame->milliseconds;
+            monster_prediction_phase = 0;
+        }
+        if (!monster_prediction_phase && frame->milliseconds - monster_test_started >= 3000u) {
+            int ok = 1;
+            /* Deliberately unconfirmed native hits: one ice, one gib, two armor
+               successors and one nonlethal hit must all roll back to the host.
+               This drives native bindings, not weapon/projectile collision. */
+            unit_puppet_select(0u); ok = unit_puppet_prediction_test_hit(frame->snapshot.game, 100000, 1) == 1 && ok;
+            unit_puppet_select(8u); ok = unit_puppet_prediction_test_hit(frame->snapshot.game, 100000, 0) == 1 && ok;
+            unit_puppet_select(32u); ok = unit_puppet_prediction_test_hit(frame->snapshot.game, frame->monster.gallery[32].health, 0) == 1 && ok;
+            unit_puppet_select(40u); ok = unit_puppet_prediction_test_hit(frame->snapshot.game, frame->monster.gallery[40].health, 0) == 1 && ok;
+            unit_puppet_select(16u); ok = unit_puppet_prediction_test_hit(frame->snapshot.game, 1, 0) == 1 && ok;
+            unit_puppet_select(0u); monster_prediction_phase = 1u;
+            InterlockedExchange(&monster_prediction_result, ok ? 1 : -1);
+        }
+        return;
+    }
+    if (monster_forms_test && frame->monster.role == MONSTER_HOST && frame->monster.gallery_count) {
+        if (monster_test_epoch != frame->monster.host_epoch) {
+            monster_test_epoch = frame->monster.host_epoch; monster_test_started = frame->milliseconds; monster_forms_phase = 0;
+        }
+        if (frame->monster.gallery_active && !monster_forms_phase && frame->milliseconds - monster_test_started >= 5000u) {
+            const unsigned int frozen[] = {0u,8u,16u,24u,33u,41u}; int ok = 1;
+            for (unsigned int i = 0; i < sizeof(frozen)/sizeof(frozen[0]); ++i) {
+                unit_puppet_select(frozen[i]); ok = unit_puppet_host_freeze(frame->snapshot.game) == 1 && ok;
+            }
+            unit_puppet_select(32u); ok = unit_puppet_host_kill_variant(frame->snapshot.game, STEAM_ANIM_DEATH) == 1 && ok;
+            unit_puppet_select(40u); ok = unit_puppet_host_kill_variant(frame->snapshot.game, STEAM_ANIM_DEATH) == 1 && ok;
+            unit_puppet_select(0u); monster_forms_phase = 1u; InterlockedExchange(&monster_forms_results[0], ok ? 1 : -1);
+        }
+        if (monster_forms_phase == 1u && frame->milliseconds - monster_test_started >= 10000u) {
+            const unsigned int killed[] = {0u,8u,16u,24u,32u,33u,40u,41u}; int ok = 1;
+            for (unsigned int i = 0; i < sizeof(killed)/sizeof(killed[0]); ++i) {
+                unit_puppet_select(killed[i]); ok = unit_puppet_host_kill_variant(frame->snapshot.game, STEAM_ANIM_DEATH) == 1 && ok;
+            }
+            unit_puppet_select(0u); monster_forms_phase = 2u; InterlockedExchange(&monster_forms_results[1], ok ? 1 : -1);
+        }
+        return;
+    }
     if (!monster_kill_delay || frame->monster.role != MONSTER_HOST || !frame->monster.unit.entity) return;
     if (monster_test_epoch != frame->monster.host_epoch) {
         monster_test_epoch = frame->monster.host_epoch; monster_test_started = frame->milliseconds; monster_test_triggered = 0;
@@ -50,9 +98,10 @@ static void log_frame(FILE* log, const FrameSample* frame, Snapshot* last,
                 m->role, m->gallery_count, m->gallery_active, m->gallery_dead, m->gallery_faults, m->deaths, m->cleanup);
             for (unsigned int i = 0; i < m->gallery_count; ++i) {
                 const MonsterGallerySample* row = &m->gallery[i];
-                fprintf(log, "# MONSTER_GALLERY_UNIT id=%u vid=%u state=%d entity=%08lX health=%d anim=%u behavior=%u death=%u x=%.3f y=%.3f effects=%u fault=%d\n",
+                fprintf(log, "# MONSTER_GALLERY_UNIT id=%u vid=%u state=%d entity=%08lX health=%d anim=%u behavior=%u death=%u x=%.3f y=%.3f effects=%u fault=%d revision=%u phase=%u presentation=%u prediction=%u\n",
                     row->id, row->vid, row->state, (unsigned long)row->entity, row->health, row->animation, row->behavior,
-                    row->death_animation, row->x, row->y, row->effects, row->fault);
+                    row->death_animation, row->x, row->y, row->effects, row->fault, row->form_revision, row->form_phase,
+                    row->presentation_vid, row->prediction);
             }
         }
         fprintf(log, "# MONSTER_NETWORK role=%d state=%d id=%u epoch=%u entity=%08lX x=%.3f y=%.3f z=%.3f direction=%u moving=%u health=%d anim=%u native_frames=%u behavior=%u attacks=%u deaths=%u dropped=%u rejected=%u cleanup=%u\n",
@@ -63,6 +112,14 @@ static void log_frame(FILE* log, const FrameSample* frame, Snapshot* last,
         fprintf(log, "# MONSTER_DEATH animation=%u x=%.3f y=%.3f z=%.3f direction=%u effects=%u corpses=%u gibs=%u fault=%d\n",
             m->death_animation, m->death_pose.x, m->death_pose.y, m->death_pose.z, m->death_pose.direction,
             m->visual.entities, m->visual.corpses, m->visual.gibs, m->visual.fault);
+        fprintf(log, "# MONSTER_FORM vid=%u revision=%u phase=%u transitions=%u\n",
+            m->vid, m->form_revision, m->form_phase, m->forms);
+        fprintf(log, "# MONSTER_PREDICTION started=%u confirmed=%u corrected=%u\n",
+            m->predictions, m->confirmations, m->corrections);
+        if (monster_prediction_test) fprintf(log, "# MONSTER_PREDICTION_TEST hits=%ld\n",
+            InterlockedCompareExchange(&monster_prediction_result, 0, 0));
+        if (monster_forms_test && m->role == MONSTER_HOST) fprintf(log, "# MONSTER_FORM_TEST transitions=%ld final_kills=%ld\n",
+            InterlockedCompareExchange(&monster_forms_results[0], 0, 0), InterlockedCompareExchange(&monster_forms_results[1], 0, 0));
     }
     if (frame->monster.event) {
         const MonsterProbeFrame* m = &frame->monster;
@@ -218,6 +275,12 @@ static DWORD WINAPI run(LPVOID unused)
             config.monster_role = !strcmp(role, "host") ? MONSTER_HOST : MONSTER_CLIENT;
             char gallery_option[4] = {0};
             config.monster_gallery = GetEnvironmentVariableA("ASMP_DIAG_MONSTER_GALLERY", gallery_option, sizeof(gallery_option)) == 1u && gallery_option[0] == '1';
+            char forms_option[4] = {0};
+            monster_forms_test = config.monster_role == MONSTER_HOST && config.monster_gallery &&
+                GetEnvironmentVariableA("ASMP_DIAG_MONSTER_FORMS", forms_option, sizeof(forms_option)) == 1u && forms_option[0] == '1';
+            char prediction_option[4] = {0};
+            monster_prediction_test = config.monster_role == MONSTER_CLIENT && config.monster_gallery &&
+                GetEnvironmentVariableA("ASMP_DIAG_MONSTER_PREDICTION_TEST", prediction_option, sizeof(prediction_option)) == 1u && prediction_option[0] == '1';
             char delay[16] = {0}; DWORD length = GetEnvironmentVariableA("ASMP_DIAG_MONSTER_KILL_AFTER", delay, sizeof(delay));
             char variant[16] = {0}; GetEnvironmentVariableA("ASMP_DIAG_MONSTER_DEATH_VARIANT", variant, sizeof(variant));
             if (!strcmp(variant, "gibs")) monster_test_death = STEAM_ANIM_GIB_DEATH;

@@ -8,7 +8,11 @@ typedef struct UnitCombatSample {
     uintptr_t root, child;
     unsigned int private_entities, other_entities, unexpected_entities;
     int sources_unchanged, fault;
+    unsigned int current_vid, form_revision, transitions;
+    int transitioning;
 } UnitCombatSample;
+int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* private_vid,
+    unsigned int* current_vid, unsigned int* revision, int* transitioning, unsigned int requested_vid);
 /* Bounded selected offline fixture / network copy. Default is VID50 + VID108.
    Factory owns native allocations;
    this module owns private shallow VID copies, never the borrowed resources.
@@ -21,6 +25,9 @@ int unit_combat_spawn(const Snapshot*);
    Host mode preserves only native death creation links; AI is frozen separately
    with unit_puppet_watch_stationary. Native death successors belong to the map. */
 int unit_combat_spawn_type(const Snapshot*, unsigned int vid, const UnitPuppetPose*, int host);
+/* Cosmetic local-hit prediction: native incoming damage/resistance survives,
+   while every script and creation link (including armor successors) is inert. */
+int unit_combat_spawn_predictive(const Snapshot*, unsigned int vid, const UnitPuppetPose*);
 UnitCombatSample unit_combat_sample(uintptr_t game, int compare_sources);
 /* One guarded removal attempt; a fault retains ownership and makes stop false.
    A later world with no private entities permits release of this fixture. */

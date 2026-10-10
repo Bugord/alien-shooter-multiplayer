@@ -5,9 +5,10 @@
 #include "../game/unit_death.h"
 
 enum MonsterRole { MONSTER_DISABLED, MONSTER_HOST, MONSTER_CLIENT };
-enum MonsterSyncState { MS_OFF, MS_WAITING, MS_ACTIVE, MS_BACKOFF, MS_ABANDONED, MS_STOPPING, MS_DEAD };
+enum MonsterSyncState { MS_OFF, MS_WAITING, MS_ACTIVE, MS_BACKOFF, MS_ABANDONED, MS_STOPPING, MS_DEAD, MS_TRANSFORMING, MS_PREDICTED_DEAD };
 typedef struct MonsterGallerySample {
-    uint32_t id, vid;
+    uint32_t id, vid, form_revision, form_phase, presentation_vid;
+    unsigned int prediction;
     enum MonsterSyncState state;
     uintptr_t entity;
     int health;
@@ -22,7 +23,9 @@ typedef struct MonsterSyncFrame {
     UnitDeathSample visual;
     UnitPuppetPose death_pose;
     unsigned int death_animation;
-    unsigned int event, cleanup, attacks, deaths, dropped, rejected;
+    uint32_t vid, form_revision, form_phase;
+    unsigned int event, cleanup, attacks, deaths, forms, dropped, rejected;
+    unsigned int predictions, confirmations, corrections;
     uint32_t monster_id, host_epoch;
     unsigned int gallery_count, gallery_active, gallery_dead, gallery_faults;
     MonsterGallerySample gallery[MP_MONSTER_CAPACITY];

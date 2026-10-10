@@ -250,14 +250,16 @@ melee; animation snapshots never create attack events. Destruction/death generat
 a separate event, and repeated absent snapshots also retain the authoritative
 death. State includes map key, host epoch, ID, VID, position, direction, movement
 intent/velocity, signed health, an event watermark and the host's death variant.
-Monster protocol v3 uses 72-byte states and 52-byte events. Events carry their
+Monster protocol v4 uses 84-byte states and 72-byte events. Both carry the
+original type, current form and form revision/phase. Events also carry their
 own sequence, world/ID, tick, kind, position, direction and death variant (15/16).
 The final death pose survives deletion of the host entity. Frames and timers stay native.
 
 After the copied world settles, B creates the sanitized private VID50/108 fixture
 through the validated native factory and attaches that specific entity. Positive
-host health is applied through the native action. Local AI, damage and scripted
-gameplay effects are suppressed. Explicit attacks replay native animation8; the
+host health is applied through the native action. Local AI and scripted gameplay
+effects are suppressed. Client incoming hits now drive provisional visuals as
+described below; host snapshots retain authority. Explicit attacks replay native animation8; the
 engine advances its frames and returns to idle/run. Death removes the combat
 root and part, then creates a separate native visual presentation once. Normal
 death uses VID51's falling animation and VID52's corpse stamp; alternate death
@@ -352,8 +354,8 @@ reload and disconnection checklists are not established by these runs.
 .\diagnostics\start-monster-network-test.ps1 -Gallery
 ```
 
-This opt-in fixture creates32 stationary monsters on host A, without survival
-waves: four rows of eight copies, stock UNIT VIDs40,50,60,80 (row order follows
+This opt-in fixture creates48 stationary monsters on host A, without survival
+waves: six rows of eight copies, stock UNIT VIDs40,50,60,80,70,90 (row order follows
 increasing Y). Copies in a row increase X,80 units apart; rows are100 units apart.
 The first row starts at the player's initial X+160,Y-150. Move the camera/player
 along the rows. All weapons/ammo are granted by the multiplayer runtime.
@@ -362,7 +364,8 @@ same IDs, health and deaths. Client damage requests are a separate feature.
 Neither side runs monster AI; native idle/death animation still advances.
 
 Each instance owns independent bounded native identity, replica and death state.
-The wire v3 admits IDs1..64 and these four stock types, with independent state
+The wire v4 admits IDs1..64 and these six stock types plus their frozen forms,
+with independent state
 and event sequences in server/client caches. Runtime publishes the current
 states as a bounded batch every player-state interval. Death effects clone that
 monster's actual CRE15/16 graph; only acyclic, bounded class5/8/9 visuals are
@@ -371,26 +374,128 @@ corpse is substituted on failure. Art resources remain borrowed and DLL-pinned.
 The effects setting may choose two or eight gibs. Each graph is limited to32
 visual VIDs and128 live effects; graph faults use the existing recovery policy.
 
-Known coverage gaps are visible test findings, not a successful result:
-weapon6 freezing changes VID to49/59/69/89 and is not replicated by the current
-15/16 death protocol. Armored types70/90 transform into another living UNIT and
-are excluded. Individual gib trajectories remain native local randomness, and
-the ordinary death cry is still absent at B. This fixture validates normal/gib
-death coverage; it does not establish freeze, armor transformations, loot or score.
+Freeze changes the current form to49/59/69/89/79/99 and keeps the monster
+damageable. Its later final death plays the actual frozen form's ice graph.
+Normal armor destruction transforms70 into60 (through native intermediate771)
+and90 into80. The logical network ID survives the native allocation change;
+armor debris is visual only on B; the large host type also receives the custom
+fragment effect described below. Variant16 is a final gib death, including for
+armored monsters. A frozen armored monster breaks into ice rather than spawning
+an unarmored successor. Form revisions prevent old-form packets and attacks from
+restoring a previous allocation. Late join starts with the current form.
+Individual particle trajectories remain native local randomness, and the ordinary
+death cry is still absent at B. Loot, score and dynamic population are separate.
 
-Logs include `MONSTER_GALLERY total=32 active=32 dead=0 faults=0` and per-ID
+Logs include `MONSTER_GALLERY total=48 active=48 dead=0 faults=0` and per-ID
 `MONSTER_GALLERY_UNIT` records with VID, behavior, health, variant and effect
 counts. Kill one ID and verify B changes only that copy; try multiple simultaneous
 deaths and restart B after deaths. A kill never resurrects from older live data.
 For automated native lifecycle checks only, add `-KillAfterSeconds 25` (normal)
 or `-KillAfterSeconds 25 -DeathVariant gibs`; these use native HP actions, not
-weapon hits. Default launch leaves all32 alive for the user's weapon tests. The timed helper requires the first copy to stay alive until its timer fires; killing it early is a manual run, not an automated full-gallery result.
+weapon hits. Default launch leaves all48 alive for the user's weapon tests. The timed helper requires the first copy to stay alive until its timer fires; killing it early is a manual run, not an automated full-gallery result.
 Restarting a client preserves gallery mode in the managed manifest. Stop uses
 `stop-two-client-test.ps1`; copied survival scripts are restored after cleanup.
 
-Gallery validation (2026-10-10): full server/DLL build and all suites passed,
+Historical four-row gallery validation (109f891, 2026-10-10): full server/DLL build and all suites passed,
 including32 independent coordinator lifecycles and realUDP multi-ID/latejoin
 checks. Both native clients began with32 living copies and behavior0; after
 user weapon tests both reported32 deaths, zero native visual faults and zero
 shot/monster queue drops. The user confirmed the two-window result visually.
-This does not expand the freeze/armor transformation coverage described above.
+That result does not establish freeze/armor coverage.
+
+For the separate native form lifecycle check, launch `-Gallery -Forms`. After
+five seconds the diagnostic observer freezes one copy of every original family
+and removes armor from two other copies. At ten seconds it kills those six frozen
+copies and two unarmored successors. This uses guarded native CHANGE_VID and HP
+actions; it does not prove the weapon6 projectile/collision script. Check the
+`MONSTER_FORM_TEST` operation results, per-ID form revisions and both peers'
+eight final deaths with zero faults. Frozen deaths must use49/59/69/89/79/99,
+and armor successors60/80 must retain IDs33/41. Then use a fresh untimed gallery
+for actual weapon6 freeze/ice breakup, armor with different weapons, simultaneous
+hits, B restart after a transition, and stop/reload checks. Rebuild relay and
+both DLLs together when changing the wire version.
+
+Form validation (2026-10-10): the full `build.ps1 -Server` build and all suites
+passed, including real UDP form ordering/recovery and native binding mocks.
+The two-client Forms run reached40 active/eight dead on both peers, with zero
+faults: all six frozen deaths used their ice forms, and armor successors60/80
+retained IDs33/41. Restarting B restored those eight deaths without resurrection.
+A separate native gib run reached48 dead on both peers, including armored types,
+with zero faults. Both managed runs acknowledged native cleanup and hook removal.
+These helper runs establish lifecycle results; actual weapon6 collision and
+visual comparison still require manual acceptance.
+
+The subsequent manual run exposed an armor successor already in pain or death
+before its observer attached. Rejecting that state caused host fixture retries
+and left B waiting for a successor. Stationary observers now adopt those native
+animations, preserving a final death and recording it once. Regression tests
+cover pain, normal death and gib death at attachment; the full suite passed
+again. Recheck rapid successive weapon hits on the armored rows manually.
+
+## Client impact prediction
+
+Network client copies opt into native incoming damage on private descriptors
+with their original HP/resistance. Scripts, outgoing damage, births and death
+creations remain disabled. The native hit chooses pain, normal/gib death or
+armor loss; the actual freeze script can change to a prepared private frozen
+form. Results are sampled after native scripts finish, so freeze's intermediate
+death animation does not become a final kill. Offline movement/combat probes
+retain their earlier damage-blocking policy.
+
+Provisional HP, current displayed form and death effects are separate from the
+host VID/revision and permanent death tombstone. Old snapshots cannot re-heal
+accumulated hits or undo a provisional corpse immediately. Matching host state
+or death events adopt the existing presentation without replay. A conflicting
+new form corrects immediately; an unconfirmed result is corrected after750ms
+once a newer host sequence exists. Authority expiry, world/session change and
+stop remove provisional objects through the normal ownership checks.
+
+This is visual reconciliation, not shot acknowledgements or client damage
+authority. A newer matching HP/form is the confirmation heuristic; a duplicate
+sequence is neither confirmation nor rejection. Prediction accepts native hits
+from local and replayed projectiles because complete projectile provenance is
+not established for every weapon (freeze's DAMAGE call has no source). No extra
+damage request is sent, avoiding a second host damage path. Under long latency
+or differing native collisions a visible correction remains possible. Client
+shot delivery/cadence validation and reliable combat remain separate work.
+
+Armor pending state immediately displays a living60/80 successor in the same
+game update as the old copy is removed. It no longer waits invisibly for the
+successor snapshot.70's debris occupies a separate bank and survives a successor
+death. Stock90 directly creates80 with no armor fragments. The mod adds the
+medium shell's14 fragments to large armor loss on both host and client, using
+independent harmless private visual graphs. The native90->80 transition and HP
+remain intact; direct gib death or direct freezing adds no armor fragments.
+Host fragments have the same bounded cleanup as client effects. An accepted pending/successor pair plays armor debris
+once, including when local prediction already presented it.
+
+For a native rejection/cleanup check use
+`./diagnostics/start-monster-network-test.ps1 -Gallery -PredictionTest`.
+After three seconds of client readiness it injects five client-only native hits:
+freeze, gib death, two armor losses and nonlethal damage. The unchanged host
+must restore all48 living original forms with zero faults. Logs expose
+`MONSTER_PREDICTION` started/confirmed/corrected counters and per-ID
+presentation/prediction fields; `MONSTER_PREDICTION_TEST hits=1` means the
+native action helpers returned success. These helpers do not establish weapon
+collision or visual acceptance. Repeat actual weapon6, normal/gib/ice deaths,
+rapid armor hits and simultaneous shooters in the untimed gallery on both peers.
+
+Prediction validation (2026-10-10): native client-only helper hits produced all
+five provisional outcomes, then five corrections restored48 living original
+forms with zero faults. Later real weapon activity in the same session ended
+with46 deaths/two living on both peers, zero native faults and zero queue drops;
+the client recorded128 prediction batches,80 confirmations and48 corrections.
+Those counters include accumulated HP and corrections, not just kills. There
+is no human visual acceptance yet. The subsequent native Forms run again
+reached40 living/eight dead on both peers with zero faults. Managed cleanup
+acknowledged hook removal on both peers. Mock regressions cover effect dedup,
+repeated successor hits, freeze-to-ice and armor-to-death before host form
+confirmation, mismatched outcomes, stale old-form attacks and expiry/stop.
+That run preceded the custom large armor fragments. A subsequent full build and
+all tests passed with the custom effect. Native `-Gallery -Forms` checks showed
+14 large armor fragments on each peer, the normal80 successor with200 HP,
+then40 living/eight dead with zero faults. A client-only `-PredictionTest`
+showed14 provisional large armor fragments, then removed them on rejection;
+all48 original forms were restored with five corrections and zero faults.
+Both sessions acknowledged clean hook removal. Actual weapon appearance and
+timing still require human visual acceptance in the untimed gallery.

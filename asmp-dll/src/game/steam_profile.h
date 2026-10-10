@@ -58,10 +58,13 @@
 #define STEAM_VID_RESOURCE_FLAGS_OFFSET 0x47Cu
 #define STEAM_VID_SPECIAL_FACTORY_FLAG 0x10u
 #define STEAM_ACT_DAMAGE 85u
+#define STEAM_ACT_SET_ANIMATION 15u
 #define STEAM_ACT_SET_HP 88u
 #define STEAM_ACT_GET_HP 87u
 #define STEAM_ANIM_ATTACK 8u
 #define STEAM_ACT_USE_AMMO 0x5Du
+/* Native SPRITE CHANGE_VID: a=table index, b=animation (-1 keeps current). */
+#define STEAM_ACT_CHANGE_VID 0x3Eu
 #define STEAM_ANIM_DEATH 15u
 #define STEAM_ANIM_GIB_DEATH 16u
 /* REA death graph: CANNON (class5) and BUILDED_TERRAIN (class8), both
@@ -134,6 +137,10 @@
 #define STEAM_LIST_SIZE 0x10u
 #define STEAM_VID_CLASS_OFFSET 0x10u
 #define STEAM_VID_BEHAVIOR_OFFSET 0x45Cu
+/* Loaded MAP behavior table records: loader 43DE61 uses stride 0x264.
+   UNIT constructor reads the command/AI flags at behavior+0x30. */
+#define STEAM_BEHAVIOR_SIZE 0x264u
+#define STEAM_BEHAVIOR_UNIT_FLAGS_OFFSET 0x30u
 #define STEAM_VID_CATEGORY_OFFSET 0x38Cu
 #define STEAM_VID_COUNTERS_OFFSET 0x3A8u
 #define STEAM_VID_COUNTERS_SIZE 0x30u
