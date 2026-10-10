@@ -42,6 +42,7 @@ typedef struct MonsterEvent {
 void state_client_monster_claim(StateClient*);
 int state_client_monster_authority(const StateClient*, uint32_t*, uint32_t*, int*);
 int state_client_publish_monster(StateClient*, const MpMonsterState*, unsigned long now);
+int state_client_monster_at(const StateClient*, unsigned int slot, unsigned long now, MonsterState*);
 int state_client_monster(const StateClient*, unsigned long now, MonsterState*);
 int state_client_send_monster_event(StateClient*, const MpMonsterEvent*, unsigned long now);
 int state_client_take_monster_event(StateClient*, MonsterEvent*);

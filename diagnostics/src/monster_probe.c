@@ -17,18 +17,26 @@ static struct {
     int ui, world, hooks, applied, animated;
     enum MonsterProbeKind kind;
     int combat_initialized, combat_spawned, damage_blocked, attack_seen, death_seen, player_health;
+    int visual_initialized, visual_stage;
+    DWORD visual_at;
+    unsigned int corpse_seen, gibs_seen;
 } probe;
+static int combat_mode(void) { return probe.kind == MONSTER_PROBE_COMBAT || probe.kind == MONSTER_PROBE_DEATH; }
 int monster_probe_enable_kind(uintptr_t base, enum MonsterProbeKind kind) {
     if (probe.ui || probe.world || probe.hooks || probe.combat_initialized) return 0;
     memset(&probe, 0, sizeof(probe));
     UnitPuppetEngine api;
-    if (kind != MONSTER_PROBE_GROUND && kind != MONSTER_PROBE_FLYING && kind != MONSTER_PROBE_FLYING_RELOAD && kind != MONSTER_PROBE_COMBAT) return 0;
+    if (kind != MONSTER_PROBE_GROUND && kind != MONSTER_PROBE_FLYING && kind != MONSTER_PROBE_FLYING_RELOAD && kind != MONSTER_PROBE_COMBAT && kind != MONSTER_PROBE_DEATH) return 0;
     if (!unit_puppet_bind(base, &api)) return 0;
     probe.kind = kind;
-    if (kind == MONSTER_PROBE_COMBAT) {
+    if (combat_mode()) {
         ActorCreate create;
         if (!unit_combat_bind(base, &create) || !unit_combat_init(base, create, api.destroy, api.animation)) return 0;
         probe.combat_initialized = 1;
+        if (kind == MONSTER_PROBE_DEATH) {
+            if (!unit_death_init(base, create)) { monster_probe_stop(); return 0; }
+            probe.visual_initialized = 1;
+        }
     }
     probe.ui = ui_bind(base);
     if (!probe.ui) { monster_probe_stop(); return 0; }
@@ -43,8 +51,29 @@ int monster_probe_enable(uintptr_t base) { return monster_probe_enable_kind(base
 static void finish(MonsterProbeFrame* f, uintptr_t game, int failed) {
     f->cleanup = unit_puppet_release(game);
     if (probe.combat_initialized && !unit_combat_remove(game)) f->cleanup = 0;
+    if (probe.visual_initialized && !unit_death_remove(game)) f->cleanup = 0;
     probe.state = failed || !f->cleanup ? MONSTER_PROBE_FAILED : MONSTER_PROBE_DONE;
     f->state = probe.state; f->event = 1;
+}
+static void visual_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now) {
+    f->visual = unit_death_sample(local->game); f->phase = 6u + (unsigned int)probe.visual_stage;
+    if (f->visual.corpses) probe.corpse_seen = 1;
+    if (f->visual.gibs > probe.gibs_seen) probe.gibs_seen = f->visual.gibs;
+    if (f->visual.fault || local->health != probe.player_health) {
+        ++probe.violations; finish(f, local->game, 1); return;
+    }
+    if (probe.visual_stage == 1 && now - probe.visual_at >= 3000u) {
+        if (!probe.corpse_seen || !unit_death_remove(local->game) ||
+            unit_death_play(local->game, &probe.anchor, STEAM_ANIM_GIB_DEATH) != 1) {
+            ++probe.violations; finish(f, local->game, 1); return;
+        }
+        probe.visual_stage = 2; probe.visual_at = now; f->event = 1;
+    } else if (probe.visual_stage == 2 && now - probe.visual_at >= 15000u) {
+        if (probe.gibs_seen < 8u) ++probe.violations;
+        finish(f, local->game, probe.violations != 0);
+    }
+    f->violations = probe.violations;
+    if (now - probe.last_log >= 100u) { f->event = 1; probe.last_log = now; }
 }
 static void combat_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now) {
     DWORD elapsed = now - probe.entered;
@@ -94,6 +123,13 @@ static void combat_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now) 
     } else if (phase == MONSTER_COMBAT_DEATH && !f->combat.private_entities) {
         f->phase = MONSTER_COMBAT_DISPOSED; f->violations = probe.violations;
         f->damage_blocked = probe.damage_blocked;
+        if (probe.kind == MONSTER_PROBE_DEATH && !probe.violations) {
+            if (!unit_puppet_release(local->game) || !unit_combat_remove(local->game) ||
+                unit_death_play(local->game, &probe.anchor, STEAM_ANIM_DEATH) != 1) {
+                ++probe.violations; finish(f, local->game, 1); return;
+            }
+            probe.visual_stage = 1; probe.visual_at = now; f->event = 1; return;
+        }
         finish(f, local->game, probe.violations || !probe.death_seen || f->unit.replayed != 2u || f->unit.duplicates != 2u);
         return;
     }
@@ -118,7 +154,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
     if (probe.state == MONSTER_PROBE_SEARCH) {
         if (now - probe.entered > 45000u) { finish(&f, local->game, 1); return f; }
         if (result != PROBE_OK || !local->in_level || local->health <= 0) return f;
-        if (probe.kind == MONSTER_PROBE_COMBAT && !probe.combat_spawned) {
+        if (combat_mode() && !probe.combat_spawned) {
             /* load_map can expose the player before the first full world tick
                removes temporary map objects and finishes player initialization. */
             if (!probe.combat_world_ready) probe.combat_world_ready = now;
@@ -139,7 +175,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
             probe.anchor.z = captured.z;
         }
         probe.anchor.direction = local->direction;
-        if (probe.kind == MONSTER_PROBE_COMBAT) {
+        if (combat_mode()) {
             UnitCombatSample combat = unit_combat_sample(local->game, 1);
             UnitPuppetSample captured = unit_puppet_sample(local->game);
             if (captured.entity != combat.root) { finish(&f, local->game, 1); return f; }
@@ -153,8 +189,9 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
     if (f.unit.frame_last > f.unit.frame_first || f.unit.child_frame_last > f.unit.child_frame_first) probe.animated = 1;
     if (local->game != probe.game || !local->in_level || local->world_low != probe.low ||
         local->world_high != probe.high || world_hook_generation() != probe.epoch || result != PROBE_OK || local->health <= 0 ||
-        (probe.kind != MONSTER_PROBE_COMBAT && f.unit.state != UNIT_PUPPET_ACTIVE)) { finish(&f, local->game, 1); return f; }
-    if (probe.kind == MONSTER_PROBE_COMBAT) { combat_tick(&f, local, now); return f; }
+        (!combat_mode() && f.unit.state != UNIT_PUPPET_ACTIVE)) { finish(&f, local->game, 1); return f; }
+    if (probe.visual_stage) { visual_tick(&f, local, now); return f; }
+    if (combat_mode()) { combat_tick(&f, local, now); return f; }
     /* Observe BEFORE applying the next host pose. Overwriting first would hide
        native drift, random steering or StopMove between snapshots. */
     if (probe.applied && (f.unit.behavior || f.unit.goal || f.unit.command || f.unit.stack ||
@@ -194,6 +231,8 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
     probe.phase = f.phase = phase; f.violations = probe.violations; f.state = probe.state; return f;
 }
 int monster_probe_stop(void) {
+    if (probe.visual_initialized && !unit_death_stop()) return 0;
+    probe.visual_initialized = 0;
     if (probe.combat_initialized && !unit_combat_stop()) return 0;
     probe.combat_initialized = 0;
     if (probe.hooks && !unit_puppet_stop()) return 0;

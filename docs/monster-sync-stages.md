@@ -232,6 +232,7 @@ cleanup=1`). Visual appearance remains for user acceptance.
 .\diagnostics\start-monster-network-test.ps1
 # Or automate native host death after twenty seconds of host observation:
 # .\diagnostics\start-monster-network-test.ps1 -KillAfterSeconds 20
+# .\diagnostics\start-monster-network-test.ps1 -KillAfterSeconds 20 -DeathVariant gibs
 .\diagnostics\stop-two-client-test.ps1
 ```
 
@@ -248,16 +249,33 @@ USE_AMMO actions from root/part capture attack initiation, including zero-cost
 melee; animation snapshots never create attack events. Destruction/death generates
 a separate event, and repeated absent snapshots also retain the authoritative
 death. State includes map key, host epoch, ID, VID, position, direction, movement
-intent/velocity, signed health and an event watermark. Events carry their own
-sequence, world/ID, tick and attack/death kind. Frames and timers stay native.
+intent/velocity, signed health, an event watermark and the host's death variant.
+Monster protocol v3 uses 72-byte states and 52-byte events. Events carry their
+own sequence, world/ID, tick, kind, position, direction and death variant (15/16).
+The final death pose survives deletion of the host entity. Frames and timers stay native.
 
 After the copied world settles, B creates the sanitized private VID50/108 fixture
 through the validated native factory and attaches that specific entity. Positive
 host health is applied through the native action. Local AI, damage and scripted
 gameplay effects are suppressed. Explicit attacks replay native animation8; the
-engine advances its frames and returns to idle/run. Death removes root and part
-immediately, rather than waiting for a client death animation. A death tombstone
-prevents an earlier alive snapshot from recreating the same monster.
+engine advances its frames and returns to idle/run. Death removes the combat
+root and part, then creates a separate native visual presentation once. Normal
+death uses VID51's falling animation and VID52's corpse stamp; alternate death
+uses VID910 and eight VID151 gibs. A death tombstone prevents an earlier alive
+snapshot from recreating the combat monster. A dead late join or lost event uses
+the persistent death pose/variant from state, without replaying historical attacks.
+
+`game/unit_death.*` owns nine shallow private visual descriptors. Its exact
+observed creation DAG is validated before the factory runs; all scripts, damage,
+health and unit collision masks are cleared. Art and native particle physics
+remain borrowed. Successors are separately registered map entities and are all
+tracked by private VID identity. Forced cleanup suppresses further creations,
+checks topology and dispatches only the verified class5/8/9 destructors. Native
+faults abandon after the guarded attempt; live effects expire after 30 seconds.
+Native terrain stamps remain part of the map until reload, including after mod
+stop. Buffers remain in the pinned DLL. Particle trajectories use local native
+randomness; individual gibs are not network entities. The parent's ordinary
+death cry is not replayed by this visual path.
 
 Worker networking/logging and game-thread native operations use bounded queues
 and latest-state handoffs. Captured events remain staged through lock contention;
@@ -275,7 +293,7 @@ expires after one second, on leaving the map, or on a world/session change.
 Local player death is independent of world presence. A late join establishes
 its event baseline from the initial snapshot. Attack packets use the current
 transport without delivery guarantees; a lost attack may be absent visually,
-whereas repeated dead state still removes the copy.
+whereas repeated dead state also reconstructs death presentation once.
 
 Live checklist:
 
@@ -284,8 +302,10 @@ Live checklist:
 - Host native attack captures increment `MONSTER_NETWORK attacks`; B replays
   those events with native frame progression and returns to idle/run.
 - Kill on A (or use the optional timed native death trigger): B removes both
-  private parts without resurrecting from an older alive snapshot.
-- On separate runs, late join/restart B must create only a living current copy;
+  combat parts and reproduces the host's corpse/gib variant at its final pose.
+  Neither duplicate events nor older alive snapshots recreate it.
+- On separate runs, late join/restart B must create the current living copy or
+  the dead monster's visual presentation once;
   expire/disconnect A and reload/stop must remove B's copy cleanly.
 - Stop logs `cleanup=1` and successful hook restoration on both clients.
 
@@ -293,14 +313,29 @@ The normal launcher leaves games running for observation. The stop command
 restores their survival scripts after verified cleanup; `-CloseGames` closes
 only the managed pair. `-RestartClient B` preserves the mode/map in the manifest.
 Tests: `monster-sync-test.exe`, `monster-transport-test.exe`, extended native
-watch tests, resource isolation and managed session script suites.
+watch tests, `unit-death-test.exe`, resource isolation and managed session script suites.
 
-Scope remains VID50 + one VID108, one monster in an opt-in survival test.
+Offline death validation: `start-test.ps1 -MonsterDeath` runs the isolated
+combat sequence, then normal corpse and alternate gibs, with no survival waves.
+Keep the player still for about35 seconds. `MONSTER_VISUAL` records must show a
+corpse, eight gibs, fault0, violations0 and final cleanup1. Synthetic tests do
+not establish rendering; compare both variants visually in the managed pair.
+
+Death presentation validation (2026-10-10): full server/DLL build and all suites
+pass. The offline fixture produced one animated body and eight gibs with zero
+violations and successful cleanup. Native host/client runs reproduced normal
+death and dead late join (one corpse, no living replica or historical attacks),
+then alternate death (eight client gibs, matching final host pose/direction).
+Both clients in the alternate run acknowledged cleanup1, hook restore0 and
+installed0. Final terrain-stamp rendering still awaits the user's visual check;
+allocation/lifecycle evidence is not a screenshot or visual acceptance.
+
+The ordinary single-monster mode remains VID50 + one VID108. The separately enabled death gallery below expands that fixture only.
 Client damage requests, authoritative damage to players, projectile/effect
 replication, missions, population, other compositions and host migration are
 deferred. Ordinary multiplayer launches do not enable this mode.
 
-Live result (2026-10-09): one native host UNIT50 and one sanitized client UNIT50
+Historical network checkpoint (bd635e3, 2026-10-09, before death visuals): one native host UNIT50 and one sanitized client UNIT50
 with registered VID108 parts were confirmed by read-only world inventories.
 Position, direction and HP matched; native attack frames progressed on both.
 The first pair captured29/replayed24 attacks after the client's late join and
@@ -310,3 +345,52 @@ death/removal. No queue drops or native faults occurred. A final full build and
 all suites passed, including absent-player/army world-preservation tests; the
 user confirmed the repeated two-window behavior visually. Separate live stop,
 reload and disconnection checklists are not established by these runs.
+
+## Death gallery: different types and weapons
+
+```powershell
+.\diagnostics\start-monster-network-test.ps1 -Gallery
+```
+
+This opt-in fixture creates32 stationary monsters on host A, without survival
+waves: four rows of eight copies, stock UNIT VIDs40,50,60,80 (row order follows
+increasing Y). Copies in a row increase X,80 units apart; rows are100 units apart.
+The first row starts at the player's initial X+160,Y-150. Move the camera/player
+along the rows. All weapons/ammo are granted by the multiplayer runtime.
+Use one copy for each weapon slot2..9. Fire in host A; client B displays the
+same IDs, health and deaths. Client damage requests are a separate feature.
+Neither side runs monster AI; native idle/death animation still advances.
+
+Each instance owns independent bounded native identity, replica and death state.
+The wire v3 admits IDs1..64 and these four stock types, with independent state
+and event sequences in server/client caches. Runtime publishes the current
+states as a bounded batch every player-state interval. Death effects clone that
+monster's actual CRE15/16 graph; only acyclic, bounded class5/8/9 visuals are
+admitted, all scripts/damage/collision disabled before factory. No other type's
+corpse is substituted on failure. Art resources remain borrowed and DLL-pinned.
+The effects setting may choose two or eight gibs. Each graph is limited to32
+visual VIDs and128 live effects; graph faults use the existing recovery policy.
+
+Known coverage gaps are visible test findings, not a successful result:
+weapon6 freezing changes VID to49/59/69/89 and is not replicated by the current
+15/16 death protocol. Armored types70/90 transform into another living UNIT and
+are excluded. Individual gib trajectories remain native local randomness, and
+the ordinary death cry is still absent at B. This fixture validates normal/gib
+death coverage; it does not establish freeze, armor transformations, loot or score.
+
+Logs include `MONSTER_GALLERY total=32 active=32 dead=0 faults=0` and per-ID
+`MONSTER_GALLERY_UNIT` records with VID, behavior, health, variant and effect
+counts. Kill one ID and verify B changes only that copy; try multiple simultaneous
+deaths and restart B after deaths. A kill never resurrects from older live data.
+For automated native lifecycle checks only, add `-KillAfterSeconds 25` (normal)
+or `-KillAfterSeconds 25 -DeathVariant gibs`; these use native HP actions, not
+weapon hits. Default launch leaves all32 alive for the user's weapon tests. The timed helper requires the first copy to stay alive until its timer fires; killing it early is a manual run, not an automated full-gallery result.
+Restarting a client preserves gallery mode in the managed manifest. Stop uses
+`stop-two-client-test.ps1`; copied survival scripts are restored after cleanup.
+
+Gallery validation (2026-10-10): full server/DLL build and all suites passed,
+including32 independent coordinator lifecycles and realUDP multi-ID/latejoin
+checks. Both native clients began with32 living copies and behavior0; after
+user weapon tests both reported32 deaths, zero native visual faults and zero
+shot/monster queue drops. The user confirmed the two-window result visually.
+This does not expand the freeze/armor transformation coverage described above.

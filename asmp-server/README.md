@@ -33,7 +33,15 @@ The first registered peer to claim authority owns its ID/session until the room
 is empty. Other peers cannot publish monster state or events, and reconnecting
 into the old ID does not inherit authority. There is no host migration. The
 server validates the host's current world, sequences and packet fields; it caches
-fresh state for late join, without replaying historical attacks. A dead player
-with a valid world can continue publishing monsters. The optional `ASMP_MAP`
+fresh state for late join, without replaying historical attacks.
+Monster protocol v3 carries a persistent death variant and final pose (72-byte
+state, 52-byte event); a client can recover death presentation from state alone.
+Rebuild the server and clients together when upgrading this opt-in protocol.
+A dead player with a valid world can continue publishing monsters. The optional `ASMP_MAP`
 environment variable changes the validated welcome map (default
 `maps\Level_01.map`); the managed monster test sets `maps\survive_01.map`.
+
+Gallery wire v3 retains72-byte states/52-byte events and bounds monster IDs1..64
+and stock types40/50/60/80. The relay stores latest state, expiry and event sequence
+per ID; owner/session/world guards remain shared. Late join sends the bounded
+current cache, without historical attack events. Rebuild clients and relay together.

@@ -4,6 +4,7 @@ param(
     [switch]$MonsterPuppet,
     [switch]$MonsterFlying,
     [switch]$MonsterCombat,
+    [switch]$MonsterDeath,
     [switch]$MonsterReload,
     [ValidateSet('', 'host', 'client')][string]$MonsterNetworkRole = '',
     [switch]$Multiplayer,
@@ -43,9 +44,9 @@ if ($Instance -ne 'default' -and !$RuntimeDirectory) { throw 'Pair instances req
 if (!(Get-Process steam -ErrorAction SilentlyContinue)) { throw 'Open Steam and sign in before starting the test copy.' }
 $multiplayerMode = $Multiplayer -or !!$ServerAddress
 if ($DummyActor -and $multiplayerMode) { throw 'DummyActor and multiplayer modes are mutually exclusive.' }
-$monsterMode = $MonsterPuppet -or $MonsterFlying -or $MonsterCombat
-if (@(@($MonsterPuppet, $MonsterFlying, $MonsterCombat) | Where-Object { $_ }).Count -gt 1) {
-    throw 'Choose MonsterPuppet, MonsterFlying or MonsterCombat.'
+$monsterMode = $MonsterPuppet -or $MonsterFlying -or $MonsterCombat -or $MonsterDeath
+if (@(@($MonsterPuppet, $MonsterFlying, $MonsterCombat, $MonsterDeath) | Where-Object { $_ }).Count -gt 1) {
+    throw 'Choose MonsterPuppet, MonsterFlying, MonsterCombat or MonsterDeath.'
 }
 if ($MonsterReload -and !$MonsterFlying) { throw 'MonsterReload requires MonsterFlying.' }
 if ($MonsterNetworkRole) {
@@ -71,9 +72,9 @@ $backup = Join-Path $gameDirectory 'asmp-menu-backup'
 $survivalScript = Join-Path $maps 'survive_01.lgc'
 $monsterBackup = Join-Path $gameDirectory 'asmp-monster-backup'
 $savedSurvival = Join-Path $monsterBackup 'survive_01.lgc'
-if ($MonsterFlying -or $MonsterCombat -or $MonsterNetworkRole) {
-    $monsterScriptName = if ($MonsterNetworkRole -eq 'host') { 'monster-host.lgc' }
-        elseif ($MonsterCombat -or $MonsterNetworkRole -eq 'client') { 'monster-combat.lgc' } else { 'monster-flying.lgc' }
+if ($MonsterFlying -or $MonsterCombat -or $MonsterDeath -or $MonsterNetworkRole) {
+    $monsterScriptName = if ($MonsterNetworkRole -eq 'host' -and $env:ASMP_DIAG_MONSTER_GALLERY -ne '1') { 'monster-host.lgc' }
+        elseif ($MonsterCombat -or $MonsterDeath -or $MonsterNetworkRole) { 'monster-combat.lgc' } else { 'monster-flying.lgc' }
     $monsterScriptSource = Join-Path $PSScriptRoot $monsterScriptName
     if (!(Test-Path -LiteralPath (Join-Path $maps 'survive_01.map') -PathType Leaf) -or
         !(Test-Path -LiteralPath $survivalScript -PathType Leaf) -or
@@ -145,7 +146,7 @@ try {
     $env:ASMP_LAUNCH_RESULT = $LaunchResultPath
     $env:ASMP_DIAG_MULTIPLAYER = if ($multiplayerMode) { '1' } else { '' }
     $env:ASMP_DIAG_DUMMY = if ($DummyActor) { '1' } else { '' }
-    $env:ASMP_DIAG_MONSTER = if ($MonsterCombat) { '4' } elseif ($MonsterReload) { '3' } elseif ($MonsterFlying) { '2' } elseif ($MonsterPuppet) { '1' } else { '' }
+    $env:ASMP_DIAG_MONSTER = if ($MonsterDeath) { '5' } elseif ($MonsterCombat) { '4' } elseif ($MonsterReload) { '3' } elseif ($MonsterFlying) { '2' } elseif ($MonsterPuppet) { '1' } else { '' }
     $env:ASMP_DIAG_MONSTER_NETWORK = $MonsterNetworkRole
     $launchArguments = @($game, (Join-Path $runtime 'asmp-diag.dll'))
     if (!$Fullscreen) { $launchArguments += @("$Width", "$Height") }
@@ -165,8 +166,9 @@ elseif ($Multiplayer) { Write-Output 'Open Multiplayer in the main menu; enter a
 elseif ($MonsterPuppet) { Write-Output 'Monster stage 1: survival loads automatically. One ground UNIT (optionally with one class-9 weapon part) follows a 30-second idle/run/stop/turn sequence near the player. Keep the player alive; inspect MONSTER records in the log. This mode changes that one monster, then restores native AI.' }
 elseif ($MonsterFlying) { Write-Output 'Monster stage 2: survival loads with one flying UNIT drone (VID290) and no waves. Observe its 30-second idle/run/stop/turn sequence at native altitude. The stock survival script is backed up and restored on the next other-mode launch.' }
 elseif ($MonsterCombat) { Write-Output 'Monster combat test: survival loads without waves. The diagnostic module creates one private ground UNIT (VID50 plus VID108), replays attack and death with AI and gameplay side effects suppressed, then checks native removal. The stock survival script is backed up and restored on the next other-mode launch.' }
+elseif ($MonsterDeath) { Write-Output 'Monster death test: isolated combat sequence, then normal corpse and eight native gibs. Leave the player still for 35 seconds; inspect MONSTER_VISUAL records.' }
 else { Write-Output 'Start a campaign or survival level for the read-only diagnostics.' }
-if ($MonsterCombat) { Write-Output "Observe without firing or moving for the first 20 seconds: idle, blocked damage, one attack, then death. Logs: $runtime\logs\asmp-diag-<PID>.log" }
+if ($MonsterCombat -or $MonsterDeath) { Write-Output "Observe without firing or moving: idle, blocked damage, attack and death. Logs: $runtime\logs\asmp-diag-<PID>.log" }
 else { Write-Output "Combat check: fire, switch weapons, collect ammo, take damage and heal. Logs: $runtime\logs\asmp-diag-<PID>.log" }
 if ($DummyActor) { Write-Output 'Dummy test: enter a level, walk and turn. A second actor appears after 2 seconds, follows with an X offset of 80 and is removed after 60 seconds.' }
 if ($MonsterReload) { Write-Output 'Separate cleanup case: reloads the same map once after 10 seconds, then releases control. Expect MONSTER_RELOAD completed cleanup=1; this is not a full phase-6 pass.' }

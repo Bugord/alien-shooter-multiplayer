@@ -1,6 +1,7 @@
 # Starts the local relay and two isolated real game clients, or restarts one exited client.
 param(
     [switch]$MonsterNetwork,
+    [switch]$MonsterGallery,
     [ValidateRange(1, 65535)][int]$Port = 27020,
     [ValidateLength(1, 15)][string]$NameA = 'LocalA',
     [ValidateLength(1, 15)][string]$NameB = 'LocalB',
@@ -8,6 +9,7 @@ param(
     [ValidateRange(5, 600)][int]$TimeoutSeconds = 90
 )
 $ErrorActionPreference = 'Stop'
+if ($MonsterGallery -and !$MonsterNetwork) { throw 'MonsterGallery requires MonsterNetwork.' }
 . (Join-Path $PSScriptRoot 'test-session.ps1')
 . (Join-Path $PSScriptRoot 'two-client.ps1')
 $orchestrationLock = Enter-TwoClientLock
@@ -19,6 +21,7 @@ try {
     $existing = Read-TwoClientManifest
     if ($RestartClient) {
         if (!$existing -or $existing.state -in @('stopped', 'failed')) { throw 'No running session to restart a client in. Start a new one first.' }
+        if ($MonsterGallery -and !$existing.monsterGallery) { throw 'Start a new gallery pair to change modes.' }
         if ($MonsterNetwork -and $existing.mode -ne 'monster') { throw 'The recorded session is not a monster test; start a new pair to change modes.' }
         if ((Get-EntryState $existing.server) -ne 'match') { throw 'The session server is not running; stop and start the pair again.' }
         if ($RestartClient -eq 'B' -and $existing.mode -eq 'monster' -and
@@ -70,6 +73,7 @@ try {
         state = 'starting'
         address = '127.0.0.1'
         port = $Port
+        monsterGallery = [bool]$MonsterGallery
         mode = $(if ($MonsterNetwork) { 'monster' } else { 'players' })
         map = $(if ($MonsterNetwork) { 'maps\survive_01.map' } else { 'maps\Level_01.map' })
         dllSha256 = $pair.DllSha256

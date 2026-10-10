@@ -8,6 +8,9 @@ static unsigned char game[0x2000], root[0x94], part[0x94], unrelated[0x94], extr
 static unsigned char source[STEAM_VID_SIZE], part_source[STEAM_VID_SIZE];
 static unsigned char original_source[STEAM_VID_SIZE], original_part[STEAM_VID_SIZE];
 static uintptr_t entries[STEAM_TICK_ENTITY_LIST_COUNT][4], image_base;
+static unsigned char gallery_root[2][0x94], gallery_part[0x94], gallery_sources[2][STEAM_VID_SIZE];
+static unsigned int gallery_created, gallery_destroyed;
+static int gallery_error;
 static unsigned int factory_calls, destroy_calls, roots_destroyed, parts_destroyed, animation_calls;
 static int factory_violation, destroy_fault;
 static enum FactoryMode factory_mode;
@@ -47,6 +50,44 @@ static int inert_descriptor(const unsigned char* vid) {
         *(const int*)(vid + STEAM_VID_DELETE_SCRIPT_OFFSET) == -1 &&
         *(const int*)(vid + STEAM_VID_DAMAGE_SCRIPT_OFFSET) == -1 &&
         *(const int*)(vid + STEAM_VID_COLLISION_SCRIPT_OFFSET) == -1;
+}
+static void* __fastcall gallery_create(void* world, void* unused, void* descriptor,
+    float x, float y, float z, int direction, void* owner) {
+    (void)unused;
+    unsigned int slot = gallery_created++;
+    if (slot >= 2u) { gallery_error = 1; return NULL; }
+    unsigned char* v = descriptor;
+    unsigned char* linked = *(unsigned char**)(v + STEAM_VID_LINKED_OFFSET);
+    if (world != game || owner || x != (float)(300u + slot * 100u) || y != 400.0f || z || direction != 80)
+        gallery_error = 1;
+    if (slot == 0u) {
+        if (linked || !inert_descriptor(v)) gallery_error = 1;
+    } else {
+        if (!linked || *(uintptr_t*)(v + STEAM_VID_CREATIONS_OFFSET + STEAM_ANIM_DEATH * 4u) != 0x1111u ||
+            *(uintptr_t*)(v + STEAM_VID_CREATIONS_OFFSET + STEAM_ANIM_GIB_DEATH * 4u) != 0x2222u ||
+            *(int*)(v + STEAM_VID_DAMAGE_OFFSET) ||
+            *(int*)(v + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + STEAM_ANIM_DEATH * 4u) != -1 ||
+            *(uintptr_t*)(v + STEAM_VID_CREATIONS_OFFSET + 14u * 4u)) gallery_error = 1;
+    }
+    unsigned char* entity = gallery_root[slot]; memset(entity, 0, 0x94);
+    *(uintptr_t*)entity = image_base + STEAM_UNIT_VTABLE_RVA;
+    *(uintptr_t*)(entity + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)v;
+    if (linked) {
+        memset(gallery_part, 0, sizeof(gallery_part));
+        *(uintptr_t*)gallery_part = image_base + STEAM_SPRITE_VTABLE_RVA;
+        *(uintptr_t*)(gallery_part + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)linked;
+        *(uintptr_t*)(gallery_part + STEAM_ENTITY_PARENT_OFFSET) = (uintptr_t)entity;
+        *(uintptr_t*)(entity + STEAM_ENTITY_CHILD_OFFSET) = (uintptr_t)gallery_part;
+        add_entity(4u, gallery_part);
+    }
+    add_entity(5u, entity); return entity;
+}
+static void* __fastcall gallery_destroy(void* entity, void* unused, int release) {
+    (void)unused; if (release != 1) gallery_error = 1;
+    ++gallery_destroyed;
+    uintptr_t linked = *(uintptr_t*)((unsigned char*)entity + STEAM_ENTITY_CHILD_OFFSET);
+    if (linked) unregister_entity(linked);
+    unregister_entity((uintptr_t)entity); return entity;
 }
 static void* __fastcall create(void* world, void* unused, void* descriptor,
     float x, float y, float z, int direction, void* owner) {
@@ -253,6 +294,37 @@ int main(void) {
     CHECK(unit_combat_remove((uintptr_t)game) && destroy_calls == 1 && unit_combat_stop());
     local = prepare();
     CHECK(unit_combat_init(image_base, create, destroy, animation) && unit_combat_stop());
+    /* Two different compositions coexist with one shared factory binding.
+       A host clone preserves death CRE while all pre-death creation is inert. */
+    local = prepare();
+    memcpy(gallery_sources[0], source, STEAM_VID_SIZE);
+    memcpy(gallery_sources[1], source, STEAM_VID_SIZE);
+    *(unsigned int*)(gallery_sources[0] + STEAM_VID_INDEX_OFFSET) = 40u;
+    *(unsigned int*)(gallery_sources[1] + STEAM_VID_INDEX_OFFSET) = 80u;
+    *(uintptr_t*)(gallery_sources[0] + STEAM_VID_LINKED_OFFSET) = 0;
+    *(uintptr_t*)(gallery_sources[1] + STEAM_VID_CREATIONS_OFFSET + STEAM_ANIM_DEATH * 4u) = 0x1111u;
+    *(uintptr_t*)(gallery_sources[1] + STEAM_VID_CREATIONS_OFFSET + STEAM_ANIM_GIB_DEATH * 4u) = 0x2222u;
+    *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 40u * 4u) = (uintptr_t)gallery_sources[0];
+    *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 80u * 4u) = (uintptr_t)gallery_sources[1];
+    gallery_created = gallery_destroyed = 0; gallery_error = 0;
+    CHECK(unit_combat_init(image_base, gallery_create, gallery_destroy, animation));
+    UnitPuppetPose gallery_pose = {300.0f, 400.0f, 0, 0, 80u, 0};
+    CHECK(unit_combat_spawn_type(&local, 40u, &gallery_pose, 0) == 1);
+    CHECK(unit_combat_sample((uintptr_t)game, 1).private_entities == 1u);
+    CHECK(unit_combat_select(1)); gallery_pose.x = 400.0f;
+    CHECK(unit_combat_spawn_type(&local, 80u, &gallery_pose, 1) == 1);
+    CHECK(unit_combat_sample((uintptr_t)game, 1).private_entities == 2u);
+    CHECK(!unit_combat_sample((uintptr_t)game, 1).unexpected_entities);
+    CHECK(!unit_combat_select(UNIT_COMBAT_CAPACITY));
+    CHECK(unit_combat_sample((uintptr_t)game, 1).root == (uintptr_t)gallery_root[1]);
+    CHECK(unit_combat_select(0));
+    CHECK(!unit_combat_sample((uintptr_t)game, 1).unexpected_entities);
+    CHECK(unit_combat_sample((uintptr_t)game, 1).sources_unchanged);
+    CHECK(!unit_combat_stop() && unit_combat_remove((uintptr_t)game));
+    CHECK(!unit_combat_stop()); /* Slot1 is still owned. */
+    CHECK(unit_combat_select(1) && unit_combat_remove((uintptr_t)game));
+    CHECK(unit_combat_stop() && unit_combat_select(0));
+    CHECK(gallery_created == 2u && gallery_destroyed == 2u && !gallery_error);
     CHECK(VirtualFree((void*)image_base, 0, MEM_RELEASE));
     printf("UNIT combat private-descriptor and cleanup checks passed.\n");
     return 0;

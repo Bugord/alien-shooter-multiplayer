@@ -72,6 +72,7 @@ int runtime_start_with_bindings(uintptr_t base, const RuntimeConfig* config, con
     if (!bindings->world_install(base)) goto fail;
     runtime.stage = ST_MONSTER;
     if (config->monster_role && !monster_sync_enable(base, config->monster_role)) goto fail;
+    if (config->monster_gallery && (!config->monster_role || !monster_sync_gallery(1))) goto fail;
     runtime.stage = ST_TICK;
     if (bindings->tick_install((void* volatile*)(base + STEAM_GAME_VTABLE_RVA + STEAM_GAME_TICK_SLOT * sizeof(uintptr_t)),
         (void*)(base + STEAM_GAME_TICK_RVA), on_tick) != SLOT_OK) goto fail;
@@ -154,13 +155,17 @@ void runtime_worker_step(DWORD now) {
     if (runtime.config.monster_role) {
         uint32_t authority_id, authority_session; int is_local = 0;
         state_client_monster_authority(runtime.client, &authority_id, &authority_session, &is_local);
-        MonsterState source = {0}; state_client_monster(runtime.client, now, &source);
-        monster_sync_publish(&source, is_local, now);
+        for (unsigned int slot = 0; slot < MP_MONSTER_CAPACITY; ++slot) {
+            MonsterState source = {0}; state_client_monster_at(runtime.client, slot, now, &source);
+            monster_sync_publish_at(slot, &source, is_local, now);
+        }
         MonsterEvent event;
         while (state_client_take_monster_event(runtime.client, &event)) monster_sync_receive(&event, now);
         MpMonsterState outgoing_state;
-        if (now - runtime.monster_sent_at >= MP_STATE_SEND_MS && monster_sync_take_state(&outgoing_state)) {
-            state_client_publish_monster(runtime.client, &outgoing_state, now); runtime.monster_sent_at = now;
+        if (now - runtime.monster_sent_at >= MP_STATE_SEND_MS) {
+            for (unsigned int count = 0; count < MP_MONSTER_CAPACITY && monster_sync_take_state(&outgoing_state); ++count)
+                state_client_publish_monster(runtime.client, &outgoing_state, now);
+            runtime.monster_sent_at = now;
         }
         MpMonsterEvent outgoing_event;
         while (monster_sync_take_event(&outgoing_event)) state_client_send_monster_event(runtime.client, &outgoing_event, now);

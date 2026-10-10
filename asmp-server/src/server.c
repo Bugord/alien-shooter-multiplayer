@@ -38,10 +38,12 @@ typedef struct MpServer
     unsigned long prev_tick_time_ms;
     Player* players;
     unsigned long roster_sent_time_ms;
-    bool monster_claimed, monster_received, monster_event_received;
-    uint32_t monster_host, monster_session, monster_event_sequence;
-    MpMonsterState monster;
-    unsigned long monster_at, monster_relay_at;
+    bool monster_claimed;
+    bool monster_received[MP_MONSTER_CAPACITY], monster_event_received[MP_MONSTER_CAPACITY];
+    uint32_t monster_host, monster_session;
+    uint32_t monster_event_sequence[MP_MONSTER_CAPACITY];
+    MpMonsterState monster[MP_MONSTER_CAPACITY];
+    unsigned long monster_at[MP_MONSTER_CAPACITY], monster_relay_at;
 } MpServer;
 
 
@@ -63,15 +65,19 @@ static int monster_world_(MpServer* server, unsigned int sender, uint32_t low, u
         server->tick_time_ms - p->state_at <= MP_MONSTER_EXPIRY_MS &&
         p->latest.world_low == low && p->latest.world_high == high && p->latest.world_epoch == epoch;
 }
-static void send_monster_state_(MpServer* server, unsigned int recipient) {
-    if (!server->monster_received || server->tick_time_ms - server->monster_at > MP_MONSTER_EXPIRY_MS ||
+static void send_monster_state_(MpServer* server, unsigned int recipient, unsigned int slot) {
+    if (!server->monster_received[slot] || server->tick_time_ms - server->monster_at[slot] > MP_MONSTER_EXPIRY_MS ||
         !server->players[server->monster_host].is_connected ||
         server->players[server->monster_host].session != server->monster_session ||
-        !monster_world_(server, server->monster_host, server->monster.world_low, server->monster.world_high, server->monster.world_epoch)) return;
+        !monster_world_(server, server->monster_host, server->monster[slot].world_low, server->monster[slot].world_high, server->monster[slot].world_epoch)) return;
     uint8_t packet[MP_MONSTER_STATE_RELAY_SIZE];
     mp_put_u32(packet, server->monster_host); mp_put_u32(packet + 4, server->monster_session);
-    mp_monster_state_encode(packet + 8, &server->monster);
+    mp_monster_state_encode(packet + 8, &server->monster[slot]);
     epnet_server_send(server->ns, (uint8_t)recipient, MPT_S_MONSTER_STATE, packet, sizeof(packet));
+}
+
+static void send_all_monsters_(MpServer* server, unsigned int recipient) {
+    for (unsigned int slot = 0; slot < MP_MONSTER_CAPACITY; ++slot) send_monster_state_(server, recipient, slot);
 }
 
 static void process_hello_(MpServer* server, uint8_t sender, const char* name)
@@ -85,7 +91,7 @@ static void process_hello_(MpServer* server, uint8_t sender, const char* name)
     int length = mp_welcome_encode(welcome, sizeof(welcome), sender, server->max_clients, server->map_name);
     if (length) epnet_server_send(server->ns, sender, MPT_S_WELCOME, welcome, (size_t)length);
     send_monster_authority_(server, sender);
-    send_monster_state_(server, sender);
+    send_all_monsters_(server, sender);
     printf("Client %d is %s\n", sender, p->name);
 }
 
@@ -120,7 +126,9 @@ static void process_received_packets_(MpServer* server)
                 for (unsigned int i = 0; i < server->max_clients; ++i)
                     if (server->players[i].transport_connected) empty = false;
                 if (empty) {
-                    server->monster_claimed = server->monster_received = server->monster_event_received = false;
+                    server->monster_claimed = false;
+                    memset(server->monster_received, 0, sizeof(server->monster_received));
+                    memset(server->monster_event_received, 0, sizeof(server->monster_event_received));
                     memset(&server->monster, 0, sizeof(server->monster));
                 }
             }
@@ -153,8 +161,10 @@ static void process_received_packets_(MpServer* server)
                 if (server->monster_claimed && sender == server->monster_host && p->session == server->monster_session &&
                     (!mp_monster_world(state.world_low, state.world_high, state.world_epoch) ||
                      state.world_low != p->latest.world_low || state.world_high != p->latest.world_high ||
-                     state.world_epoch != p->latest.world_epoch))
-                    server->monster_received = server->monster_event_received = false;
+                     state.world_epoch != p->latest.world_epoch)) {
+                    memset(server->monster_received, 0, sizeof(server->monster_received));
+                    memset(server->monster_event_received, 0, sizeof(server->monster_event_received));
+                }
                 p->latest = state; p->state_at = server->tick_time_ms;
                 uint8_t relay[MP_STATE_RELAY_SIZE];
                 mp_put_u32(relay, sender);
@@ -172,7 +182,8 @@ static void process_received_packets_(MpServer* server)
                 if (length != 8 || mp_get_u32(data) != MP_MONSTER_VERSION || mp_get_u32(data + 4) != p->session) break;
                 if (!server->monster_claimed) {
                     server->monster_claimed = true; server->monster_host = sender; server->monster_session = p->session;
-                    server->monster_received = server->monster_event_received = false;
+                    memset(server->monster_received, 0, sizeof(server->monster_received));
+                    memset(server->monster_event_received, 0, sizeof(server->monster_event_received));
                     printf("Monster authority id=%u session=%u\n", sender, p->session);
                 }
                 for (unsigned int i = 0; i < server->max_clients; ++i)
@@ -185,10 +196,10 @@ static void process_received_packets_(MpServer* server)
                 if (length != MP_MONSTER_STATE_CLIENT_SIZE || !monster_owner_(server, sender, data, length) ||
                     !mp_monster_state_decode(data + 4, MP_MONSTER_STATE_SIZE, &state) ||
                     !monster_world_(server, sender, state.world_low, state.world_high, state.world_epoch) ||
-                    (server->monster_received && !mp_sequence_newer(state.sequence, server->monster.sequence))) break;
-                server->monster = state; server->monster_received = true; server->monster_at = server->tick_time_ms;
+                    (server->monster_received[state.monster_id - 1u] && !mp_sequence_newer(state.sequence, server->monster[state.monster_id - 1u].sequence))) break;
+                server->monster[state.monster_id - 1u] = state; server->monster_received[state.monster_id - 1u] = true; server->monster_at[state.monster_id - 1u] = server->tick_time_ms;
                 for (unsigned int i = 0; i < server->max_clients; ++i)
-                    if (server->players[i].is_connected) send_monster_state_(server, i);
+                    if (server->players[i].is_connected) send_monster_state_(server, i, state.monster_id - 1u);
                 break;
             }
             case MPT_C_MONSTER_EVENT:
@@ -197,12 +208,12 @@ static void process_received_packets_(MpServer* server)
                 if (length != MP_MONSTER_EVENT_CLIENT_SIZE || !monster_owner_(server, sender, data, length) ||
                     !mp_monster_event_decode(data + 4, MP_MONSTER_EVENT_SIZE, &event) ||
                     !monster_world_(server, sender, event.world_low, event.world_high, event.world_epoch) ||
-                    !server->monster_received || server->tick_time_ms - server->monster_at > MP_MONSTER_EXPIRY_MS ||
-                    event.world_low != server->monster.world_low || event.world_high != server->monster.world_high ||
-                    event.world_epoch != server->monster.world_epoch ||
-                    (event.kind == MP_MONSTER_ATTACK && !server->monster.alive) ||
-                    (server->monster_event_received && !mp_sequence_newer(event.sequence, server->monster_event_sequence))) break;
-                server->monster_event_received = true; server->monster_event_sequence = event.sequence;
+                    !server->monster_received[event.monster_id - 1u] || server->tick_time_ms - server->monster_at[event.monster_id - 1u] > MP_MONSTER_EXPIRY_MS ||
+                    event.world_low != server->monster[event.monster_id - 1u].world_low || event.world_high != server->monster[event.monster_id - 1u].world_high ||
+                    event.world_epoch != server->monster[event.monster_id - 1u].world_epoch ||
+                    (event.kind == MP_MONSTER_ATTACK && !server->monster[event.monster_id - 1u].alive) ||
+                    (server->monster_event_received[event.monster_id - 1u] && !mp_sequence_newer(event.sequence, server->monster_event_sequence[event.monster_id - 1u]))) break;
+                server->monster_event_received[event.monster_id - 1u] = true; server->monster_event_sequence[event.monster_id - 1u] = event.sequence;
                 uint8_t packet[MP_MONSTER_EVENT_RELAY_SIZE];
                 mp_put_u32(packet, sender); mp_put_u32(packet + 4, server->monster_session);
                 memcpy(packet + 8, data + 4, MP_MONSTER_EVENT_SIZE);
@@ -324,7 +335,7 @@ void mp_server_tick(MpServer* server)
     process_received_packets_(server);
     if (server->tick_time_ms - server->monster_relay_at >= 250u) {
         for (unsigned int i = 0; i < server->max_clients; ++i)
-            if (server->players[i].is_connected) send_monster_state_(server, i);
+            if (server->players[i].is_connected) send_all_monsters_(server, i);
         server->monster_relay_at = server->tick_time_ms;
     }
 

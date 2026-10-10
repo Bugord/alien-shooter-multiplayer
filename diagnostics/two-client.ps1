@@ -146,8 +146,12 @@ function Start-ManagedClient($Manifest, [string]$Role, [int]$TimeoutSeconds) {
     $game = Join-Path (Get-TestGameDirectory $instance) 'AlienShooter.exe'
     $failure = $null
     $monsterRole = if ($Manifest.mode -eq 'monster') { if ($Role -eq 'A') { 'host' } else { 'client' } } else { '' }
-    try { & $script:TwoClientOps.StartClient $instance $client.runtime $Manifest.address $Manifest.port $client.name $resultPath $monsterRole }
-    catch { $failure = $_.Exception.Message }
+    $savedGallery = $env:ASMP_DIAG_MONSTER_GALLERY
+    try {
+        $env:ASMP_DIAG_MONSTER_GALLERY = if ($Manifest.monsterGallery) { '1' } else { $null }
+        & $script:TwoClientOps.StartClient $instance $client.runtime $Manifest.address $Manifest.port $client.name $resultPath $monsterRole
+    } catch { $failure = $_.Exception.Message }
+    finally { $env:ASMP_DIAG_MONSTER_GALLERY = $savedGallery }
     $result = Read-LaunchResult $resultPath
     # Keep the identity of a created process even when a later launcher stage failed.
     if ($result -and $result.pid) {

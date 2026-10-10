@@ -18,6 +18,7 @@ static volatile LONG status = DIAG_STARTING;
 static DWORD monster_kill_delay, monster_test_started;
 static uint32_t monster_test_epoch;
 static int monster_test_triggered;
+static unsigned int monster_test_death = STEAM_ANIM_DEATH;
 static void observe_runtime(const RuntimeFrame* frame) {
     diag_tick_observe(frame);
     if (!monster_kill_delay || frame->monster.role != MONSTER_HOST || !frame->monster.unit.entity) return;
@@ -25,7 +26,12 @@ static void observe_runtime(const RuntimeFrame* frame) {
         monster_test_epoch = frame->monster.host_epoch; monster_test_started = frame->milliseconds; monster_test_triggered = 0;
     }
     if (!monster_test_triggered && frame->milliseconds - monster_test_started >= monster_kill_delay) {
-        monster_test_triggered = 1; unit_puppet_host_kill(frame->snapshot.game);
+        monster_test_triggered = 1;
+        unsigned int count = frame->monster.gallery_count ? frame->monster.gallery_count : 1u;
+        for (unsigned int slot = 0; slot < count; ++slot) {
+            unit_puppet_select(slot); unit_puppet_host_kill_variant(frame->snapshot.game, monster_test_death);
+        }
+        unit_puppet_select(0u);
     }
 }
 #pragma comment(linker, "/EXPORT:AsmpDiagGetStatus=_AsmpDiagGetStatus@0")
@@ -39,14 +45,29 @@ static void log_frame(FILE* log, const FrameSample* frame, Snapshot* last,
     const Snapshot* sample = &frame->snapshot;
     if (frame->monster_network.event) {
         const MonsterSyncFrame* m = &frame->monster_network;
+        if (m->gallery_count) {
+            fprintf(log, "# MONSTER_GALLERY role=%d total=%u active=%u dead=%u faults=%u deaths=%u cleanup=%u\n",
+                m->role, m->gallery_count, m->gallery_active, m->gallery_dead, m->gallery_faults, m->deaths, m->cleanup);
+            for (unsigned int i = 0; i < m->gallery_count; ++i) {
+                const MonsterGallerySample* row = &m->gallery[i];
+                fprintf(log, "# MONSTER_GALLERY_UNIT id=%u vid=%u state=%d entity=%08lX health=%d anim=%u behavior=%u death=%u x=%.3f y=%.3f effects=%u fault=%d\n",
+                    row->id, row->vid, row->state, (unsigned long)row->entity, row->health, row->animation, row->behavior,
+                    row->death_animation, row->x, row->y, row->effects, row->fault);
+            }
+        }
         fprintf(log, "# MONSTER_NETWORK role=%d state=%d id=%u epoch=%u entity=%08lX x=%.3f y=%.3f z=%.3f direction=%u moving=%u health=%d anim=%u native_frames=%u behavior=%u attacks=%u deaths=%u dropped=%u rejected=%u cleanup=%u\n",
             m->role, m->state, m->monster_id, m->host_epoch, (unsigned long)m->unit.entity,
             m->unit.x, m->unit.y, m->unit.z, m->unit.direction, m->unit.moving, m->unit.health,
             m->unit.animation, m->unit.frame_changes, m->unit.behavior, m->attacks, m->deaths,
             m->dropped, m->rejected, m->cleanup);
+        fprintf(log, "# MONSTER_DEATH animation=%u x=%.3f y=%.3f z=%.3f direction=%u effects=%u corpses=%u gibs=%u fault=%d\n",
+            m->death_animation, m->death_pose.x, m->death_pose.y, m->death_pose.z, m->death_pose.direction,
+            m->visual.entities, m->visual.corpses, m->visual.gibs, m->visual.fault);
     }
     if (frame->monster.event) {
         const MonsterProbeFrame* m = &frame->monster;
+        fprintf(log, "# MONSTER_VISUAL phase=%u effects=%u corpses=%u gibs=%u fault=%d\n",
+            m->phase, m->visual.entities, m->visual.corpses, m->visual.gibs, m->visual.fault);
         const UnitPuppetSample* u = &m->unit;
         fprintf(log, "# MONSTER state=%d phase=%u cleanup=%d entity=%08lX vid=%u class=%u anim=%u frame=%u frame_changes=%u decisions=%u movements=%u blocked=%u violations=%u behavior=%u goal=%08lX command=%u stack=%u moving=%u direction=%u velocity=%.5f x=%.2f y=%.2f z=%.2f child=%08lX child_goal=%08lX child_command=%u child_stack=%u\n",
             m->state, m->phase, m->cleanup, (unsigned long)u->entity, u->vid, u->class_id, u->animation, u->frame,
@@ -182,8 +203,8 @@ static DWORD WINAPI run(LPVOID unused)
     int multiplayer_enabled = host_length || (multiplayer_length == 1 && multiplayer_option[0] == '1');
     char monster_option[8] = {0};
     DWORD monster_length = GetEnvironmentVariableA("ASMP_DIAG_MONSTER", monster_option, sizeof(monster_option));
-    int monster_enabled = monster_length == 1 && monster_option[0] >= '1' && monster_option[0] <= '4';
-    enum MonsterProbeKind monster_kind = monster_option[0] == '4' ? MONSTER_PROBE_COMBAT : monster_option[0] == '3' ? MONSTER_PROBE_FLYING_RELOAD :
+    int monster_enabled = monster_length == 1 && monster_option[0] >= '1' && monster_option[0] <= '5';
+    enum MonsterProbeKind monster_kind = monster_option[0] == '5' ? MONSTER_PROBE_DEATH : monster_option[0] == '4' ? MONSTER_PROBE_COMBAT : monster_option[0] == '3' ? MONSTER_PROBE_FLYING_RELOAD :
         (monster_option[0] == '2' ? MONSTER_PROBE_FLYING : MONSTER_PROBE_GROUND);
     if (monster_enabled && (dummy_enabled || multiplayer_enabled)) { fprintf(log, "ERROR monster experiment is offline and exclusive\n"); goto fail; }
     if (dummy_enabled && multiplayer_enabled) { fprintf(log, "ERROR dummy and multiplayer are mutually exclusive\n"); goto fail; }
@@ -195,7 +216,11 @@ static DWORD WINAPI run(LPVOID unused)
                 fprintf(log, "ERROR invalid monster network role or no direct connection\n"); goto fail;
             }
             config.monster_role = !strcmp(role, "host") ? MONSTER_HOST : MONSTER_CLIENT;
+            char gallery_option[4] = {0};
+            config.monster_gallery = GetEnvironmentVariableA("ASMP_DIAG_MONSTER_GALLERY", gallery_option, sizeof(gallery_option)) == 1u && gallery_option[0] == '1';
             char delay[16] = {0}; DWORD length = GetEnvironmentVariableA("ASMP_DIAG_MONSTER_KILL_AFTER", delay, sizeof(delay));
+            char variant[16] = {0}; GetEnvironmentVariableA("ASMP_DIAG_MONSTER_DEATH_VARIANT", variant, sizeof(variant));
+            if (!strcmp(variant, "gibs")) monster_test_death = STEAM_ANIM_GIB_DEATH;
             if (length) {
                 char* end; unsigned long seconds = strtoul(delay, &end, 10);
                 if (length >= sizeof(delay) || *end || seconds < 5u || seconds > 120u) {
@@ -230,10 +255,11 @@ static DWORD WINAPI run(LPVOID unused)
         monster_attempted = 1;
         if (!diag_tick_enable_monster_kind(base, monster_kind)) { fprintf(log, "REJECTED monster bindings/hooks\n"); goto fail; }
         fprintf(log, "# MONSTER enabled stage=%u auto_map=%s duration=%s\n",
-            monster_kind == MONSTER_PROBE_COMBAT ? 3u : monster_kind != MONSTER_PROBE_GROUND ? 2u : 1u,
-            monster_kind == MONSTER_PROBE_COMBAT ? "maps/survive_01.map waves=off private_UNIT_vid50 combat_visual_only" :
+            monster_kind == MONSTER_PROBE_DEATH ? 4u : monster_kind == MONSTER_PROBE_COMBAT ? 3u : monster_kind != MONSTER_PROBE_GROUND ? 2u : 1u,
+            monster_kind == MONSTER_PROBE_DEATH ? "maps/survive_01.map waves=off corpse_and_gibs" :
+                monster_kind == MONSTER_PROBE_COMBAT ? "maps/survive_01.map waves=off private_UNIT_vid50 combat_visual_only" :
                 monster_kind != MONSTER_PROBE_GROUND ? "maps/survive_01.map waves=off flying_UNIT_vid290" : "maps/survive_01.map UNIT",
-            monster_kind == MONSTER_PROBE_COMBAT ? "up_to_20s_after_world_settles" : "30s");
+            monster_kind == MONSTER_PROBE_DEATH ? "up_to_35s_after_world_settles" : monster_kind == MONSTER_PROBE_COMBAT ? "up_to_20s_after_world_settles" : "30s");
         if (monster_kind == MONSTER_PROBE_FLYING_RELOAD) fprintf(log, "# MONSTER reload_check=1 after_seconds=10\n");
     }
     if (!multiplayer_enabled) {

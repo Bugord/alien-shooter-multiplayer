@@ -23,6 +23,7 @@ typedef void (*FrameObserver)(const RuntimeFrame*);
 typedef struct RuntimeConfig {
     int direct;
     enum MonsterRole monster_role;
+    int monster_gallery;
     char host[16], name[16];
     unsigned short port;
     FILE* log; /* Worker only; remains open through stop. */

@@ -1,6 +1,9 @@
 #ifndef ASMP_UNIT_PUPPET_H
 #define ASMP_UNIT_PUPPET_H
 #include "actor.h"
+#define UNIT_PUPPET_CAPACITY 64u
+/* Game-thread selection; hooks route by identity and restore caller selection. */
+int unit_puppet_select(unsigned int slot);
 
 typedef void (__fastcall* UnitMovement)(void*, void*);
 typedef void (__fastcall* UnitAnimation)(void*, void*, unsigned int);
@@ -31,9 +34,11 @@ typedef struct UnitPuppetSample {
     unsigned int attack_frame_changes;
     int health;
     unsigned int captured_attacks, captured_deaths;
+    unsigned int death_animation;
+    UnitPuppetPose death_pose;
 } UnitPuppetSample;
 
-/* Single borrowed class-2 UNIT, optionally one linked class-9 part.
+/* Each selected slot borrows one class-2 UNIT, optionally one class-9 part.
    Longer/different child chains are rejected. No allocation, VID editing or entity
    deletion. Game thread owns attach/apply/sample/release and every callback.
    Install before ticking; stop ONLY after game-thread release is acknowledged.
@@ -49,10 +54,14 @@ int unit_puppet_attach_first(uintptr_t game, uintptr_t player);
    Only the scoped stock VID50 is accepted. Captures native USE_AMMO attack
    initiation (including a zero-cost melee attack), never inferred snapshots. */
 int unit_puppet_watch_first(uintptr_t game, uintptr_t player);
+int unit_puppet_watch_entity(uintptr_t game, uintptr_t player, uintptr_t entity);
+/* Freeze AI/motion while preserving native incoming damage and death. */
+int unit_puppet_watch_stationary(uintptr_t game, uintptr_t player, uintptr_t entity);
 int unit_puppet_attach_entity(uintptr_t game, uintptr_t player, uintptr_t entity);
 int unit_puppet_health(uintptr_t game, int health);
 /* Diagnostic host death trigger through the ordinary native SET_HP action. */
 int unit_puppet_host_kill(uintptr_t game);
+int unit_puppet_host_kill_variant(uintptr_t game, unsigned int animation);
 int unit_puppet_apply(uintptr_t game, const UnitPuppetPose*);
 /* Only sanitized private root/part descriptors are accepted. Sequence is local
    to this attached entity. Attack is visual only; death uses native SET_HP. */

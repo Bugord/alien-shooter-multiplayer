@@ -349,11 +349,21 @@ managed manifest, including `-RestartClient B`. Stop restores copied survival
 scripts after verified cleanup; original Steam assets stay untouched.
 
 For the automated native death check, start with `-KillAfterSeconds 20` (5..120).
+Add `-DeathVariant gibs` to request native overkill and the alternate death.
 This requests native death on the host after the observation interval; normal
 launches leave the monster alive. Observe movement/turning/attack in both windows,
-then kill it on A. B must remove both parts. Client shots do not yet forward
+then kill it on A. B must remove both combat parts and show the host's corpse or
+eight-gib variant at the death position. A late join reconstructs dead presentation
+once from state. Particle trajectories use local native randomness. Client shots do not yet forward
 damage to the host. See [Monster checkpoints](../docs/monster-sync-stages.md)
 for detailed limits and acceptance counters.
+
+`start-test.ps1 -MonsterDeath` runs the offline fixture first, then normal corpse
+and alternate gibs without waves. Leave the player still for about35 seconds.
+`MONSTER_VISUAL` records expose corpse/gib counts, native faults and final cleanup.
+The private visual graph disables scripts, health, damage and unit collisions.
+Transient effects are removed on expiry/stop/world change; native terrain stamps
+remain in the map until reload. The ordinary parent death cry is not replayed.
 
 The build runs synthetic layout/probe and actor lifecycle checks; update-hook
 ABI, queue overflow, concurrency and restoration checks; actual-DLL rejection
@@ -375,3 +385,10 @@ merged into `develop`; `master` remains the release branch, with `release/*` and
 `hotfix/*` following Gitflow. Track code, tests, scripts and usage instructions.
 Builds, test copies, logs, reports, analysis tools, IDA databases and local history
 backups are ignored. No push or merge is part of this review preparation.
+
+Death gallery: `./diagnostics/start-monster-network-test.ps1 -Gallery` creates
+four stationary rows (VID40/50/60/80), eight copies each, without waves. Test
+weapons in host A and compare health/death at B. Weapon6 frozen-VID transformations
+are currently unsupported; see [gallery coverage](../docs/monster-sync-stages.md#death-gallery-different-types-and-weapons).
+The managed manifest preserves gallery mode when restarting B. Per-ID native
+logs are `MONSTER_GALLERY_UNIT`; aggregate readiness is active32/faults0.

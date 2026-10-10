@@ -70,7 +70,19 @@ int main(void) {
     CHECK(packet[3] == MP_MONSTER_VERSION && packet[7] == 1 && packet[27] == 50);
     CHECK(mp_monster_state_decode(packet, sizeof(packet), &decoded) && !memcmp(&decoded, &monster, sizeof(monster)));
     CHECK(!mp_monster_state_decode(packet, sizeof(packet) - 1, &decoded));
-    packet[3] = 2; CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded));
+    packet[3] = 1; CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded)); /* Reject the old wire version. */
+    mp_monster_state_encode(packet, &monster);
+    CHECK(MP_MONSTER_STATE_SIZE == 72 && !mp_monster_state_decode(packet, 68, &decoded));
+    mp_put_u32(packet + 68, 15); CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded)); /* Live state cannot request death. */
+    MpMonsterState corpse = monster; corpse.alive = 0; corpse.health = 0; corpse.death_animation = 15;
+    mp_monster_state_encode(packet, &corpse);
+    CHECK(packet[71] == 15 && mp_monster_state_decode(packet, sizeof(packet), &decoded) && !memcmp(&decoded, &corpse, sizeof(corpse)));
+    corpse.death_animation = 16; mp_monster_state_encode(packet, &corpse);
+    CHECK(packet[71] == 16 && mp_monster_state_decode(packet, sizeof(packet), &decoded) && decoded.death_animation == 16);
+    const uint32_t invalid_death[] = {0u, 14u, 17u, UINT32_MAX};
+    for (unsigned int i = 0; i < sizeof(invalid_death) / sizeof(invalid_death[0]); ++i) {
+        mp_put_u32(packet + 68, invalid_death[i]); CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded));
+    }
     mp_monster_state_encode(packet, &monster); mp_put_u32(packet + 24, 290);
     CHECK(!mp_monster_state_decode(packet, sizeof(packet), &decoded));
     mp_monster_state_encode(packet, &monster); mp_put_u32(packet + 36, 0x7FC00000u);
@@ -80,8 +92,34 @@ int main(void) {
     MpMonsterEvent event = {0}, event_decoded;
     event.sequence = 1; event.world_low = monster.world_low; event.world_high = monster.world_high;
     event.world_epoch = 1; event.monster_id = 1; event.tick = 200; event.kind = MP_MONSTER_ATTACK;
+    event.x = monster.x; event.y = monster.y; event.z = 3.0f; event.direction = 192;
     uint8_t event_packet[MP_MONSTER_EVENT_SIZE]; mp_monster_event_encode(event_packet, &event);
     CHECK(mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded) && !memcmp(&event, &event_decoded, sizeof(event)));
+    CHECK(MP_MONSTER_EVENT_SIZE == 52 && event_packet[32] == 0xC2 && event_packet[33] == 0xF7 && event_packet[47] == 192);
+    CHECK(!mp_monster_event_decode(event_packet, 32, &event_decoded) && !mp_monster_event_decode(event_packet, sizeof(event_packet) - 1, &event_decoded));
+    event_packet[3] = 1; CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+    mp_monster_event_encode(event_packet, &event); mp_put_u32(event_packet + 48, 15);
+    CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded)); /* Attacks cannot select death art. */
+    MpMonsterEvent death = event; death.kind = MP_MONSTER_DEATH; death.death_animation = 15;
+    mp_monster_event_encode(event_packet, &death);
+    CHECK(event_packet[51] == 15 && mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded) && !memcmp(&death, &event_decoded, sizeof(death)));
+    death.death_animation = 16; mp_monster_event_encode(event_packet, &death);
+    CHECK(mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded) && event_decoded.death_animation == 16);
+    for (unsigned int i = 0; i < sizeof(invalid_death) / sizeof(invalid_death[0]); ++i) {
+        mp_put_u32(event_packet + 48, invalid_death[i]); CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+    }
+    const unsigned int pose_offsets[] = {32u, 36u, 40u};
+    for (unsigned int i = 0; i < sizeof(pose_offsets) / sizeof(pose_offsets[0]); ++i) {
+        mp_monster_event_encode(event_packet, &death); mp_put_u32(event_packet + pose_offsets[i], 0x7FC00000u);
+        CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+        mp_monster_event_encode(event_packet, &death); mp_put_u32(event_packet + pose_offsets[i], 0x7F800000u);
+        CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
+    }
+    death.x = 1000001.0f; mp_monster_event_encode(event_packet, &death);
+    CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded)); death.x = event.x;
+    death.direction = 256; mp_monster_event_encode(event_packet, &death);
+    CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded)); death.direction = event.direction;
+    mp_monster_event_encode(event_packet, &event);
     mp_put_u32(event_packet + 28, 3); CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
 
     unsigned short port = (unsigned short)(51000 + GetCurrentProcessId() % 3000);
@@ -114,6 +152,8 @@ int main(void) {
     CHECK(state_client_send_monster_event(host, &event, GetTickCount()));
     pump(server, host, client, NULL, NULL, 100);
     CHECK(state_client_take_monster_event(client, &received) && received.event.kind == MP_MONSTER_ATTACK && received.event.sequence == 1);
+    CHECK(received.event.x == event.x && received.event.y == event.y && received.event.z == event.z &&
+        received.event.direction == event.direction && !received.event.death_animation);
     CHECK(state_client_send_monster_event(host, &event, GetTickCount()));
     pump(server, host, client, NULL, NULL, 100); CHECK(!state_client_take_monster_event(client, &received));
 
@@ -134,19 +174,70 @@ int main(void) {
     ++monster.sequence; CHECK(state_client_publish_monster(host, &monster, GetTickCount()));
     pump(server, host, client, late, NULL, 50);
     CHECK(state_client_monster(client, GetTickCount(), &observed) && observed.state.alive);
-    monster.alive = 0; monster.health = 0; monster.event_sequence = 2; ++monster.sequence;
+    monster.alive = 0; monster.health = 0; monster.event_sequence = 2; monster.death_animation = 16;
+    monster.x = 555.5f; monster.y = 777.25f; monster.z = 3.0f; monster.direction = 192; ++monster.sequence;
     CHECK(state_client_publish_monster(host, &monster, GetTickCount()));
     pump(server, host, client, late, NULL, 100);
-    CHECK(state_client_monster(client, GetTickCount(), &observed) && !observed.state.alive); /* Lost death event still despawns. */
+    CHECK(state_client_monster(client, GetTickCount(), &observed) && !observed.state.alive);
+    CHECK(observed.state.death_animation == 16 && observed.state.x == monster.x && observed.state.y == monster.y &&
+        observed.state.z == monster.z && observed.state.direction == monster.direction); /* Lost event retains death pose and variant. */
+    StateClient* dead_late = state_client_create("127.0.0.1", port, "DeadLate", NULL); CHECK(dead_late);
+    pump(server, host, client, dead_late, NULL, 500);
+    CHECK(state_client_monster(dead_late, GetTickCount(), &observed) && !observed.state.alive &&
+        observed.state.death_animation == 16 && observed.state.x == monster.x && observed.state.direction == monster.direction);
+    CHECK(!state_client_take_monster_event(dead_late, &received)); /* Dead late join uses persistent state, no event history. */
+    state_client_destroy(dead_late);
+    event.sequence = 2; event.kind = MP_MONSTER_DEATH; event.death_animation = 16;
+    event.x = monster.x; event.y = monster.y; event.z = monster.z; event.direction = monster.direction;
+    CHECK(state_client_send_monster_event(host, &event, GetTickCount()));
+    pump(server, host, client, late, NULL, 50);
+    CHECK(state_client_take_monster_event(client, &received) && received.event.kind == MP_MONSTER_DEATH &&
+        received.event.death_animation == 16 && received.event.x == monster.x && received.event.y == monster.y &&
+        received.event.z == monster.z && received.event.direction == monster.direction);
+    CHECK(state_client_send_monster_event(host, &event, GetTickCount()));
+    pump(server, host, client, late, NULL, 50); CHECK(!state_client_take_monster_event(client, &received));
     player.active = 1; player.health = 100; ++player.world_epoch;
     pump(server, host, client, late, NULL, 100);
     CHECK(!state_client_monster(client, GetTickCount(), &observed));
     CHECK(!state_client_publish_monster(host, &monster, GetTickCount()));
     CHECK(!state_client_send_monster_event(host, &event, GetTickCount()));
     monster.world_epoch = player.world_epoch; monster.alive = 1; monster.health = 90; monster.sequence = 1; monster.event_sequence = 0;
+    monster.death_animation = 0;
     CHECK(state_client_publish_monster(host, &monster, GetTickCount()));
     pump(server, host, client, late, NULL, 100);
     CHECK(state_client_monster(client, GetTickCount(), &observed) && observed.state.world_epoch == 2);
+    MpMonsterState rows[4];
+    const unsigned int row_ids[] = {2u, 9u, 17u, 32u}, row_vids[] = {40u, 50u, 60u, 80u};
+    for (unsigned int i = 0; i < 4u; ++i) {
+        rows[i] = monster; rows[i].monster_id = row_ids[i]; rows[i].vid = row_vids[i]; rows[i].x = 100.0f + i;
+        CHECK(state_client_publish_monster(host, &rows[i], GetTickCount()));
+    }
+    pump(server, host, client, late, NULL, 100);
+    for (unsigned int i = 0; i < 4u; ++i) {
+        CHECK(state_client_monster_at(client, row_ids[i] - 1u, GetTickCount(), &observed));
+        CHECK(observed.state.vid == row_vids[i] && observed.state.x == 100.0f + i);
+        MpMonsterEvent row_event = event; row_event.sequence = 1; row_event.monster_id = row_ids[i];
+        row_event.world_epoch = player.world_epoch; row_event.kind = MP_MONSTER_ATTACK; row_event.death_animation = 0;
+        CHECK(state_client_send_monster_event(host, &row_event, GetTickCount()));
+    }
+    pump(server, host, client, late, NULL, 100);
+    for (unsigned int i = 0; i < 4u; ++i) {
+        CHECK(state_client_take_monster_event(client, &received));
+        CHECK(received.event.monster_id == row_ids[i] && received.event.sequence == 1u);
+    }
+    CHECK(!state_client_take_monster_event(client, &received));
+    StateClient* rows_late = state_client_create("127.0.0.1", port, "RowsLate", NULL); CHECK(rows_late);
+    pump(server, host, client, rows_late, NULL, 300);
+    for (unsigned int i = 0; i < 4u; ++i) {
+        CHECK(state_client_monster_at(rows_late, row_ids[i] - 1u, GetTickCount(), &observed));
+        CHECK(observed.state.vid == row_vids[i]);
+    }
+    state_client_destroy(rows_late);
+    rows[0].alive = 0; rows[0].health = 0; rows[0].death_animation = 15; ++rows[0].sequence;
+    CHECK(state_client_publish_monster(host, &rows[0], GetTickCount()));
+    pump(server, host, client, late, NULL, 50);
+    CHECK(state_client_monster_at(client, row_ids[0] - 1u, GetTickCount(), &observed) && !observed.state.alive);
+    CHECK(state_client_monster_at(client, row_ids[1] - 1u, GetTickCount(), &observed) && observed.state.alive);
     state_client_destroy(host); host = NULL;
     pump(server, NULL, client, late, NULL, 1100);
     CHECK(!state_client_monster(client, GetTickCount(), &observed));

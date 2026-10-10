@@ -28,16 +28,20 @@ struct StateClient {
     uint32_t shot_sequence, shot_dropped;
     ShotEvent shots[64];
     unsigned int shot_head, shot_count;
-    int monster_claim_requested, monster_authority_known, monster_seen, monster_event_seen;
-    uint32_t monster_authority_id, monster_authority_session, monster_event_sequence;
-    unsigned long monster_claim_at, monster_received_at;
-    MonsterState monster;
+    int monster_claim_requested, monster_authority_known;
+    int monster_seen[MP_MONSTER_CAPACITY], monster_event_seen[MP_MONSTER_CAPACITY];
+    uint32_t monster_authority_id, monster_authority_session;
+    uint32_t monster_event_sequence[MP_MONSTER_CAPACITY];
+    unsigned long monster_claim_at, monster_received_at[MP_MONSTER_CAPACITY];
+    MonsterState monster[MP_MONSTER_CAPACITY];
     MonsterEvent monster_events[64];
     unsigned int monster_head, monster_count, monster_dropped;
 };
 
 static void clear_monster_(StateClient* c) {
-    c->monster_seen = c->monster_event_seen = 0; c->monster_head = c->monster_count = 0;
+    memset(c->monster_seen, 0, sizeof(c->monster_seen));
+    memset(c->monster_event_seen, 0, sizeof(c->monster_event_seen));
+    c->monster_head = c->monster_count = 0;
     memset(&c->monster, 0, sizeof(c->monster));
 }
 static int monster_local_world_(const StateClient* c, uint32_t low, uint32_t high, uint32_t epoch, unsigned long now) {
@@ -178,23 +182,25 @@ void state_client_update(StateClient* c, unsigned long now) {
                 mp_get_u32(data) != c->monster_authority_id || mp_get_u32(data + 4) != c->monster_authority_session ||
                 !mp_monster_state_decode(data + 8, MP_MONSTER_STATE_SIZE, &state) ||
                 !monster_remote_world_(c, state.world_low, state.world_high, state.world_epoch, now) ||
-                (c->monster_seen && !mp_sequence_newer(state.sequence, c->monster.state.sequence))) { ++c->rejected; continue; }
-            c->monster.state = state; c->monster.authority_id = c->monster_authority_id;
-            c->monster.authority_session = c->monster_authority_session; c->monster.present = 1;
-            c->monster_seen = 1; c->monster_received_at = now;
+                (c->monster_seen[state.monster_id - 1u] && !mp_sequence_newer(state.sequence, c->monster[state.monster_id - 1u].state.sequence))) { ++c->rejected; continue; }
+            unsigned int slot = state.monster_id - 1u;
+            c->monster[slot].state = state; c->monster[slot].authority_id = c->monster_authority_id;
+            c->monster[slot].authority_session = c->monster_authority_session; c->monster[slot].present = 1;
+            c->monster_seen[slot] = 1; c->monster_received_at[slot] = now;
         }
         if (ev.data.packet.pkt_type == MPT_S_MONSTER_EVENT && c->ready) {
             const uint8_t* data = ev.data.packet.data; MonsterEvent event;
-            if (ev.data.packet.len != MP_MONSTER_EVENT_RELAY_SIZE || !c->monster_authority_known || !c->monster_seen ||
+            if (ev.data.packet.len != MP_MONSTER_EVENT_RELAY_SIZE || !c->monster_authority_known ||
                 mp_get_u32(data) != c->monster_authority_id || mp_get_u32(data + 4) != c->monster_authority_session ||
                 !mp_monster_event_decode(data + 8, MP_MONSTER_EVENT_SIZE, &event.event) ||
+                !c->monster_seen[event.event.monster_id - 1u] ||
                 !monster_remote_world_(c, event.event.world_low, event.event.world_high, event.event.world_epoch, now) ||
-                now - c->monster_received_at > MP_MONSTER_EXPIRY_MS ||
-                event.event.world_low != c->monster.state.world_low || event.event.world_high != c->monster.state.world_high ||
-                event.event.world_epoch != c->monster.state.world_epoch ||
-                (event.event.kind == MP_MONSTER_ATTACK && !c->monster.state.alive) ||
-                (c->monster_event_seen && !mp_sequence_newer(event.event.sequence, c->monster_event_sequence))) { ++c->rejected; continue; }
-            c->monster_event_seen = 1; c->monster_event_sequence = event.event.sequence;
+                now - c->monster_received_at[event.event.monster_id - 1u] > MP_MONSTER_EXPIRY_MS ||
+                event.event.world_low != c->monster[event.event.monster_id - 1u].state.world_low || event.event.world_high != c->monster[event.event.monster_id - 1u].state.world_high ||
+                event.event.world_epoch != c->monster[event.event.monster_id - 1u].state.world_epoch ||
+                (event.event.kind == MP_MONSTER_ATTACK && !c->monster[event.event.monster_id - 1u].state.alive) ||
+                (c->monster_event_seen[event.event.monster_id - 1u] && !mp_sequence_newer(event.event.sequence, c->monster_event_sequence[event.event.monster_id - 1u]))) { ++c->rejected; continue; }
+            c->monster_event_seen[event.event.monster_id - 1u] = 1; c->monster_event_sequence[event.event.monster_id - 1u] = event.event.sequence;
             event.authority_id = c->monster_authority_id; event.authority_session = c->monster_authority_session;
             if (c->monster_count == 64u) { ++c->monster_dropped; continue; }
             c->monster_events[(c->monster_head + c->monster_count++) % 64u] = event;
@@ -278,12 +284,15 @@ int state_client_publish_monster(StateClient* c, const MpMonsterState* state, un
     if (!mp_monster_state_decode(packet + 4, MP_MONSTER_STATE_SIZE, &checked)) return 0;
     epnet_client_send(c->transport, MPT_C_MONSTER_STATE, packet, sizeof(packet)); return 1;
 }
-int state_client_monster(const StateClient* c, unsigned long now, MonsterState* out) {
+int state_client_monster_at(const StateClient* c, unsigned int slot, unsigned long now, MonsterState* out) {
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
-    if (!c || !c->monster_seen || now - c->monster_received_at > MP_MONSTER_EXPIRY_MS ||
-        !monster_remote_world_(c, c->monster.state.world_low, c->monster.state.world_high, c->monster.state.world_epoch, now)) return 0;
-    *out = c->monster; return 1;
+    if (!c || slot >= MP_MONSTER_CAPACITY || !c->monster_seen[slot] || now - c->monster_received_at[slot] > MP_MONSTER_EXPIRY_MS ||
+        !monster_remote_world_(c, c->monster[slot].state.world_low, c->monster[slot].state.world_high, c->monster[slot].state.world_epoch, now)) return 0;
+    *out = c->monster[slot]; return 1;
+}
+int state_client_monster(const StateClient* c, unsigned long now, MonsterState* out) {
+    return state_client_monster_at(c, 0u, now, out);
 }
 int state_client_send_monster_event(StateClient* c, const MpMonsterEvent* event, unsigned long now) {
     int local = 0;
@@ -297,7 +306,7 @@ int state_client_send_monster_event(StateClient* c, const MpMonsterEvent* event,
 int state_client_take_monster_event(StateClient* c, MonsterEvent* out) {
     if (!c || !out || !c->monster_count) return 0;
     MonsterState current;
-    if (!state_client_monster(c, c->previous, &current)) { c->monster_count = c->monster_head = 0; return 0; }
+    if (!state_client_monster_at(c, c->monster_events[c->monster_head].event.monster_id - 1u, c->previous, &current)) { c->monster_head = (c->monster_head + 1u) % 64u; --c->monster_count; return state_client_take_monster_event(c, out); }
     *out = c->monster_events[c->monster_head]; c->monster_head = (c->monster_head + 1u) % 64u; --c->monster_count;
     return 1;
 }

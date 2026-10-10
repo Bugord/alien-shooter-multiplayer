@@ -28,7 +28,7 @@ $multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\a
 $hookSources = @("$repo\asmp-dll\src\game\slot_hook.c", "$repo\asmp-dll\src\game\tick_hook.c", "$repo\asmp-dll\src\game\world_hook.c")
 $runtimeSource = "$repo\asmp-dll\src\multiplayer\runtime.c"
 $monsterCoordinator = "$repo\asmp-dll\src\multiplayer\monster_sync.c"
-$monsterSources = @("$repo\asmp-dll\src\game\unit_puppet.c", "$repo\asmp-dll\src\game\unit_combat.c", "$root\src\monster_probe.c")
+$monsterSources = @("$repo\asmp-dll\src\game\unit_puppet.c", "$repo\asmp-dll\src\game\unit_combat.c", "$repo\asmp-dll\src\game\unit_death.c", "$root\src\monster_probe.c")
 Push-Location $build
 try {
     # Compile the existing networking library separately with its warning level.
@@ -47,10 +47,13 @@ try {
         Compile ($flags + @("$root\tests\unit_combat_test.c", "$repo\asmp-dll\src\game\unit_combat.c", '/Fe:unit-combat-test.exe', '/link', '/MACHINE:X86'))
         & .\unit-combat-test.exe
         if ($LASTEXITCODE) { throw 'UNIT combat fixture checks failed.' }
-        Compile ($flags + @("$root\tests\monster_combat_probe_test.c", "$root\src\monster_probe.c", '/Fe:monster-combat-probe-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + @("$root\tests\unit_death_test.c", "$repo\asmp-dll\src\game\unit_death.c", '/Fe:unit-death-test.exe', '/link', '/MACHINE:X86'))
+        & .\unit-death-test.exe
+        if ($LASTEXITCODE) { throw 'UNIT death presentation checks failed.' }
+        Compile ($flags + @("$root\tests\monster_combat_probe_test.c", "$root\src\monster_probe.c", "$repo\asmp-dll\src\game\unit_death.c", '/Fe:monster-combat-probe-test.exe', '/link', '/MACHINE:X86'))
         & .\monster-combat-probe-test.exe
         if ($LASTEXITCODE) { throw 'Monster combat controller checks failed.' }
-        Compile ($flags + @("$root\tests\monster_probe_test.c", "$root\src\monster_probe.c", '/Fe:monster-probe-test.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + @("$root\tests\monster_probe_test.c", "$root\src\monster_probe.c", "$repo\asmp-dll\src\game\unit_death.c", '/Fe:monster-probe-test.exe', '/link', '/MACHINE:X86'))
         & .\monster-probe-test.exe
         if ($LASTEXITCODE) { throw 'Monster probe checks failed.' }
         & .\monster-probe-test.exe flying
