@@ -250,7 +250,8 @@ static void schedule_retry(MonsterSlot* slot, uintptr_t game, DWORD now)
         return;
     }
     slot->host_captured = 0;
-    slot->seen_attacks = slot->seen_deaths = 0;
+    slot->seen_attacks = 0;
+    slot->seen_deaths = 0;
     slot->armor_presented = 0;
     slot->state = MS_BACKOFF;
     slot->retry_at = now + slot->retry_delay;
@@ -385,7 +386,9 @@ static int correct_prediction(MonsterSlot* slot, uintptr_t game)
         slot->state = MS_ABANDONED;
         return 0;
     }
-    slot->presentation_vid = slot->predicted_hits = slot->armor_presented = 0;
+    slot->presentation_vid = 0;
+    slot->predicted_hits = 0;
+    slot->armor_presented = 0;
     slot->death_presented = 0;
     slot->state = MS_WAITING;
     forget_prediction(slot);
@@ -488,9 +491,14 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
         slot->world = 0;
         slot->host_captured = 0;
         slot->staged_count = 0;
-        slot->seen_attacks = slot->seen_deaths = slot->event_sequence = 0;
-        slot->last_event = slot->host_epoch = slot->authority_session = 0;
-        slot->remote_dead = slot->death_presented = 0;
+        slot->seen_attacks = 0;
+        slot->seen_deaths = 0;
+        slot->event_sequence = 0;
+        slot->last_event = 0;
+        slot->host_epoch = 0;
+        slot->authority_session = 0;
+        slot->remote_dead = 0;
+        slot->death_presented = 0;
         slot->vid = expected_vid(slot->index);
         slot->form_revision = 1u;
         slot->form_phase = MP_MONSTER_FORM_ACTIVE;
@@ -527,7 +535,8 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
             {
                 slot->state = MS_WAITING;
                 slot->host_captured = 0;
-                slot->seen_attacks = slot->seen_deaths = 0;
+                slot->seen_attacks = 0;
+                slot->seen_deaths = 0;
             }
             goto report;
         }
@@ -591,7 +600,8 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
                     schedule_retry(slot, game, now);
                     goto report;
                 }
-                slot->seen_attacks = slot->seen_deaths = 0;
+                slot->seen_attacks = 0;
+                slot->seen_deaths = 0;
                 frame.unit = unit_puppet_sample(slot->puppet, game);
             }
             frame.unit.transitioning = fixture_sample.transitioning || frame.unit.transitioning;
@@ -731,9 +741,13 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
             slot->authority_id = incoming.authority_id;
             slot->authority_session = incoming.authority_session;
             slot->state = MS_WAITING;
-            slot->remote_dead = slot->death_presented = 0;
+            slot->remote_dead = 0;
+            slot->death_presented = 0;
             slot->death_animation = 0;
-            slot->vid = slot->form_revision = slot->form_phase = slot->armor_presented = 0;
+            slot->vid = 0;
+            slot->form_revision = 0;
+            slot->form_phase = 0;
+            slot->armor_presented = 0;
             slot->last_event = 0;
         }
         /* A late old form must not replace a newer allocation or a tombstone.
