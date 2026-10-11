@@ -101,13 +101,25 @@ static void use_fixture(const UnitCombat* fixture)
     CHECK(fixture && fixture >= mock_fixtures && fixture < mock_fixtures + MP_MONSTER_CAPACITY);
     mock_slot = fixture->index;
 }
-int unit_death_select(unsigned int slot)
+/* Death slots below MP_MONSTER_CAPACITY are death visuals; the rest are the
+   armor-debris slots of the same monsters. */
+struct UnitDeath
 {
-    if (slot >= MP_MONSTER_CAPACITY * 2u)
-        return 0;
-    armor_selected = slot >= MP_MONSTER_CAPACITY;
-    mock_slot = slot % MP_MONSTER_CAPACITY;
-    return 1;
+    unsigned int index;
+};
+static UnitDeath mock_deaths[MP_MONSTER_CAPACITY * 2u];
+UnitDeath* unit_death_slot(unsigned int index)
+{
+    if (index >= MP_MONSTER_CAPACITY * 2u)
+        return NULL;
+    mock_deaths[index].index = index;
+    return &mock_deaths[index];
+}
+static void use_death(const UnitDeath* death)
+{
+    CHECK(death && death >= mock_deaths && death < mock_deaths + MP_MONSTER_CAPACITY * 2u);
+    armor_selected = death->index >= MP_MONSTER_CAPACITY;
+    mock_slot = death->index % MP_MONSTER_CAPACITY;
 }
 int unit_death_init(uintptr_t base, ActorCreate create)
 {
@@ -131,8 +143,10 @@ int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* priv
     (void)requested_vid;
     return 0;
 }
-int unit_death_play(uintptr_t game, const UnitPuppetPose* pose, unsigned int animation)
+int unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
+                    unsigned int animation)
 {
+    use_death(death);
     CHECK(game == local.game && !visual_owned && (armor_selected || (!owned && !selected)));
     ++visual_plays;
     visual_pose = *pose;
@@ -140,15 +154,17 @@ int unit_death_play(uintptr_t game, const UnitPuppetPose* pose, unsigned int ani
     visual_owned = 1;
     return fail_visual ? -1 : 1;
 }
-UnitDeathSample unit_death_sample(uintptr_t game)
+UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
 {
+    use_death(death);
     CHECK(game == local.game);
     UnitDeathSample s = {0};
     s.entities = visual_owned ? 2u : 0u;
     return s;
 }
-int unit_death_remove(uintptr_t game)
+int unit_death_remove(UnitDeath* death, uintptr_t game)
 {
+    use_death(death);
     CHECK(game == local.game);
     ++visual_removes;
     if (fail_visual_remove && visual_owned)
@@ -156,17 +172,20 @@ int unit_death_remove(uintptr_t game)
     visual_owned = 0;
     return 1;
 }
-int unit_death_play_type(uintptr_t game, const UnitPuppetPose* pose, unsigned int animation,
-                         unsigned int vid)
+int unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
+                         unsigned int animation, unsigned int vid)
 {
+    use_death(death);
     visual_vid = vid;
-    return unit_death_play(game, pose, animation);
+    return unit_death_play(death, game, pose, animation);
 }
-int unit_death_play_armor(uintptr_t game, const UnitPuppetPose* pose, unsigned int vid)
+int unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
+                          unsigned int vid)
 {
+    use_death(death);
     CHECK(vid == 70u || vid == 90u);
     CHECK((!owned && !selected) || (owned && selected == 1 && vid == 90u));
-    return unit_death_play_type(game, pose, 15u, vid);
+    return unit_death_play_type(death, game, pose, 15u, vid);
 }
 int unit_death_stop(void)
 {
@@ -419,6 +438,18 @@ int unit_puppet_stop(void)
     return 1;
 }
 
+/* Mock calls switch mock_slot/armor_selected to the handle they receive. The
+   checks below read slot 0's death visual through the macros, so reset that
+   view after every coordinator tick. */
+static MonsterSyncFrame tick_and_view_slot0(const Snapshot* snapshot, enum ProbeResult result,
+                                            uint32_t epoch, uint32_t tick, DWORD now)
+{
+    MonsterSyncFrame frame = monster_sync_tick(snapshot, result, epoch, tick, now);
+    mock_slot = 0;
+    armor_selected = 0;
+    return frame;
+}
+
 static void defaults(void)
 {
     mock_slot = 0;
@@ -481,7 +512,7 @@ static MonsterSyncFrame step_result(DWORD now, int authority, enum ProbeResult r
 {
     clock_now = now;
     monster_sync_publish(&remote, authority, now);
-    return monster_sync_tick(&local, result, local_epoch, now / 10u, now);
+    return tick_and_view_slot0(&local, result, local_epoch, now / 10u, now);
 }
 static MonsterSyncFrame step(DWORD now, int authority)
 {
@@ -498,7 +529,7 @@ static MonsterSyncFrame begin(enum MonsterRole role)
 static void finish(void)
 {
     monster_sync_request_stop();
-    MonsterSyncFrame f = monster_sync_tick(&local, PROBE_OK, local_epoch, 0, clock_now + 1u);
+    MonsterSyncFrame f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 0, clock_now + 1u);
     CHECK(f.cleanup && monster_sync_stopped() && monster_sync_stop());
     CHECK(!installed && !owned && !selected);
 }
@@ -554,7 +585,7 @@ static MonsterSyncFrame gallery_step(DWORD now, int authority)
     clock_now = now;
     for (unsigned int i = 0; i < 48u; ++i)
         monster_sync_publish_at(i, &gallery_remote[i], authority, now);
-    return monster_sync_tick(&local, PROBE_OK, local_epoch, now / 10u, now);
+    return tick_and_view_slot0(&local, PROBE_OK, local_epoch, now / 10u, now);
 }
 static void gallery_checks(void)
 {
@@ -608,7 +639,7 @@ static void gallery_checks(void)
         CHECK(mock_slots[i].f_visual_plays == 1u && mock_slots[i].f_spawns == 1u);
     /* Expiry cleans live replicas and dead visual ownership for every slot. */
     clock_now = 3021u;
-    f = monster_sync_tick(&local, PROBE_OK, local_epoch, 302u, clock_now);
+    f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 302u, clock_now);
     CHECK(!f.gallery_active && !f.gallery_faults);
     for (unsigned int i = 0; i < 48u; ++i)
         CHECK(!mock_slots[i].f_owned && !mock_slots[i].f_selected && !mock_slots[i].f_visual_owned);
@@ -1183,7 +1214,7 @@ static void prediction_chain_checks(void)
     predicted_damage(0u, 70, 50u, STEAM_ANIM_GIB_DEATH, 0);
     step(2010u, 0);
     clock_now = 3011u;
-    f = monster_sync_tick(&local, PROBE_OK, local_epoch, 301u, clock_now);
+    f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 301u, clock_now);
     CHECK(f.state == MS_WAITING && !owned && !selected && !visual_owned && !f.deaths);
     remote.state.sequence++;
     f = step(3020u, 0);
@@ -1379,7 +1410,7 @@ int main(void)
     f = begin(MONSTER_CLIENT);
     CHECK(f.state == MS_ACTIVE);
     clock_now = 3001u;
-    f = monster_sync_tick(&local, PROBE_OK, local_epoch, 300u, clock_now);
+    f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 300u, clock_now);
     CHECK(f.state == MS_WAITING && !owned &&
           native_removals == 1); /* No new publish: host expired. */
     CHECK(step(3010u, 0).state == MS_ACTIVE && spawns == 2);
@@ -1499,7 +1530,7 @@ int main(void)
     CHECK(f.state == MS_ACTIVE);
     fail_release = 1;
     monster_sync_request_stop();
-    f = monster_sync_tick(&local, PROBE_OK, local_epoch, 0, 2010u);
+    f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 0, 2010u);
     CHECK(!f.cleanup && !monster_sync_stopped() && !monster_sync_stop() && !unhooks &&
           !fixture_stops);
     fail_release = 0;

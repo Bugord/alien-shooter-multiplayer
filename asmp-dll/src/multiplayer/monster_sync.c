@@ -24,9 +24,11 @@ typedef struct ReceivedMonsterEvent
    receives its slot explicitly; there is no "currently selected" slot. */
 typedef struct MonsterSlot
 {
-    unsigned int index;  /* Position in slots[]; wire monster_id is index + 1. */
-    UnitPuppet* puppet;  /* Borrowed native UNIT for this monster (same index). */
-    UnitCombat* fixture; /* Private native copy for the host gallery or a client. */
+    unsigned int index;      /* Position in slots[]; wire monster_id is index + 1. */
+    UnitPuppet* puppet;      /* Borrowed native UNIT for this monster (same index). */
+    UnitCombat* fixture;     /* Private native copy for the host gallery or a client. */
+    UnitDeath* death_visual; /* Corpse/gib presentation of this monster's death. */
+    UnitDeath* armor_visual; /* Armor debris; may outlive the live copy and the kill. */
     enum MonsterRole role;
     enum MonsterSyncState state;
     volatile LONG stopping, stopped;
@@ -51,6 +53,8 @@ typedef struct MonsterSlot
     unsigned int predicted_animation, predictions, confirmations, corrections;
 } MonsterSlot;
 static MonsterSlot slots[MP_MONSTER_CAPACITY];
+/* Each monster uses two death slots: index for its death, index + capacity for armor. */
+_Static_assert(UNIT_DEATH_SLOT_COUNT >= 2u * MP_MONSTER_CAPACITY, "two death slots per monster");
 static unsigned int slot_count = 1u;
 static int gallery;
 static struct
@@ -81,6 +85,8 @@ int monster_sync_initialize(uintptr_t base, enum MonsterRole role, const UnitPup
         slots[i].index = i;
         slots[i].puppet = unit_puppet_slot(i);
         slots[i].fixture = unit_combat_slot(i);
+        slots[i].death_visual = unit_death_slot(i);
+        slots[i].armor_visual = unit_death_slot(MP_MONSTER_CAPACITY + i);
     }
     slot_count = 1u;
     gallery = 0;
@@ -226,16 +232,13 @@ static int cleanup(MonsterSlot* slot, uintptr_t game)
         return 0;
     if ((slot->role == MONSTER_CLIENT || gallery) && !unit_combat_remove(slot->fixture, game))
         return 0;
-    {
-        if (!unit_death_remove(game))
-            return 0;
-        unit_death_select(slot->index + MP_MONSTER_CAPACITY);
-        int armor = unit_death_remove(game);
-        unit_death_select(slot->index);
-        if (!armor)
-            return 0;
-    }
-    slot->presentation_vid = slot->predicted_hits = slot->armor_presented = 0;
+    if (!unit_death_remove(slot->death_visual, game))
+        return 0;
+    if (!unit_death_remove(slot->armor_visual, game))
+        return 0;
+    slot->presentation_vid = 0;
+    slot->predicted_hits = 0;
+    slot->armor_presented = 0;
     slot->prediction = PREDICTION_NONE;
     return 1;
 }
@@ -284,10 +287,8 @@ static int present_armor(MonsterSlot* slot, uintptr_t game, const UnitPuppetPose
        describe the same effect, including an earlier local prediction. */
     if (slot->armor_presented)
         return 1;
-    unit_death_select(slot->index + MP_MONSTER_CAPACITY);
-    int removed = unit_death_remove(game);
-    int played = removed ? unit_death_play_armor(game, pose, source_vid) : 0;
-    unit_death_select(slot->index);
+    int removed = unit_death_remove(slot->armor_visual, game);
+    int played = removed ? unit_death_play_armor(slot->armor_visual, game, pose, source_vid) : 0;
     if (!removed)
     {
         slot->state = MS_ABANDONED;
@@ -316,13 +317,13 @@ static void present_death(MonsterSlot* slot, uintptr_t game, const UnitPuppetPos
         return;
     }
     /* Armor debris has its own bounded visual slot and may outlive this kill. */
-    if (!cleanup_live(slot, game) || !unit_death_remove(game))
+    if (!cleanup_live(slot, game) || !unit_death_remove(slot->death_visual, game))
     {
         slot->state = MS_ABANDONED;
         return;
     }
     InterlockedExchange(&slot->stopped, 0);
-    if (unit_death_play_type(game, pose, animation, slot->vid) != 1)
+    if (unit_death_play_type(slot->death_visual, game, pose, animation, slot->vid) != 1)
     {
         schedule_retry(slot, game, now);
         return;
@@ -424,12 +425,13 @@ static int predict_hit(MonsterSlot* slot, uintptr_t game, const MpMonsterState* 
         slot->prediction = PREDICTION_DEATH;
         slot->predicted_animation = sample.death_animation;
         UnitPuppetPose pose = sample.death_pose;
-        if (!cleanup_live(slot, game) || !unit_death_remove(game))
+        if (!cleanup_live(slot, game) || !unit_death_remove(slot->death_visual, game))
         {
             slot->state = MS_ABANDONED;
             return 0;
         }
-        if (unit_death_play_type(game, &pose, sample.death_animation, slot->predicted_vid) != 1)
+        if (unit_death_play_type(slot->death_visual, game, &pose, sample.death_animation,
+                                 slot->predicted_vid) != 1)
         {
             schedule_retry(slot, game, now);
             return 0;
@@ -848,10 +850,10 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
             present_death(slot, game, &pose, source->death_animation, now);
             if (slot->state == MS_DEAD)
             {
-                frame.visual = unit_death_sample(game);
+                frame.visual = unit_death_sample(slot->death_visual, game);
                 if (frame.visual.fault ||
                     (now - slot->death_at > MONSTER_PRESENTATION_LIFETIME_MS &&
-                     !unit_death_remove(game)))
+                     !unit_death_remove(slot->death_visual, game)))
                     slot->state = MS_ABANDONED;
             }
             goto report;
@@ -958,15 +960,13 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
 report:
     slot->rejected += received_count - considered;
     if (slot->role == MONSTER_CLIENT)
-        frame.visual = unit_death_sample(game);
+        frame.visual = unit_death_sample(slot->death_visual, game);
     if (slot->armor_presented)
     {
-        unit_death_select(slot->index + MP_MONSTER_CAPACITY);
-        UnitDeathSample armor = unit_death_sample(game);
-        if (armor.fault ||
-            (now - slot->armor_at > MONSTER_PRESENTATION_LIFETIME_MS && !unit_death_remove(game)))
+        UnitDeathSample armor = unit_death_sample(slot->armor_visual, game);
+        int expired = now - slot->armor_at > MONSTER_PRESENTATION_LIFETIME_MS;
+        if (armor.fault || (expired && !unit_death_remove(slot->armor_visual, game)))
             slot->state = MS_ABANDONED;
-        unit_death_select(slot->index);
         frame.visual.entities += armor.entities;
         frame.visual.gibs += armor.gibs;
         frame.visual.fault = frame.visual.fault || armor.fault;
@@ -1025,7 +1025,6 @@ MonsterSyncFrame monster_sync_tick(const Snapshot* local, enum ProbeResult resul
     for (unsigned int index = 0; index < slot_count; ++index)
     {
         MonsterSlot* slot = &slots[index];
-        unit_death_select(index);
         ReceivedMonsterEvent matching[MONSTER_EVENT_CAPACITY];
         unsigned int count = 0;
         for (unsigned int j = 0; j < received_count; ++j)
@@ -1081,7 +1080,6 @@ MonsterSyncFrame monster_sync_tick(const Snapshot* local, enum ProbeResult resul
         output.confirmations = confirmations;
         output.corrections = corrections;
     }
-    unit_death_select(0);
     return output;
 }
 void monster_sync_request_stop(void)

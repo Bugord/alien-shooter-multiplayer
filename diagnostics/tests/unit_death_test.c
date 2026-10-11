@@ -424,6 +424,8 @@ int main(void)
 {
     image_base = (uintptr_t)VirtualAlloc(NULL, 0x140000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     CHECK(image_base);
+    UnitDeath* death = unit_death_slot(0);
+    CHECK(death);
     UnitDeathEngine api = {create, destroy_cannon, destroy_terrain, destroy_part}, invalid = api;
     CHECK(!unit_death_initialize(0, &api) && !unit_death_initialize(image_base, NULL));
     invalid.part_destroy = NULL;
@@ -433,18 +435,18 @@ int main(void)
         UnitPuppetPose pose = prepare();
         CHECK(unit_death_initialize(image_base, &api));
         CHECK(!unit_death_initialize(image_base, &api));
-        CHECK(!unit_death_play((uintptr_t)game, NULL, variant));
-        CHECK(!unit_death_play((uintptr_t)game, &pose, 14));
+        CHECK(!unit_death_play(death, (uintptr_t)game, NULL, variant));
+        CHECK(!unit_death_play(death, (uintptr_t)game, &pose, 14));
         pose.direction = 256;
-        CHECK(!unit_death_play((uintptr_t)game, &pose, variant));
+        CHECK(!unit_death_play(death, (uintptr_t)game, &pose, variant));
         pose.direction = 192;
-        CHECK(unit_death_play((uintptr_t)game, &pose, variant) == 1 && !violation &&
+        CHECK(unit_death_play(death, (uintptr_t)game, &pose, variant) == 1 && !violation &&
               factories == 1);
         CHECK(selected_index == (variant == 15 ? 51u : 910u));
-        UnitDeathSample s = unit_death_sample((uintptr_t)game);
+        UnitDeathSample s = unit_death_sample(death, (uintptr_t)game);
         CHECK(!s.fault && s.entities == (variant == 15 ? 11u : 19u) &&
               s.corpses == (variant == 15 ? 1u : 0u));
-        CHECK(!unit_death_play((uintptr_t)game, &pose, variant) && factories == 1 &&
+        CHECK(!unit_death_play(death, (uintptr_t)game, &pose, variant) && factories == 1 &&
               !unit_death_stop());
         /* Later native successors are independent allocations, found by VID,
            without saving factory return pointers or synchronizing their frames. */
@@ -453,15 +455,16 @@ int main(void)
         else
             for (unsigned int i = 0; i < 8u; ++i)
                 spawn_descriptor(private_vids[5], 0, 0);
-        s = unit_death_sample((uintptr_t)game);
+        s = unit_death_sample(death, (uintptr_t)game);
         CHECK(!s.fault && s.entities == (variant == 15 ? 12u : 27u) &&
               s.gibs == (variant == 15 ? 0u : 8u));
         unsigned int owned = s.entities;
-        CHECK(unit_death_remove((uintptr_t)game) && destroyed_entities == owned && !violation &&
-              !foreign_destroyed);
+        CHECK(unit_death_remove(death, (uintptr_t)game) && destroyed_entities == owned &&
+              !violation && !foreign_destroyed);
         CHECK(parts_destroyed == (variant == 15 ? 1u : 0u) &&
-              !unit_death_sample((uintptr_t)game).entities);
-        CHECK(sources_preserved() && unit_death_remove((uintptr_t)game) && unit_death_stop());
+              !unit_death_sample(death, (uintptr_t)game).entities);
+        CHECK(sources_preserved() && unit_death_remove(death, (uintptr_t)game) &&
+              unit_death_stop());
     }
     for (unsigned int bad = 0; bad < 20u; ++bad)
     {
@@ -514,7 +517,8 @@ int main(void)
         if (bad == 19u)
             *(uintptr_t*)(sources[0] + STEAM_VID_LINKED_OFFSET) = 0;
         CHECK(unit_death_initialize(image_base, &api));
-        CHECK(!unit_death_play((uintptr_t)game, &pose, 15) && !factories && unit_death_stop());
+        CHECK(!unit_death_play(death, (uintptr_t)game, &pose, 15) && !factories &&
+              unit_death_stop());
     }
     /* An access fault while inspecting the source graph owns no native entity.
        Cleanup must be truthful, and a repaired source must permit the same
@@ -522,80 +526,84 @@ int main(void)
     UnitPuppetPose pose = prepare();
     CHECK(unit_death_initialize(image_base, &api));
     *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 51u * 4u) = 1;
-    CHECK(unit_death_play((uintptr_t)game, &pose, 15) == -1 && !factories && !destroys);
-    CHECK(unit_death_remove((uintptr_t)game) && !unit_death_sample((uintptr_t)game).entities);
+    CHECK(unit_death_play(death, (uintptr_t)game, &pose, 15) == -1 && !factories && !destroys);
+    CHECK(unit_death_remove(death, (uintptr_t)game) &&
+          !unit_death_sample(death, (uintptr_t)game).entities);
     *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 51u * 4u) = (uintptr_t)sources[0];
-    CHECK(unit_death_play((uintptr_t)game, &pose, 15) == 1 && factories == 1 && !violation);
-    CHECK(unit_death_remove((uintptr_t)game) && sources_preserved() && unit_death_stop());
+    CHECK(unit_death_play(death, (uintptr_t)game, &pose, 15) == 1 && factories == 1 && !violation);
+    CHECK(unit_death_remove(death, (uintptr_t)game) && sources_preserved() && unit_death_stop());
     pose = prepare();
     orphan_only = 1;
     CHECK(unit_death_initialize(image_base, &api) &&
-          unit_death_play((uintptr_t)game, &pose, 15) == -1);
-    CHECK(unit_death_sample((uintptr_t)game).entities == 1 && !unit_death_stop());
-    CHECK(unit_death_remove((uintptr_t)game) && parts_destroyed == 1 && !foreign_destroyed &&
+          unit_death_play(death, (uintptr_t)game, &pose, 15) == -1);
+    CHECK(unit_death_sample(death, (uintptr_t)game).entities == 1 && !unit_death_stop());
+    CHECK(unit_death_remove(death, (uintptr_t)game) && parts_destroyed == 1 && !foreign_destroyed &&
           !violation && unit_death_stop());
     pose = prepare();
     factory_fault = 1;
     CHECK(unit_death_initialize(image_base, &api) &&
-          unit_death_play((uintptr_t)game, &pose, 15) == -1);
-    CHECK(!unit_death_stop() && unit_death_remove((uintptr_t)game) && !destroys &&
+          unit_death_play(death, (uintptr_t)game, &pose, 15) == -1);
+    CHECK(!unit_death_stop() && unit_death_remove(death, (uintptr_t)game) && !destroys &&
           unit_death_stop());
     pose = prepare();
     CHECK(unit_death_initialize(image_base, &api) &&
-          unit_death_play((uintptr_t)game, &pose, 15) == 1);
+          unit_death_play(death, (uintptr_t)game, &pose, 15) == 1);
     destroy_fault = 1;
-    CHECK(!unit_death_remove((uintptr_t)game) && destroys == 1 && !unit_death_stop());
-    CHECK(!unit_death_remove((uintptr_t)game) && destroys == 1);
+    CHECK(!unit_death_remove(death, (uintptr_t)game) && destroys == 1 && !unit_death_stop());
+    CHECK(!unit_death_remove(death, (uintptr_t)game) && destroys == 1);
     empty_world();
-    CHECK(unit_death_remove((uintptr_t)game) && destroys == 1 && unit_death_stop());
+    CHECK(unit_death_remove(death, (uintptr_t)game) && destroys == 1 && unit_death_stop());
     pose = prepare();
     CHECK(unit_death_initialize(image_base, &api) &&
-          unit_death_play((uintptr_t)game, &pose, 15) == 1);
+          unit_death_play(death, (uintptr_t)game, &pose, 15) == 1);
     *(uintptr_t*)(entities[0] + STEAM_ENTITY_CHILD_OFFSET) = (uintptr_t)unrelated;
-    CHECK(!unit_death_remove((uintptr_t)game) && !foreign_destroyed && !unit_death_stop());
+    CHECK(!unit_death_remove(death, (uintptr_t)game) && !foreign_destroyed && !unit_death_stop());
     empty_world();
-    CHECK(unit_death_remove((uintptr_t)game) && unit_death_stop());
+    CHECK(unit_death_remove(death, (uintptr_t)game) && unit_death_stop());
     pose = prepare();
     CHECK(unit_death_initialize(image_base, &api) &&
-          unit_death_play((uintptr_t)game, &pose, 15) == 1);
+          unit_death_play(death, (uintptr_t)game, &pose, 15) == 1);
     /* Corrupt class identity cannot select a destructor by stale VID alone. */
     *(uintptr_t*)entities[1] = image_base + STEAM_CANNON_VTABLE_RVA;
-    CHECK(unit_death_sample((uintptr_t)game).fault && !unit_death_remove((uintptr_t)game) &&
-          !destroys && !unit_death_stop());
+    CHECK(unit_death_sample(death, (uintptr_t)game).fault &&
+          !unit_death_remove(death, (uintptr_t)game) && !destroys && !unit_death_stop());
     empty_world();
-    CHECK(unit_death_remove((uintptr_t)game) && unit_death_stop());
+    CHECK(unit_death_remove(death, (uintptr_t)game) && unit_death_stop());
     pose = prepare();
     CHECK(unit_death_initialize(image_base, &api) &&
-          unit_death_play((uintptr_t)game, &pose, 15) == 1);
+          unit_death_play(death, (uintptr_t)game, &pose, 15) == 1);
     while (allocated <= 128u)
         spawn_descriptor(private_vids[7], 0, 0);
-    CHECK(unit_death_sample((uintptr_t)game).fault && !unit_death_remove((uintptr_t)game) &&
-          !destroys && !unit_death_stop());
+    CHECK(unit_death_sample(death, (uintptr_t)game).fault &&
+          !unit_death_remove(death, (uintptr_t)game) && !destroys && !unit_death_stop());
     empty_world();
-    CHECK(unit_death_remove((uintptr_t)game) && unit_death_stop());
+    CHECK(unit_death_remove(death, (uintptr_t)game) && unit_death_stop());
     /* Simultaneous presentations have independent pinned identities. The
        selected source UNIT determines the graph; type60 deliberately points
        at different visual art, proving no substitution with fixed VID51. */
     pose = prepare();
     CHECK(unit_death_initialize(image_base, &api));
-    CHECK(!unit_death_select(UNIT_DEATH_SLOT_COUNT));
-    CHECK(unit_death_select(0) && unit_death_play_type((uintptr_t)game, &pose, 15, 50) == 1);
+    CHECK(!unit_death_slot(UNIT_DEATH_SLOT_COUNT));
+    CHECK(!unit_death_sample(NULL, (uintptr_t)game).entities && !unit_death_remove(NULL, 0));
+    UnitDeath* second = unit_death_slot(63);
+    CHECK(second && second != death);
+    CHECK(unit_death_play_type(death, (uintptr_t)game, &pose, 15, 50) == 1);
     unsigned char* first_private[NODE_COUNT];
     memcpy(first_private, private_vids, sizeof(first_private));
-    CHECK(selected_index == 51 && unit_death_sample((uintptr_t)game).entities == 11);
-    CHECK(unit_death_select(63) && unit_death_play_type((uintptr_t)game, &pose, 15, 60) == 1);
+    CHECK(selected_index == 51 && unit_death_sample(death, (uintptr_t)game).entities == 11);
+    CHECK(unit_death_play_type(second, (uintptr_t)game, &pose, 15, 60) == 1);
     unsigned char* second_private[NODE_COUNT];
     memcpy(second_private, private_vids, sizeof(second_private));
-    CHECK(selected_index == 910 && unit_death_sample((uintptr_t)game).entities == 19);
+    CHECK(selected_index == 910 && unit_death_sample(second, (uintptr_t)game).entities == 19);
     CHECK(first_private[7] && second_private[7] && first_private[7] != second_private[7]);
     CHECK(!unit_death_stop() && factories == 2);
-    CHECK(unit_death_select(0) && unit_death_sample((uintptr_t)game).entities == 11);
+    CHECK(unit_death_sample(death, (uintptr_t)game).entities == 11);
     memcpy(private_vids, first_private, sizeof(private_vids));
-    CHECK(unit_death_remove((uintptr_t)game) && !violation && !foreign_destroyed);
+    CHECK(unit_death_remove(death, (uintptr_t)game) && !violation && !foreign_destroyed);
     CHECK(!unit_death_stop());
-    CHECK(unit_death_select(63) && unit_death_sample((uintptr_t)game).entities == 19);
+    CHECK(unit_death_sample(second, (uintptr_t)game).entities == 19);
     memcpy(private_vids, second_private, sizeof(private_vids));
-    CHECK(unit_death_remove((uintptr_t)game) && !violation && !foreign_destroyed &&
+    CHECK(unit_death_remove(second, (uintptr_t)game) && !violation && !foreign_destroyed &&
           unit_death_stop());
     /* Every unsupported graph must fail before native allocation. A class2
        successor is a live-monster transformation, never a visual death. */
@@ -622,7 +630,7 @@ int main(void)
         if (bad == 8)
             *(uintptr_t*)(sources[0] + STEAM_VID_BEHAVIOR_OFFSET) = 0;
         CHECK(unit_death_initialize(image_base, &api));
-        CHECK(!unit_death_play_type((uintptr_t)game, &pose, 15, 50) && !factories &&
+        CHECK(!unit_death_play_type(death, (uintptr_t)game, &pose, 15, 50) && !factories &&
               unit_death_stop());
     }
     /* Ice149 is a standalone class9 factory root: its birth147x12 must remain,
@@ -630,24 +638,25 @@ int main(void)
     UnitDeathEngine form_api = {form_create, form_destroy, form_destroy, form_destroy};
     pose = prepare_forms(0);
     CHECK(unit_death_initialize(image_base, &form_api));
-    CHECK(unit_death_play_type((uintptr_t)game, &pose, STEAM_ANIM_DEATH, 69u) == 1);
+    CHECK(unit_death_play_type(death, (uintptr_t)game, &pose, STEAM_ANIM_DEATH, 69u) == 1);
     CHECK(factories == 2u && allocated == 26u && !violation);
     CHECK(*(unsigned int*)(form_private_root + STEAM_VID_INDEX_OFFSET) == 149u);
     CHECK(*(uintptr_t*)(form_private_root + STEAM_VID_CREATIONS_OFFSET + 14u * 4u));
     CHECK(*(unsigned int*)(form_private_root + STEAM_VID_CREATION_COUNT_OFFSET + 14u * 4u) == 12u);
-    CHECK(unit_death_sample((uintptr_t)game).entities == 26u);
-    CHECK(unit_death_remove((uintptr_t)game) && destroyed_entities == 26u && !violation);
+    CHECK(unit_death_sample(death, (uintptr_t)game).entities == 26u);
+    CHECK(unit_death_remove(death, (uintptr_t)game) && destroyed_entities == 26u && !violation);
     CHECK(!memcmp(form_sources, form_before, sizeof(form_sources)) && !foreign_destroyed &&
           unit_death_stop());
     /* Both armor sizes use private shell visuals with no live successor.
        Independent banks may own identical art without sharing private VIDs. */
     pose = prepare_forms(1);
     CHECK(unit_death_initialize(image_base, &form_api));
-    CHECK(!unit_death_play_type((uintptr_t)game, &pose, STEAM_ANIM_DEATH, 70u) && !factories);
-    CHECK(unit_death_play_armor((uintptr_t)game, &pose, 70u) == 1);
+    CHECK(!unit_death_play_type(death, (uintptr_t)game, &pose, STEAM_ANIM_DEATH, 70u) &&
+          !factories);
+    CHECK(unit_death_play_armor(death, (uintptr_t)game, &pose, 70u) == 1);
     CHECK(factories == 1u && allocated == 15u && !violation);
     CHECK(!*(uintptr_t*)(form_private_root + STEAM_VID_CREATIONS_OFFSET + 15u * 4u));
-    CHECK(unit_death_sample((uintptr_t)game).entities == 15u);
+    CHECK(unit_death_sample(death, (uintptr_t)game).entities == 15u);
     CHECK(!memcmp(form_sources, form_before, sizeof(form_sources)));
     *(unsigned int*)(form_sources[4] + STEAM_VID_INDEX_OFFSET) = 80u;
     *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 80u * 4u) = (uintptr_t)form_sources[4];
@@ -656,22 +665,23 @@ int main(void)
     *(unsigned int*)(form_sources[5] + STEAM_VID_CREATION_COUNT_OFFSET + 15u * 4u) = 1u;
     memcpy(form_before, form_sources, sizeof(form_sources));
     unsigned char* medium_private_root = form_private_root;
-    CHECK(unit_death_select(UNIT_DEATH_SLOT_COUNT - 1u));
+    UnitDeath* last = unit_death_slot(UNIT_DEATH_SLOT_COUNT - 1u);
+    CHECK(last);
     *(unsigned int*)(form_sources[5] + STEAM_VID_CREATION_COUNT_OFFSET + 15u * 4u) = 2u;
-    CHECK(!unit_death_play_armor((uintptr_t)game, &pose, 90u) && factories == 1u);
+    CHECK(!unit_death_play_armor(last, (uintptr_t)game, &pose, 90u) && factories == 1u);
     *(unsigned int*)(form_sources[5] + STEAM_VID_CREATION_COUNT_OFFSET + 15u * 4u) = 1u;
-    CHECK(unit_death_play_armor((uintptr_t)game, &pose, 90u) == 1 && factories == 2u);
+    CHECK(unit_death_play_armor(last, (uintptr_t)game, &pose, 90u) == 1 && factories == 2u);
     CHECK(form_private_root != medium_private_root && allocated == 30u && !violation);
     CHECK(!*(uintptr_t*)(form_private_root + STEAM_VID_CREATIONS_OFFSET + 15u * 4u));
-    CHECK(unit_death_sample((uintptr_t)game).entities == 15u && !unit_death_stop());
+    CHECK(unit_death_sample(last, (uintptr_t)game).entities == 15u && !unit_death_stop());
     CHECK(!memcmp(form_sources, form_before, sizeof(form_sources)));
-    CHECK(unit_death_select(0) && unit_death_remove((uintptr_t)game));
+    CHECK(unit_death_remove(death, (uintptr_t)game));
     CHECK(destroyed_entities == 15u && !violation && !unit_death_stop());
-    CHECK(unit_death_select(UNIT_DEATH_SLOT_COUNT - 1u));
-    CHECK(unit_death_sample((uintptr_t)game).entities == 15u && unit_death_remove((uintptr_t)game));
+    CHECK(unit_death_sample(last, (uintptr_t)game).entities == 15u &&
+          unit_death_remove(last, (uintptr_t)game));
     CHECK(destroyed_entities == 30u && !violation);
     *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 70u * 4u) = 0;
-    CHECK(!unit_death_play_armor((uintptr_t)game, &pose, 90u) && factories == 2u);
+    CHECK(!unit_death_play_armor(last, (uintptr_t)game, &pose, 90u) && factories == 2u);
     CHECK(unit_death_stop());
     CHECK(VirtualFree((void*)image_base, 0, MEM_RELEASE));
     puts("UNIT death graph sanitization, successors, variants and guarded cleanup checks passed.");

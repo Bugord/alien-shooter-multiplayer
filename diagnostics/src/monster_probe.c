@@ -11,6 +11,7 @@ static struct
     enum MonsterProbeState state;
     UnitPuppet* puppet;  /* The probe always drives puppet slot 0. */
     UnitCombat* fixture; /* ...and combat fixture slot 0. */
+    UnitDeath* death;    /* ...and death presentation slot 0. */
     DWORD entered, last_log;
     DWORD combat_world_ready;
     uintptr_t game;
@@ -35,6 +36,7 @@ int monster_probe_enable_kind(uintptr_t base, enum MonsterProbeKind kind)
     memset(&probe, 0, sizeof(probe));
     probe.puppet = unit_puppet_slot(0);
     probe.fixture = unit_combat_slot(0);
+    probe.death = unit_death_slot(0);
     UnitPuppetEngine api;
     if (kind != MONSTER_PROBE_GROUND && kind != MONSTER_PROBE_FLYING &&
         kind != MONSTER_PROBE_FLYING_RELOAD && kind != MONSTER_PROBE_COMBAT &&
@@ -91,7 +93,7 @@ static void finish(MonsterProbeFrame* f, uintptr_t game, int failed)
     f->cleanup = unit_puppet_release(probe.puppet, game);
     if (probe.combat_initialized && !unit_combat_remove(probe.fixture, game))
         f->cleanup = 0;
-    if (probe.visual_initialized && !unit_death_remove(game))
+    if (probe.visual_initialized && !unit_death_remove(probe.death, game))
         f->cleanup = 0;
     probe.state = failed || !f->cleanup ? MONSTER_PROBE_FAILED : MONSTER_PROBE_DONE;
     f->state = probe.state;
@@ -99,7 +101,7 @@ static void finish(MonsterProbeFrame* f, uintptr_t game, int failed)
 }
 static void visual_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now)
 {
-    f->visual = unit_death_sample(local->game);
+    f->visual = unit_death_sample(probe.death, local->game);
     f->phase = 6u + (unsigned int)probe.visual_stage;
     if (f->visual.corpses)
         probe.corpse_seen = 1;
@@ -113,8 +115,8 @@ static void visual_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now)
     }
     if (probe.visual_stage == 1 && now - probe.visual_at >= 3000u)
     {
-        if (!probe.corpse_seen || !unit_death_remove(local->game) ||
-            unit_death_play(local->game, &probe.anchor, STEAM_ANIM_GIB_DEATH) != 1)
+        if (!probe.corpse_seen || !unit_death_remove(probe.death, local->game) ||
+            unit_death_play(probe.death, local->game, &probe.anchor, STEAM_ANIM_GIB_DEATH) != 1)
         {
             ++probe.violations;
             finish(f, local->game, 1);
@@ -215,7 +217,7 @@ static void combat_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now)
         {
             if (!unit_puppet_release(probe.puppet, local->game) ||
                 !unit_combat_remove(probe.fixture, local->game) ||
-                unit_death_play(local->game, &probe.anchor, STEAM_ANIM_DEATH) != 1)
+                unit_death_play(probe.death, local->game, &probe.anchor, STEAM_ANIM_DEATH) != 1)
             {
                 ++probe.violations;
                 finish(f, local->game, 1);
