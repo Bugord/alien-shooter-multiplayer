@@ -24,8 +24,9 @@ typedef struct ReceivedMonsterEvent
    receives its slot explicitly; there is no "currently selected" slot. */
 typedef struct MonsterSlot
 {
-    unsigned int index; /* Position in slots[]; wire monster_id is index + 1. */
-    UnitPuppet* puppet; /* Borrowed native UNIT for this monster (same index). */
+    unsigned int index;  /* Position in slots[]; wire monster_id is index + 1. */
+    UnitPuppet* puppet;  /* Borrowed native UNIT for this monster (same index). */
+    UnitCombat* fixture; /* Private native copy for the host gallery or a client. */
     enum MonsterRole role;
     enum MonsterSyncState state;
     volatile LONG stopping, stopped;
@@ -79,6 +80,7 @@ int monster_sync_initialize(uintptr_t base, enum MonsterRole role, const UnitPup
     {
         slots[i].index = i;
         slots[i].puppet = unit_puppet_slot(i);
+        slots[i].fixture = unit_combat_slot(i);
     }
     slot_count = 1u;
     gallery = 0;
@@ -222,7 +224,7 @@ static int cleanup(MonsterSlot* slot, uintptr_t game)
 {
     if (!unit_puppet_release(slot->puppet, game))
         return 0;
-    if ((slot->role == MONSTER_CLIENT || gallery) && !unit_combat_remove(game))
+    if ((slot->role == MONSTER_CLIENT || gallery) && !unit_combat_remove(slot->fixture, game))
         return 0;
     {
         if (!unit_death_remove(game))
@@ -264,7 +266,8 @@ static int same_world(const MonsterSlot* slot, const MpMonsterState* s)
 }
 static int cleanup_live(MonsterSlot* slot, uintptr_t game)
 {
-    int removed = unit_puppet_release(slot->puppet, game) && unit_combat_remove(game);
+    int removed =
+        unit_puppet_release(slot->puppet, game) && unit_combat_remove(slot->fixture, game);
     if (removed)
     {
         slot->presentation_vid = 0;
@@ -342,14 +345,15 @@ static int client_copy(MonsterSlot* slot, const Snapshot* local, unsigned int vi
         Snapshot spawn = *local;
         spawn.health = 1;
         InterlockedExchange(&slot->stopped, 0);
-        if (unit_combat_spawn_predictive(&spawn, vid, pose) != 1)
+        if (unit_combat_spawn_predictive(slot->fixture, &spawn, vid, pose) != 1)
         {
             schedule_retry(slot, game, now);
             return 0;
         }
-        UnitCombatSample fixture = unit_combat_sample(game, 1);
-        if (fixture.fault || !fixture.sources_unchanged ||
-            unit_puppet_attach_entity(slot->puppet, game, local->player, fixture.root) != 1 ||
+        UnitCombatSample fixture_sample = unit_combat_sample(slot->fixture, game, 1);
+        if (fixture_sample.fault || !fixture_sample.sources_unchanged ||
+            unit_puppet_attach_entity(slot->puppet, game, local->player, fixture_sample.root) !=
+                1 ||
             unit_puppet_prediction(slot->puppet, game) != 1)
         {
             schedule_retry(slot, game, now);
@@ -540,17 +544,18 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
                                            0,
                                            128u,
                                            0};
-                int created =
-                    unit_combat_spawn_type(&spawn, expected_vid(slot->index), &position, 1);
+                int created = unit_combat_spawn_type(slot->fixture, &spawn,
+                                                     expected_vid(slot->index), &position, 1);
                 if (created != 1)
                 {
                     schedule_retry(slot, game, now);
                     goto report;
                 }
-                UnitCombatSample fixture = unit_combat_sample(game, 0);
-                attached = fixture.fault ? -1
-                                         : unit_puppet_watch_stationary(
-                                               slot->puppet, game, local->player, fixture.root);
+                UnitCombatSample fixture_sample = unit_combat_sample(slot->fixture, game, 0);
+                attached = fixture_sample.fault
+                               ? -1
+                               : unit_puppet_watch_stationary(slot->puppet, game, local->player,
+                                                              fixture_sample.root);
             }
             else
                 attached = unit_puppet_watch_first(slot->puppet, game, local->player);
@@ -568,18 +573,18 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
         frame.unit = unit_puppet_sample(slot->puppet, game);
         if (gallery)
         {
-            UnitCombatSample fixture = unit_combat_sample(game, 0);
-            if (fixture.fault)
+            UnitCombatSample fixture_sample = unit_combat_sample(slot->fixture, game, 0);
+            if (fixture_sample.fault)
             {
                 schedule_retry(slot, game, now);
                 goto report;
             }
-            if (!fixture.transitioning && fixture.root && fixture.root != frame.unit.entity &&
-                !slot->seen_deaths)
+            if (!fixture_sample.transitioning && fixture_sample.root &&
+                fixture_sample.root != frame.unit.entity && !slot->seen_deaths)
             {
                 if (!unit_puppet_release(slot->puppet, game) ||
-                    unit_puppet_watch_stationary(slot->puppet, game, local->player, fixture.root) !=
-                        1)
+                    unit_puppet_watch_stationary(slot->puppet, game, local->player,
+                                                 fixture_sample.root) != 1)
                 {
                     schedule_retry(slot, game, now);
                     goto report;
@@ -587,9 +592,9 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
                 slot->seen_attacks = slot->seen_deaths = 0;
                 frame.unit = unit_puppet_sample(slot->puppet, game);
             }
-            frame.unit.transitioning = fixture.transitioning || frame.unit.transitioning;
-            if (fixture.current_vid)
-                frame.unit.vid = fixture.current_vid;
+            frame.unit.transitioning = fixture_sample.transitioning || frame.unit.transitioning;
+            if (fixture_sample.current_vid)
+                frame.unit.vid = fixture_sample.current_vid;
         }
         if (frame.unit.state == UNIT_PUPPET_FAULT)
         {
@@ -1020,7 +1025,6 @@ MonsterSyncFrame monster_sync_tick(const Snapshot* local, enum ProbeResult resul
     for (unsigned int index = 0; index < slot_count; ++index)
     {
         MonsterSlot* slot = &slots[index];
-        unit_combat_select(index);
         unit_death_select(index);
         ReceivedMonsterEvent matching[MONSTER_EVENT_CAPACITY];
         unsigned int count = 0;
@@ -1077,7 +1081,6 @@ MonsterSyncFrame monster_sync_tick(const Snapshot* local, enum ProbeResult resul
         output.confirmations = confirmations;
         output.corrections = corrections;
     }
-    unit_combat_select(0);
     unit_death_select(0);
     return output;
 }

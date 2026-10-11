@@ -65,8 +65,8 @@ static int fail_install, fail_init, fail_spawn, fail_apply, fail_remove, fail_re
 static int fail_visual, fail_visual_remove;
 static unsigned int unhooks, fixture_stops;
 static DWORD clock_now;
-/* The real UnitPuppet is private to unit_puppet.c; this mock handle only
-   names the mock slot that the coordinator passed. */
+/* The real UnitPuppet and UnitCombat are private to their modules; these mock
+   handles only name the mock slot that the coordinator passed. */
 struct UnitPuppet
 {
     unsigned int index;
@@ -84,12 +84,22 @@ static void use_puppet(const UnitPuppet* puppet)
     CHECK(puppet && puppet >= mock_puppets && puppet < mock_puppets + MP_MONSTER_CAPACITY);
     mock_slot = puppet->index;
 }
-int unit_combat_select(unsigned int slot)
+struct UnitCombat
 {
-    if (slot >= MP_MONSTER_CAPACITY)
-        return 0;
-    mock_slot = slot;
-    return 1;
+    unsigned int index;
+};
+static UnitCombat mock_fixtures[MP_MONSTER_CAPACITY];
+UnitCombat* unit_combat_slot(unsigned int index)
+{
+    if (index >= MP_MONSTER_CAPACITY)
+        return NULL;
+    mock_fixtures[index].index = index;
+    return &mock_fixtures[index];
+}
+static void use_fixture(const UnitCombat* fixture)
+{
+    CHECK(fixture && fixture >= mock_fixtures && fixture < mock_fixtures + MP_MONSTER_CAPACITY);
+    mock_slot = fixture->index;
 }
 int unit_death_select(unsigned int slot)
 {
@@ -257,8 +267,9 @@ int unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
     native.predictive = 1;
     return 1;
 }
-int unit_combat_spawn(const Snapshot* spawn)
+int unit_combat_spawn(UnitCombat* fixture, const Snapshot* spawn)
 {
+    use_fixture(fixture);
     CHECK(spawn && spawn->game == local.game && !owned);
     ++spawns;
     owned = 1;
@@ -266,9 +277,10 @@ int unit_combat_spawn(const Snapshot* spawn)
     spawn_health = spawn->health;
     return fail_spawn ? -1 : 1;
 }
-int unit_combat_spawn_type(const Snapshot* spawn, unsigned int vid, const UnitPuppetPose* pose,
-                           int host)
+int unit_combat_spawn_type(UnitCombat* fixture, const Snapshot* spawn, unsigned int vid,
+                           const UnitPuppetPose* pose, int host)
 {
+    use_fixture(fixture);
     CHECK(pose);
     spawn_vid = vid;
     spawn_host = host;
@@ -276,7 +288,7 @@ int unit_combat_spawn_type(const Snapshot* spawn, unsigned int vid, const UnitPu
     native.vid = vid;
     native.animation = STEAM_ANIM_IDLE;
     native.health = 88;
-    int result = unit_combat_spawn(spawn);
+    int result = unit_combat_spawn(fixture, spawn);
     native.x = pose->x;
     native.y = pose->y;
     native.z = pose->z;
@@ -285,10 +297,11 @@ int unit_combat_spawn_type(const Snapshot* spawn, unsigned int vid, const UnitPu
     native.moving = pose->moving;
     return result;
 }
-int unit_combat_spawn_predictive(const Snapshot* spawn, unsigned int vid,
+int unit_combat_spawn_predictive(UnitCombat* fixture, const Snapshot* spawn, unsigned int vid,
                                  const UnitPuppetPose* pose)
 {
-    return unit_combat_spawn_type(spawn, vid, pose, 0);
+    use_fixture(fixture);
+    return unit_combat_spawn_type(fixture, spawn, vid, pose, 0);
 }
 int unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                                  uintptr_t entity)
@@ -301,8 +314,9 @@ int unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t p
     native.velocity = 0;
     return result;
 }
-UnitCombatSample unit_combat_sample(uintptr_t game, int compare_sources)
+UnitCombatSample unit_combat_sample(UnitCombat* fixture, uintptr_t game, int compare_sources)
 {
+    use_fixture(fixture);
     CHECK(game == local.game && (compare_sources == 0 || compare_sources == 1));
     UnitCombatSample s = {0};
     s.root = owned ? mock_slots[mock_slot].f_root : 0;
@@ -367,8 +381,9 @@ int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
     last_replay = 0;
     return 1;
 }
-int unit_combat_remove(uintptr_t game)
+int unit_combat_remove(UnitCombat* fixture, uintptr_t game)
 {
+    use_fixture(fixture);
     CHECK(game == local.game);
     ++removals;
     if (!owned)

@@ -16,8 +16,8 @@ static UnitPuppetSample sample;
 static unsigned int epoch, loaded, applied, released, stopped;
 static int attach_ready, load_ok = 1, release_ok = 1, stop_ok = 1, bind_ok = 1;
 static enum MonsterProbeKind test_kind;
-/* The probe always drives puppet slot 0; the real UnitPuppet is private to
-   unit_puppet.c, so this mock handle only identifies that slot. */
+/* The probe always drives slot 0 of each unit module; the real structs are
+   private to their modules, so these mock handles only identify that slot. */
 struct UnitPuppet
 {
     int unused;
@@ -99,6 +99,20 @@ int unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
     (void)game;
     return 0;
 }
+struct UnitCombat
+{
+    int unused;
+};
+static UnitCombat probe_fixture;
+UnitCombat* unit_combat_slot(unsigned int index)
+{
+    return index == 0 ? &probe_fixture : NULL;
+}
+static void expect_probe_fixture(const UnitCombat* fixture)
+{
+    if (fixture != &probe_fixture)
+        ++wrong_slot_calls;
+}
 int unit_combat_bind(uintptr_t base, ActorCreate* out)
 {
     (void)base;
@@ -113,20 +127,23 @@ int unit_combat_init(uintptr_t base, ActorCreate c, ActorDestroy d, UnitAnimatio
     (void)a;
     return 0;
 }
-int unit_combat_spawn(const Snapshot* local_sample)
+int unit_combat_spawn(UnitCombat* fixture, const Snapshot* local_sample)
 {
+    expect_probe_fixture(fixture);
     (void)local_sample;
     return 0;
 }
-UnitCombatSample unit_combat_sample(uintptr_t game, int compare_sources)
+UnitCombatSample unit_combat_sample(UnitCombat* fixture, uintptr_t game, int compare_sources)
 {
+    expect_probe_fixture(fixture);
     UnitCombatSample s = {0};
     (void)game;
     (void)compare_sources;
     return s;
 }
-int unit_combat_remove(uintptr_t game)
+int unit_combat_remove(UnitCombat* fixture, uintptr_t game)
 {
+    expect_probe_fixture(fixture);
     (void)game;
     return 1;
 }

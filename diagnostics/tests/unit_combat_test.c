@@ -373,6 +373,8 @@ int main(void)
 {
     image_base = (uintptr_t)VirtualAlloc(NULL, 0x140000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     CHECK(image_base);
+    UnitCombat* fixture = unit_combat_slot(0);
+    CHECK(fixture);
     *(ActorDestroy*)(image_base + STEAM_SPRITE_VTABLE_RVA) = destroy;
     ActorCreate bound = create;
     CHECK(!unit_combat_bind(image_base, &bound) && !bound);
@@ -399,37 +401,37 @@ int main(void)
     CHECK(!unit_combat_init(image_base, NULL, destroy, animation));
     CHECK(unit_combat_init(image_base, create, destroy, animation));
     CHECK(!unit_combat_init(image_base, create, destroy, animation));
-    CHECK(!unit_combat_spawn(NULL));
+    CHECK(!unit_combat_spawn(fixture, NULL));
     local.health = 0;
-    CHECK(!unit_combat_spawn(&local));
+    CHECK(!unit_combat_spawn(fixture, &local));
     local.health = 100;
-    CHECK(factory_calls == 0 && unit_combat_spawn(&local) == 1 && factory_calls == 1 &&
+    CHECK(factory_calls == 0 && unit_combat_spawn(fixture, &local) == 1 && factory_calls == 1 &&
           !factory_violation);
-    UnitCombatSample s = unit_combat_sample((uintptr_t)game, 1);
+    UnitCombatSample s = unit_combat_sample(fixture, (uintptr_t)game, 1);
     CHECK(!s.fault && s.sources_unchanged && s.private_entities == 2u && s.other_entities == 1u);
     CHECK(s.root == (uintptr_t)root && s.child == (uintptr_t)part && animation_calls);
     CHECK(!s.unexpected_entities);
     /* Counting alone would miss a new object replacing an expired ambient one. */
     unregister_entity((uintptr_t)unrelated);
-    CHECK(!unit_combat_sample((uintptr_t)game, 1).unexpected_entities);
+    CHECK(!unit_combat_sample(fixture, (uintptr_t)game, 1).unexpected_entities);
     memset(extra, 0, sizeof(extra));
     *(uintptr_t*)(extra + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)source;
     add_entity(3u, extra);
-    s = unit_combat_sample((uintptr_t)game, 1);
+    s = unit_combat_sample(fixture, (uintptr_t)game, 1);
     CHECK(s.other_entities == 1u && s.unexpected_entities == 1u);
     unregister_entity((uintptr_t)extra);
     add_entity(3u, unrelated);
     CHECK(*(unsigned int*)(root + STEAM_ENTITY_ANIM_OFFSET) == 0u);
-    CHECK(!unit_combat_stop() && !unit_combat_spawn(&local) && factory_calls == 1);
+    CHECK(!unit_combat_stop() && !unit_combat_spawn(fixture, &local) && factory_calls == 1);
     /* A table replacement must not count a cached source pointer as current. */
     *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 50u * 4u) = (uintptr_t)part_source;
-    CHECK(!unit_combat_sample((uintptr_t)game, 1).sources_unchanged);
+    CHECK(!unit_combat_sample(fixture, (uintptr_t)game, 1).sources_unchanged);
     *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 50u * 4u) = (uintptr_t)source;
-    CHECK(unit_combat_remove((uintptr_t)game) && roots_destroyed == 1 && parts_destroyed == 1 &&
-          !factory_violation);
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && roots_destroyed == 1 &&
+          parts_destroyed == 1 && !factory_violation);
     CHECK(!memcmp(source, original_source, sizeof(source)) &&
           !memcmp(part_source, original_part, sizeof(part_source)));
-    CHECK(unit_combat_remove((uintptr_t)game) && destroy_calls == 1 && unit_combat_stop());
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && destroy_calls == 1 && unit_combat_stop());
 
     /* Reject descriptors outside this fixture before any native allocation. */
     for (unsigned int kind = 0; kind < 8u; ++kind)
@@ -454,68 +456,72 @@ int main(void)
         if (kind == 7u)
             *(unsigned int*)(source + STEAM_VID_CATEGORY_OFFSET) = STEAM_TICK_ENTITY_LIST_COUNT;
         CHECK(unit_combat_init(image_base, create, destroy, animation));
-        CHECK(!unit_combat_spawn(&local) && !factory_calls && unit_combat_stop());
+        CHECK(!unit_combat_spawn(fixture, &local) && !factory_calls && unit_combat_stop());
     }
     local = prepare();
     factory_mode = FACTORY_WRONG_RESULT;
     CHECK(unit_combat_init(image_base, create, destroy, animation));
-    CHECK(unit_combat_spawn(&local) == -1 && !unit_combat_stop());
-    CHECK(unit_combat_remove((uintptr_t)game) && roots_destroyed == 1 && parts_destroyed == 1);
+    CHECK(unit_combat_spawn(fixture, &local) == -1 && !unit_combat_stop());
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && roots_destroyed == 1 &&
+          parts_destroyed == 1);
     CHECK(unit_combat_stop() && !factory_violation);
 
     local = prepare();
     factory_mode = FACTORY_ORPHAN_PART;
     CHECK(unit_combat_init(image_base, create, destroy, animation));
-    CHECK(unit_combat_spawn(&local) == -1 && !unit_combat_stop());
-    CHECK(unit_combat_remove((uintptr_t)game) && !roots_destroyed && parts_destroyed == 1);
+    CHECK(unit_combat_spawn(fixture, &local) == -1 && !unit_combat_stop());
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && !roots_destroyed && parts_destroyed == 1);
     CHECK(unit_combat_stop() && !factory_violation);
 
     for (unsigned int topology = 0; topology < 2u; ++topology)
     {
         local = prepare();
         CHECK(unit_combat_init(image_base, create, destroy, animation) &&
-              unit_combat_spawn(&local) == 1);
+              unit_combat_spawn(fixture, &local) == 1);
         if (topology)
             *(uintptr_t*)part = image_base + STEAM_UNIT_VTABLE_RVA;
         else
             *(uintptr_t*)(part + STEAM_ENTITY_CHILD_OFFSET) = (uintptr_t)unrelated;
-        CHECK(!unit_combat_remove((uintptr_t)game) && !destroy_calls && !unit_combat_stop());
+        CHECK(!unit_combat_remove(fixture, (uintptr_t)game) && !destroy_calls &&
+              !unit_combat_stop());
         clear_world();
-        CHECK(unit_combat_remove((uintptr_t)game) && !destroy_calls && unit_combat_stop());
+        CHECK(unit_combat_remove(fixture, (uintptr_t)game) && !destroy_calls && unit_combat_stop());
     }
 
     local = prepare();
     CHECK(unit_combat_init(image_base, create, destroy, animation) &&
-          unit_combat_spawn(&local) == 1);
+          unit_combat_spawn(fixture, &local) == 1);
     /* The cached address now belongs to an unrelated entity. Only the still
        registered private part may be passed to a deleting destructor. */
     *(uintptr_t*)(root + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)source;
     *(uintptr_t*)(root + STEAM_ENTITY_CHILD_OFFSET) = 0;
     *(uintptr_t*)(part + STEAM_ENTITY_PARENT_OFFSET) = 0;
-    CHECK(unit_combat_remove((uintptr_t)game) && !roots_destroyed && parts_destroyed == 1);
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && !roots_destroyed && parts_destroyed == 1);
     CHECK(unit_combat_stop() && !factory_violation);
 
     local = prepare();
     CHECK(unit_combat_init(image_base, create, destroy, animation) &&
-          unit_combat_spawn(&local) == 1);
+          unit_combat_spawn(fixture, &local) == 1);
     /* A corrupt world list must not cause cached-pointer native calls. */
     *(unsigned int*)(list(5u) + 4) = 5u;
-    CHECK(unit_combat_sample((uintptr_t)game, 0).fault);
-    CHECK(!unit_combat_remove((uintptr_t)game) && !destroy_calls && !unit_combat_stop());
+    CHECK(unit_combat_sample(fixture, (uintptr_t)game, 0).fault);
+    CHECK(!unit_combat_remove(fixture, (uintptr_t)game) && !destroy_calls && !unit_combat_stop());
     *(unsigned int*)(list(5u) + 4) = 1u;
-    CHECK(unit_combat_remove((uintptr_t)game) && unit_combat_stop());
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && unit_combat_stop());
 
     local = prepare();
     CHECK(unit_combat_init(image_base, create, destroy, animation) &&
-          unit_combat_spawn(&local) == 1);
+          unit_combat_spawn(fixture, &local) == 1);
     destroy_fault = 1;
-    CHECK(!unit_combat_remove((uintptr_t)game) && destroy_calls == 1 && !unit_combat_stop());
-    CHECK(!unit_combat_remove((uintptr_t)game) && destroy_calls == 1 && !unit_combat_stop());
+    CHECK(!unit_combat_remove(fixture, (uintptr_t)game) && destroy_calls == 1 &&
+          !unit_combat_stop());
+    CHECK(!unit_combat_remove(fixture, (uintptr_t)game) && destroy_calls == 1 &&
+          !unit_combat_stop());
     CHECK(!unit_combat_init(image_base, create, destroy, animation));
     /* World teardown, rather than another native deletion attempt, releases
        the abandoned fixture once map ownership of both private VIDs is gone. */
     clear_world();
-    CHECK(unit_combat_remove((uintptr_t)game) && destroy_calls == 1 && unit_combat_stop());
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && destroy_calls == 1 && unit_combat_stop());
     local = prepare();
     CHECK(unit_combat_init(image_base, create, destroy, animation) && unit_combat_stop());
     /* Two different compositions coexist with one shared factory binding.
@@ -536,39 +542,40 @@ int main(void)
     gallery_error = 0;
     CHECK(unit_combat_init(image_base, gallery_create, gallery_destroy, animation));
     UnitPuppetPose gallery_pose = {300.0f, 400.0f, 0, 0, 80u, 0};
-    CHECK(unit_combat_spawn_type(&local, 40u, &gallery_pose, 0) == 1);
-    CHECK(unit_combat_sample((uintptr_t)game, 1).private_entities == 1u);
-    CHECK(unit_combat_select(1));
+    CHECK(unit_combat_spawn_type(fixture, &local, 40u, &gallery_pose, 0) == 1);
+    CHECK(unit_combat_sample(fixture, (uintptr_t)game, 1).private_entities == 1u);
+    UnitCombat* second = unit_combat_slot(1);
+    CHECK(second && second != fixture);
     gallery_pose.x = 400.0f;
-    CHECK(unit_combat_spawn_type(&local, 80u, &gallery_pose, 1) == 1);
-    CHECK(unit_combat_sample((uintptr_t)game, 1).private_entities == 2u);
-    CHECK(!unit_combat_sample((uintptr_t)game, 1).unexpected_entities);
-    CHECK(!unit_combat_select(UNIT_COMBAT_CAPACITY));
-    CHECK(unit_combat_sample((uintptr_t)game, 1).root == (uintptr_t)gallery_root[1]);
-    CHECK(unit_combat_select(0));
-    CHECK(!unit_combat_sample((uintptr_t)game, 1).unexpected_entities);
-    CHECK(unit_combat_sample((uintptr_t)game, 1).sources_unchanged);
-    CHECK(!unit_combat_stop() && unit_combat_remove((uintptr_t)game));
+    CHECK(unit_combat_spawn_type(second, &local, 80u, &gallery_pose, 1) == 1);
+    CHECK(unit_combat_sample(second, (uintptr_t)game, 1).private_entities == 2u);
+    CHECK(!unit_combat_sample(second, (uintptr_t)game, 1).unexpected_entities);
+    CHECK(!unit_combat_slot(UNIT_COMBAT_CAPACITY));
+    CHECK(unit_combat_sample(NULL, (uintptr_t)game, 1).fault && !unit_combat_remove(NULL, 0));
+    CHECK(unit_combat_sample(second, (uintptr_t)game, 1).root == (uintptr_t)gallery_root[1]);
+    CHECK(!unit_combat_sample(fixture, (uintptr_t)game, 1).unexpected_entities);
+    CHECK(unit_combat_sample(fixture, (uintptr_t)game, 1).sources_unchanged);
+    CHECK(!unit_combat_stop() && unit_combat_remove(fixture, (uintptr_t)game));
     CHECK(!unit_combat_stop()); /* Slot1 is still owned. */
-    CHECK(unit_combat_select(1) && unit_combat_remove((uintptr_t)game));
-    CHECK(unit_combat_stop() && unit_combat_select(0));
+    CHECK(unit_combat_remove(second, (uintptr_t)game));
+    CHECK(unit_combat_stop());
     CHECK(gallery_created == 2u && gallery_destroyed == 2u && !gallery_error);
     /* Armor creates a private intermediate, debris and living successor.
        The successor is associated by private VID, never proximity to stock60. */
     local = prepare_forms();
     CHECK(unit_combat_init(image_base, form_create, form_destroy, animation));
     UnitPuppetPose form_pose = {100.0f, 200.0f, 0, 0, 0, 0};
-    CHECK(unit_combat_spawn_type(&local, 70u, &form_pose, 1) == 1 && !form_error);
-    uintptr_t armored = unit_combat_sample((uintptr_t)game, 1).root;
+    CHECK(unit_combat_spawn_type(fixture, &local, 70u, &form_pose, 1) == 1 && !form_error);
+    uintptr_t armored = unit_combat_sample(fixture, (uintptr_t)game, 1).root;
     unsigned char* armor_vid = *(unsigned char**)(armored + STEAM_ENTITY_VID_OFFSET);
     *(unsigned int*)(armored + STEAM_ENTITY_ANIM_OFFSET) = STEAM_ANIM_DEATH;
-    s = unit_combat_sample((uintptr_t)game, 1);
+    s = unit_combat_sample(fixture, (uintptr_t)game, 1);
     CHECK(s.transitioning && s.current_vid == 70u && s.form_revision == 2u);
     unsigned char* middle_vid =
         *(unsigned char**)(armor_vid + STEAM_VID_CREATIONS_OFFSET + 15u * 4u);
     uintptr_t middle = form_spawn(middle_vid, 0);
     unregister_entity(armored);
-    s = unit_combat_sample((uintptr_t)game, 1);
+    s = unit_combat_sample(fixture, (uintptr_t)game, 1);
     CHECK(!s.fault && !s.root && s.transitioning && s.private_entities == 15u);
     unsigned char* successor_vid =
         *(unsigned char**)(middle_vid + STEAM_VID_CREATIONS_OFFSET + 15u * 4u);
@@ -578,7 +585,7 @@ int main(void)
     *(uintptr_t*)unrelated = image_base + STEAM_UNIT_VTABLE_RVA;
     *(uintptr_t*)(unrelated + STEAM_ENTITY_VID_OFFSET) = (uintptr_t)form_sources[4];
     add_entity(5u, unrelated);
-    s = unit_combat_sample((uintptr_t)game, 1);
+    s = unit_combat_sample(fixture, (uintptr_t)game, 1);
     CHECK(!s.fault && s.root == successor && s.current_vid == 60u && !s.transitioning &&
           s.form_revision == 3u);
     uintptr_t frozen = 0;
@@ -592,26 +599,26 @@ int main(void)
     CHECK(unit_combat_observe_entity((uintptr_t)game, successor, &frozen, &current, &revision,
                                      &pending, 0) == 1);
     CHECK(current == 69u && revision == 4u && !pending);
-    s = unit_combat_sample((uintptr_t)game, 1);
+    s = unit_combat_sample(fixture, (uintptr_t)game, 1);
     CHECK(s.root == successor && s.current_vid == 69u && s.sources_unchanged &&
           s.transitions == 3u);
-    CHECK(unit_combat_remove((uintptr_t)game) && form_removed == 15u && !form_error);
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && form_removed == 15u && !form_error);
     CHECK(*(unsigned int*)(list(5u) + 4) == 1u && entries[5u][0] == (uintptr_t)unrelated);
     CHECK(unit_combat_stop());
     /* A final gib animation is terminal; it does not enter the armor chain. */
     local = prepare_forms();
     CHECK(unit_combat_init(image_base, form_create, form_destroy, animation));
-    CHECK(unit_combat_spawn_type(&local, 70u, &form_pose, 1) == 1);
-    armored = unit_combat_sample((uintptr_t)game, 0).root;
+    CHECK(unit_combat_spawn_type(fixture, &local, 70u, &form_pose, 1) == 1);
+    armored = unit_combat_sample(fixture, (uintptr_t)game, 0).root;
     *(unsigned int*)(armored + STEAM_ENTITY_ANIM_OFFSET) = STEAM_ANIM_GIB_DEATH;
-    CHECK(!unit_combat_sample((uintptr_t)game, 0).transitioning);
-    CHECK(unit_combat_remove((uintptr_t)game) && unit_combat_stop() && !form_error);
+    CHECK(!unit_combat_sample(fixture, (uintptr_t)game, 0).transitioning);
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && unit_combat_stop() && !form_error);
     /* Predictive armor is immediately damageable, but its native descriptor
        cannot create an intermediate or successor while awaiting authority. */
     local = prepare_forms();
     CHECK(unit_combat_init(image_base, form_create, form_destroy, animation));
-    CHECK(unit_combat_spawn_predictive(&local, 70u, &form_pose) == 1 && !form_error);
-    armored = unit_combat_sample((uintptr_t)game, 1).root;
+    CHECK(unit_combat_spawn_predictive(fixture, &local, 70u, &form_pose) == 1 && !form_error);
+    armored = unit_combat_sample(fixture, (uintptr_t)game, 1).root;
     armor_vid = *(unsigned char**)(armored + STEAM_ENTITY_VID_OFFSET);
     CHECK(inert_descriptor(armor_vid));
     CHECK(*(int*)(armor_vid + STEAM_VID_HEALTH_OFFSET) ==
@@ -619,18 +626,18 @@ int main(void)
     CHECK(*(unsigned int*)(armor_vid + STEAM_VID_COLLISION_MASK_OFFSET) ==
           *(unsigned int*)(form_sources[0] + STEAM_VID_COLLISION_MASK_OFFSET));
     *(unsigned int*)(armored + STEAM_ENTITY_ANIM_OFFSET) = STEAM_ANIM_DEATH;
-    s = unit_combat_sample((uintptr_t)game, 1);
+    s = unit_combat_sample(fixture, (uintptr_t)game, 1);
     CHECK(s.transitioning && s.form_revision == 2u && s.private_entities == 1u &&
           s.sources_unchanged);
-    CHECK(unit_combat_remove((uintptr_t)game) && unit_combat_stop() && form_removed == 1u &&
-          !form_error);
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && unit_combat_stop() &&
+          form_removed == 1u && !form_error);
     /* A predicted frozen form inherits native incoming health/resistance but
        suppresses every creation link, including the stock ice death graph. */
     local = prepare_forms();
     *(uintptr_t*)(form_sources[5] + STEAM_VID_CREATIONS_OFFSET + STEAM_ANIM_DEATH * 4u) = 0x1111u;
     CHECK(unit_combat_init(image_base, form_create, form_destroy, animation));
-    CHECK(unit_combat_spawn_predictive(&local, 60u, &form_pose) == 1 && !form_error);
-    successor = unit_combat_sample((uintptr_t)game, 1).root;
+    CHECK(unit_combat_spawn_predictive(fixture, &local, 60u, &form_pose) == 1 && !form_error);
+    successor = unit_combat_sample(fixture, (uintptr_t)game, 1).root;
     frozen = 0;
     CHECK(unit_combat_observe_entity((uintptr_t)game, successor, &frozen, &current, &revision,
                                      &pending, 69u) == 1);
@@ -643,8 +650,8 @@ int main(void)
     CHECK(unit_combat_observe_entity((uintptr_t)game, successor, &frozen, &current, &revision,
                                      &pending, 0) == 1);
     CHECK(current == 69u && revision == 2u && !pending);
-    CHECK(unit_combat_remove((uintptr_t)game) && unit_combat_stop() && form_removed == 1u &&
-          !form_error);
+    CHECK(unit_combat_remove(fixture, (uintptr_t)game) && unit_combat_stop() &&
+          form_removed == 1u && !form_error);
     CHECK(VirtualFree((void*)image_base, 0, MEM_RELEASE));
     printf("UNIT combat private-descriptor and cleanup checks passed.\n");
     return 0;

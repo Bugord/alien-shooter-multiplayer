@@ -9,7 +9,8 @@
 static struct
 {
     enum MonsterProbeState state;
-    UnitPuppet* puppet; /* The probe always drives puppet slot 0. */
+    UnitPuppet* puppet;  /* The probe always drives puppet slot 0. */
+    UnitCombat* fixture; /* ...and combat fixture slot 0. */
     DWORD entered, last_log;
     DWORD combat_world_ready;
     uintptr_t game;
@@ -33,6 +34,7 @@ int monster_probe_enable_kind(uintptr_t base, enum MonsterProbeKind kind)
         return 0;
     memset(&probe, 0, sizeof(probe));
     probe.puppet = unit_puppet_slot(0);
+    probe.fixture = unit_combat_slot(0);
     UnitPuppetEngine api;
     if (kind != MONSTER_PROBE_GROUND && kind != MONSTER_PROBE_FLYING &&
         kind != MONSTER_PROBE_FLYING_RELOAD && kind != MONSTER_PROBE_COMBAT &&
@@ -87,7 +89,7 @@ int monster_probe_enable(uintptr_t base)
 static void finish(MonsterProbeFrame* f, uintptr_t game, int failed)
 {
     f->cleanup = unit_puppet_release(probe.puppet, game);
-    if (probe.combat_initialized && !unit_combat_remove(game))
+    if (probe.combat_initialized && !unit_combat_remove(probe.fixture, game))
         f->cleanup = 0;
     if (probe.visual_initialized && !unit_death_remove(game))
         f->cleanup = 0;
@@ -139,7 +141,7 @@ static void combat_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now)
 {
     DWORD elapsed = now - probe.entered;
     f->combat_event = 1;
-    f->combat = unit_combat_sample(local->game, 1);
+    f->combat = unit_combat_sample(probe.fixture, local->game, 1);
     if (f->combat.fault || !f->combat.sources_unchanged || f->combat.unexpected_entities ||
         local->health != probe.player_health)
         ++probe.violations;
@@ -212,7 +214,7 @@ static void combat_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now)
         if (probe.kind == MONSTER_PROBE_DEATH && !probe.violations)
         {
             if (!unit_puppet_release(probe.puppet, local->game) ||
-                !unit_combat_remove(local->game) ||
+                !unit_combat_remove(probe.fixture, local->game) ||
                 unit_death_play(local->game, &probe.anchor, STEAM_ANIM_DEATH) != 1)
             {
                 ++probe.violations;
@@ -296,7 +298,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
                 probe.combat_world_ready = now;
             if (now - probe.combat_world_ready < 2000u)
                 return f;
-            int spawned = unit_combat_spawn(local);
+            int spawned = unit_combat_spawn(probe.fixture, local);
             if (spawned != 1)
             {
                 finish(&f, local->game, 1);
@@ -332,7 +334,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
         probe.anchor.direction = local->direction;
         if (combat_mode())
         {
-            UnitCombatSample combat = unit_combat_sample(local->game, 1);
+            UnitCombatSample combat = unit_combat_sample(probe.fixture, local->game, 1);
             UnitPuppetSample captured = unit_puppet_sample(probe.puppet, local->game);
             if (captured.entity != combat.root)
             {
