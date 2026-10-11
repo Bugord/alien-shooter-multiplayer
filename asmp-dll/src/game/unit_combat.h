@@ -4,7 +4,8 @@
 #define UNIT_COMBAT_CAPACITY UNIT_PUPPET_CAPACITY
 int unit_combat_select(unsigned int slot);
 
-typedef struct UnitCombatSample {
+typedef struct UnitCombatSample
+{
     uintptr_t root, child;
     unsigned int private_entities, other_entities, unexpected_entities;
     int sources_unchanged, fault;
@@ -12,7 +13,8 @@ typedef struct UnitCombatSample {
     int transitioning;
 } UnitCombatSample;
 int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* private_vid,
-    unsigned int* current_vid, unsigned int* revision, int* transitioning, unsigned int requested_vid);
+                               unsigned int* current_vid, unsigned int* revision,
+                               int* transitioning, unsigned int requested_vid);
 /* Bounded selected offline fixture / network copy. Default is VID50 + VID108.
    Factory owns native allocations;
    this module owns private shallow VID copies, never the borrowed resources.

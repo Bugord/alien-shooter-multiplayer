@@ -1,8 +1,16 @@
 #ifndef ASMP_DUMMY_ACTOR_H
 #define ASMP_DUMMY_ACTOR_H
 #include "../../asmp-dll/src/game/actor.h"
-enum DummyState { DUMMY_IDLE, DUMMY_WAITING, DUMMY_LIVE, DUMMY_DONE, DUMMY_ABANDONED };
-typedef struct DummyActor {
+enum DummyState
+{
+    DUMMY_IDLE,
+    DUMMY_WAITING,
+    DUMMY_LIVE,
+    DUMMY_DONE,
+    DUMMY_ABANDONED
+};
+typedef struct DummyActor
+{
     Actor native;
     enum DummyState state;
     uint32_t world_low, world_high;

@@ -5,14 +5,15 @@
 
 /* Steam methods use ECX and callee-cleaned stack arguments. An unused EDX
    argument makes __fastcall equivalent to their __thiscall ABI in MSVC C. */
-typedef void* (__fastcall* ActorCreate)(void*, void*, void*, float, float, float, int, void*);
-typedef void* (__fastcall* ActorDestroy)(void*, void*, int);
-typedef void (__fastcall* ActorMove)(void*, void*, float, float, float);
-typedef unsigned char (__fastcall* ActorRotate)(void*, void*, unsigned int);
-typedef int (__fastcall* ActorAction)(void*, void*, unsigned int, intptr_t, intptr_t, intptr_t);
-typedef int (__fastcall* ActorWeapon)(void*, void*, int);
-typedef void (__fastcall* ActorHealth)(void*, void*, int);
-typedef struct ActorEngine {
+typedef void*(__fastcall* ActorCreate)(void*, void*, void*, float, float, float, int, void*);
+typedef void*(__fastcall* ActorDestroy)(void*, void*, int);
+typedef void(__fastcall* ActorMove)(void*, void*, float, float, float);
+typedef unsigned char(__fastcall* ActorRotate)(void*, void*, unsigned int);
+typedef int(__fastcall* ActorAction)(void*, void*, unsigned int, intptr_t, intptr_t, intptr_t);
+typedef int(__fastcall* ActorWeapon)(void*, void*, int);
+typedef void(__fastcall* ActorHealth)(void*, void*, int);
+typedef struct ActorEngine
+{
     ActorCreate create;
     ActorDestroy destroy;
     ActorMove move;
@@ -22,13 +23,32 @@ typedef struct ActorEngine {
     ActorHealth health;
 } ActorEngine;
 
-enum ActorEvent { ACTOR_NONE, ACTOR_SPAWNED, ACTOR_REMOVED, ACTOR_LOST,
-    ACTOR_REJECTED, ACTOR_FAULT, ACTOR_POSE };
-enum ActorReason { ACTOR_REASON_NONE, ACTOR_REASON_VID_CLASS, ACTOR_REASON_NO_CHILD,
-    ACTOR_REASON_CATEGORY, ACTOR_REASON_FACTORY, ACTOR_REASON_REGISTRATION,
-    ACTOR_REASON_ENTITY_TYPE, ACTOR_REASON_LOCAL_PLAYER, ACTOR_REASON_EXCEPTION,
-    ACTOR_REASON_WEAPON, ACTOR_REASON_PRECONDITION };
-typedef struct ActorResult {
+enum ActorEvent
+{
+    ACTOR_NONE,
+    ACTOR_SPAWNED,
+    ACTOR_REMOVED,
+    ACTOR_LOST,
+    ACTOR_REJECTED,
+    ACTOR_FAULT,
+    ACTOR_POSE
+};
+enum ActorReason
+{
+    ACTOR_REASON_NONE,
+    ACTOR_REASON_VID_CLASS,
+    ACTOR_REASON_NO_CHILD,
+    ACTOR_REASON_CATEGORY,
+    ACTOR_REASON_FACTORY,
+    ACTOR_REASON_REGISTRATION,
+    ACTOR_REASON_ENTITY_TYPE,
+    ACTOR_REASON_LOCAL_PLAYER,
+    ACTOR_REASON_EXCEPTION,
+    ACTOR_REASON_WEAPON,
+    ACTOR_REASON_PRECONDITION
+};
+typedef struct ActorResult
+{
     enum ActorEvent event;
     uintptr_t entity;
     unsigned int category, updates;
@@ -39,7 +59,8 @@ typedef struct ActorResult {
     float applied_velocity;
     unsigned int applied_moving;
 } ActorResult;
-typedef struct Actor {
+typedef struct Actor
+{
     ActorEngine engine;
     uintptr_t game, player, entity;
     /* Private VID persists for the lifetime of its engine-owned entity.
@@ -61,7 +82,8 @@ int actor_set_army(Actor*, unsigned int army);
 /* 1 success, 0 rejected (keep previous weapon), -1 native exception. */
 int actor_arm(Actor*, int slot);
 /* Gives an entity every weapon slot (native items 260 + slot) that it does not
-   own yet, without selecting one, and tops the stored ammo of slots 1-9 up to STEAM_GRANT_AMMO. 1 success, -1 native exception. */
+   own yet, without selecting one, and tops the stored ammo of slots 1-9 up to STEAM_GRANT_AMMO. 1
+   success, -1 native exception. */
 int actor_grant_all_weapons(const ActorEngine* engine, uintptr_t entity);
 ActorResult actor_apply(Actor*, const Snapshot* target);
 /* The native destructor cascades through the child chain, of the replica.
