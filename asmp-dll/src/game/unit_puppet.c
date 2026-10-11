@@ -2,7 +2,9 @@
 #include <math.h>
 #include <float.h>
 #include "unit_puppet.h"
+#include "../../../common/src/monster_vids.h"
 #include "slot_hook.h"
+#include "world_list.h"
 
 enum PuppetMode
 {
@@ -116,18 +118,12 @@ static int registered(uintptr_t game)
     if (!puppet.entity || !game || game != puppet.game ||
         *(uintptr_t*)game != shared.base + STEAM_GAME_VTABLE_RVA)
         return 0;
-    uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + puppet.category * STEAM_LIST_SIZE;
-    unsigned int count = *(unsigned int*)(list + 4), cap = *(unsigned int*)(list + 8);
-    uintptr_t* items = *(uintptr_t**)(list + 12);
-    if (!items || count > cap || count > 65536u)
+    if (!world_list_find(game, puppet.category, puppet.entity))
         return 0;
-    for (unsigned int i = 0; i < count; ++i)
-        if (items[i] == puppet.entity)
-            return *(uintptr_t*)puppet.entity == shared.base + STEAM_UNIT_VTABLE_RVA &&
-                   *(uintptr_t*)(puppet.entity + STEAM_ENTITY_VID_OFFSET) == puppet.vid;
-    return 0;
+    return *(uintptr_t*)puppet.entity == shared.base + STEAM_UNIT_VTABLE_RVA &&
+           *(uintptr_t*)(puppet.entity + STEAM_ENTITY_VID_OFFSET) == puppet.vid;
 }
-static void lost(void)
+static void mark_entity_lost(void)
 {
     puppet.entity = puppet.child = 0;
     puppet.state = UNIT_PUPPET_LOST;
@@ -153,18 +149,12 @@ static int child_registered(void)
     unsigned int category = *(unsigned int*)(puppet.child_vid + STEAM_VID_CATEGORY_OFFSET);
     if (category >= STEAM_TICK_ENTITY_LIST_COUNT)
         return 0;
-    uintptr_t list = puppet.game + STEAM_WORLD_LIST_OFFSET + category * STEAM_LIST_SIZE;
-    unsigned int count = *(unsigned int*)(list + 4), cap = *(unsigned int*)(list + 8);
-    uintptr_t* items = *(uintptr_t**)(list + 12);
-    if (!items || count > cap || count > 65536u)
+    if (!world_list_find(puppet.game, category, puppet.child))
         return 0;
-    for (unsigned int i = 0; i < count; ++i)
-        if (items[i] == puppet.child)
-            return *(uintptr_t*)puppet.child == shared.base + STEAM_SPRITE_VTABLE_RVA &&
-                   *(uintptr_t*)(puppet.child + STEAM_ENTITY_VID_OFFSET) == puppet.child_vid &&
-                   !*(uintptr_t*)(puppet.child + STEAM_ENTITY_CHILD_OFFSET) &&
-                   *(uintptr_t*)(puppet.child + STEAM_ENTITY_PARENT_OFFSET) == puppet.entity;
-    return 0;
+    return *(uintptr_t*)puppet.child == shared.base + STEAM_SPRITE_VTABLE_RVA &&
+           *(uintptr_t*)(puppet.child + STEAM_ENTITY_VID_OFFSET) == puppet.child_vid &&
+           !*(uintptr_t*)(puppet.child + STEAM_ENTITY_CHILD_OFFSET) &&
+           *(uintptr_t*)(puppet.child + STEAM_ENTITY_PARENT_OFFSET) == puppet.entity;
 }
 static void select_animation(void* entity)
 {
@@ -209,8 +199,7 @@ static int observe_form(uintptr_t entity, unsigned int requested, uintptr_t* pre
     if (!result && actual != puppet.vid && puppet.watching)
     {
         unsigned int frozen = puppet.current_vid / 10u * 10u + 9u;
-        if (puppet.current_vid < 40u || puppet.current_vid > 90u || puppet.current_vid % 10u ||
-            frozen >= 1024u ||
+        if (!mp_monster_origin(puppet.current_vid) || frozen >= 1024u ||
             actual != *(uintptr_t*)(puppet.game + STEAM_GAME_VID_TABLE_OFFSET + frozen * 4u) ||
             !actual || *(unsigned int*)(actual + STEAM_VID_INDEX_OFFSET) != frozen ||
             *(unsigned int*)(actual + STEAM_VID_CLASS_OFFSET) != STEAM_UNIT_CLASS)
@@ -274,8 +263,7 @@ static int observed_action(void* e, unsigned int kind, intptr_t a, intptr_t b, i
     if ((uintptr_t)e == puppet.entity && kind == STEAM_ACT_CHANGE_VID)
     {
         if (puppet.predictive &&
-            (puppet.current_vid < 40u || puppet.current_vid > 90u || puppet.current_vid % 10u ||
-             a != (intptr_t)(puppet.current_vid + 9u)))
+            (!mp_monster_origin(puppet.current_vid) || a != (intptr_t)(puppet.current_vid + 9u)))
             return 0;
         if (a > 0 && a < 1024 && observe_form((uintptr_t)e, (unsigned int)a, &prepared) < 0)
             return 0;
@@ -336,7 +324,7 @@ static int prediction_action(void* e, unsigned int kind, intptr_t a, intptr_t b,
             observe_form((uintptr_t)e, 0, NULL);
         if (!registered(puppet.game))
         {
-            lost();
+            mark_entity_lost();
             return 0;
         }
         if (!child_registered() || !prediction_descriptor(puppet.vid, 1) ||
@@ -402,7 +390,7 @@ static int __fastcall scoped_action(void* e, void* unused, unsigned int kind, in
         {
             if (!registered(puppet.game))
             {
-                lost();
+                mark_entity_lost();
             }
             else if (kind == STEAM_ACT_NEXT_COMMAND)
             {
@@ -448,7 +436,7 @@ static void __fastcall scoped_movement(void* e, void* unused)
                 ++puppet.movements;
                 return;
             }
-            lost();
+            mark_entity_lost();
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -466,7 +454,7 @@ static void* __fastcall scoped_destroy(void* e, void* unused, int release)
         __try
         {
             observe_form((uintptr_t)e, 0, NULL);
-            if ((puppet.current_vid == 70u || puppet.current_vid == 90u) &&
+            if (mp_monster_armored(puppet.current_vid) &&
                 *(unsigned int*)((uintptr_t)e + STEAM_ENTITY_ANIM_OFFSET) == STEAM_ANIM_DEATH)
                 puppet.transitioning = 1;
             if (!puppet.transitioning)
@@ -478,7 +466,7 @@ static void* __fastcall scoped_destroy(void* e, void* unused, int release)
         }
     }
     if (puppet.entity == (uintptr_t)e)
-        lost();
+        mark_entity_lost();
     return shared.api.destroy(e, NULL, release);
 }
 static int __fastcall scoped_part_action(void* e, void* unused, unsigned int kind, intptr_t a,
@@ -656,11 +644,12 @@ static int attach(uintptr_t game, uintptr_t player, uintptr_t required, enum Pup
         for (unsigned int cat = 0; cat < STEAM_TICK_ENTITY_LIST_COUNT; ++cat)
         {
             uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + cat * STEAM_LIST_SIZE;
-            unsigned int count = *(unsigned int*)(list + 4), cap = *(unsigned int*)(list + 8);
-            uintptr_t* entries = *(uintptr_t**)(list + 12);
+            unsigned int count = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET),
+                         cap = *(unsigned int*)(list + STEAM_LIST_CAPACITY_OFFSET);
+            uintptr_t* entries = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
             if (!count)
                 continue;
-            if (!entries || count > cap || count > 65536u)
+            if (!entries || count > cap || count > STEAM_LIST_MAX_ENTRIES)
                 return 0;
             for (unsigned int i = 0; i < count; ++i)
             {
@@ -672,7 +661,7 @@ static int attach(uintptr_t game, uintptr_t player, uintptr_t required, enum Pup
                 unsigned int anim = *(unsigned int*)(e + STEAM_ENTITY_ANIM_OFFSET);
                 if (!vid ||
                     (watching == PUPPET_WATCH && !required &&
-                     *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET) != 50u) ||
+                     *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET) != MONSTER_VID_MONSTER1) ||
                     *(unsigned int*)(vid + STEAM_VID_CLASS_OFFSET) != STEAM_UNIT_CLASS ||
                     *(unsigned int*)(vid + STEAM_VID_CATEGORY_OFFSET) != cat ||
                     *(int*)(e + STEAM_ENTITY_HEALTH_OFFSET) <= 0 ||
@@ -736,8 +725,8 @@ static int attach(uintptr_t game, uintptr_t player, uintptr_t required, enum Pup
                 if (watching == PUPPET_STATIONARY &&
                     (anim == STEAM_ANIM_DEATH || anim == STEAM_ANIM_GIB_DEATH))
                 {
-                    puppet.transitioning = anim == STEAM_ANIM_DEATH &&
-                                           (puppet.current_vid == 70u || puppet.current_vid == 90u);
+                    puppet.transitioning =
+                        anim == STEAM_ANIM_DEATH && mp_monster_armored(puppet.current_vid);
                     if (!puppet.transitioning)
                         capture_death(e);
                     return 1;
@@ -810,7 +799,7 @@ int unit_puppet_host_kill(uintptr_t game)
 int unit_puppet_host_freeze(uintptr_t game)
 {
     if (!puppet.watching || puppet.dying || puppet.state != UNIT_PUPPET_ACTIVE ||
-        puppet.current_vid < 40u || puppet.current_vid > 90u || puppet.current_vid % 10u)
+        !mp_monster_origin(puppet.current_vid))
         return 0;
     __try
     {
@@ -864,7 +853,7 @@ int unit_puppet_apply(uintptr_t game, const UnitPuppetPose* p)
     {
         if (!registered(game))
         {
-            lost();
+            mark_entity_lost();
             return 0;
         }
         if (!child_registered())
@@ -945,7 +934,7 @@ int unit_puppet_prediction_test_hit(uintptr_t game, int damage, int freeze)
         unsigned int animation = *(unsigned int*)(puppet.entity + STEAM_ENTITY_ANIM_OFFSET);
         if (freeze && (animation == STEAM_ANIM_DEATH || animation == STEAM_ANIM_GIB_DEATH))
         {
-            if (puppet.current_vid < 40u || puppet.current_vid > 90u || puppet.current_vid % 10u)
+            if (!mp_monster_origin(puppet.current_vid))
                 return 0;
             unsigned int frozen = puppet.current_vid + 9u;
             on_action((void*)puppet.entity, NULL, STEAM_ACT_CHANGE_VID, frozen, STEAM_ANIM_IDLE, 0);
@@ -1076,20 +1065,12 @@ UnitPuppetSample unit_puppet_sample(uintptr_t game)
         if (puppet.entity && (puppet.watching || puppet.predictive))
         {
             /* Validate membership before observing a potentially changed VID. */
-            uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + puppet.category * STEAM_LIST_SIZE;
-            unsigned int count = *(unsigned int*)(list + 4), cap = *(unsigned int*)(list + 8);
-            uintptr_t* entries = *(uintptr_t**)(list + 12);
-            if (game == puppet.game && entries && count <= cap && count <= 65536u)
-                for (unsigned int i = 0; i < count; ++i)
-                    if (entries[i] == puppet.entity)
-                    {
-                        observe_form(puppet.entity, 0, NULL);
-                        break;
-                    }
+            if (game == puppet.game && world_list_find(game, puppet.category, puppet.entity))
+                observe_form(puppet.entity, 0, NULL);
         }
         if (puppet.entity && !registered(game))
         {
-            lost();
+            mark_entity_lost();
             s.state = puppet.state;
             s.entity = 0;
         }
@@ -1100,8 +1081,7 @@ UnitPuppetSample unit_puppet_sample(uintptr_t game)
             s.class_id = STEAM_UNIT_CLASS;
             s.health = *(int*)(e + STEAM_ENTITY_HEALTH_OFFSET);
             s.animation = *(unsigned int*)(e + STEAM_ENTITY_ANIM_OFFSET);
-            if ((puppet.watching || puppet.predictive) &&
-                (puppet.current_vid == 70u || puppet.current_vid == 90u) &&
+            if ((puppet.watching || puppet.predictive) && mp_monster_armored(puppet.current_vid) &&
                 s.animation == STEAM_ANIM_DEATH)
                 puppet.transitioning = 1;
             if ((puppet.watching || puppet.predictive) && !puppet.dying && !puppet.transitioning &&

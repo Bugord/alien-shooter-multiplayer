@@ -1,8 +1,13 @@
 #include <string.h>
 #include "monster_sync.h"
+#include "retry_policy.h"
 
 #define MONSTER_EVENT_CAPACITY 64u
 #define MONSTER_PREDICTION_MS  750u
+/* A new world must stay stable this long before monsters are created. */
+#define MONSTER_SETTLE_MS 2000u
+/* Death and armor-debris presentations are removed after this long. */
+#define MONSTER_PRESENTATION_LIFETIME_MS 30000u
 enum PredictionState
 {
     PREDICTION_NONE,
@@ -85,7 +90,7 @@ int monster_sync_initialize(uintptr_t base, enum MonsterRole role, const UnitPup
     {
         slots[i].role = role;
         slots[i].state = MS_WAITING;
-        slots[i].retry_delay = 2000u;
+        slots[i].retry_delay = MP_RETRY_FIRST_MS;
         slots[i].stopped = 1;
     }
     return 1;
@@ -108,8 +113,10 @@ int monster_sync_gallery(int enabled)
 }
 static unsigned int expected_vid(unsigned int slot)
 {
-    static const unsigned int types[] = {40u, 50u, 60u, 80u, 70u, 90u};
-    return gallery ? types[slot / 8u] : 50u;
+    static const unsigned int types[] = {
+        MONSTER_VID_SLUG, MONSTER_VID_MONSTER1,         MONSTER_VID_MONSTER2,
+        MONSTER_VID_TANK, MONSTER_VID_MONSTER2_ARMORED, MONSTER_VID_TANK_ARMORED};
+    return gallery ? types[slot / 8u] : MONSTER_VID_MONSTER1;
 }
 void monster_sync_publish_at(unsigned int slot, const MonsterState* source, int local_authority,
                              DWORD now)
@@ -174,7 +181,7 @@ int monster_sync_take_event(MpMonsterEvent* out)
     ReleaseSRWLockExclusive(&lock);
     return available;
 }
-static void stage(unsigned int kind, uint32_t tick, const UnitPuppetPose* pose)
+static void stage_event(unsigned int kind, uint32_t tick, const UnitPuppetPose* pose)
 {
     MpMonsterEvent event = {0};
     event.sequence = ++monsters.event_sequence;
@@ -222,7 +229,7 @@ static int cleanup(uintptr_t game)
     monsters.prediction = PREDICTION_NONE;
     return 1;
 }
-static void backoff(uintptr_t game, DWORD now)
+static void schedule_retry(uintptr_t game, DWORD now)
 {
     if (!cleanup(game))
     {
@@ -234,11 +241,11 @@ static void backoff(uintptr_t game, DWORD now)
     monsters.armor_presented = 0;
     monsters.state = MS_BACKOFF;
     monsters.retry_at = now + monsters.retry_delay;
-    if (monsters.retry_delay < 30000u)
+    if (monsters.retry_delay < MP_RETRY_MAX_MS)
     {
         monsters.retry_delay *= 2u;
-        if (monsters.retry_delay > 30000u)
-            monsters.retry_delay = 30000u;
+        if (monsters.retry_delay > MP_RETRY_MAX_MS)
+            monsters.retry_delay = MP_RETRY_MAX_MS;
     }
 }
 static int same_world(const MpMonsterState* s)
@@ -277,7 +284,7 @@ static int present_armor(uintptr_t game, const UnitPuppetPose* pose, unsigned in
     }
     if (played != 1)
     {
-        backoff(game, now);
+        schedule_retry(game, now);
         return 0;
     }
     monsters.armor_presented = revision;
@@ -306,7 +313,7 @@ static void present_death(uintptr_t game, const UnitPuppetPose* pose, unsigned i
     InterlockedExchange(&monsters.stopped, 0);
     if (unit_death_play_type(game, pose, animation, monsters.vid) != 1)
     {
-        backoff(game, now);
+        schedule_retry(game, now);
         return;
     }
     monsters.death_presented = 1;
@@ -329,7 +336,7 @@ static int client_copy(const Snapshot* local, unsigned int vid, const UnitPuppet
         InterlockedExchange(&monsters.stopped, 0);
         if (unit_combat_spawn_predictive(&spawn, vid, pose) != 1)
         {
-            backoff(game, now);
+            schedule_retry(game, now);
             return 0;
         }
         UnitCombatSample fixture = unit_combat_sample(game, 1);
@@ -337,17 +344,17 @@ static int client_copy(const Snapshot* local, unsigned int vid, const UnitPuppet
             unit_puppet_attach_entity(game, local->player, fixture.root) != 1 ||
             unit_puppet_prediction(game) != 1)
         {
-            backoff(game, now);
+            schedule_retry(game, now);
             return 0;
         }
         monsters.presentation_vid = vid;
         monsters.predicted_hits = 0;
-        monsters.retry_delay = 2000u;
+        monsters.retry_delay = MP_RETRY_FIRST_MS;
     }
     monsters.state = MS_ACTIVE;
     if (unit_puppet_apply(game, pose) != 1 || (health > 0 && unit_puppet_health(game, health) != 1))
     {
-        backoff(game, now);
+        schedule_retry(game, now);
         return 0;
     }
     return 1;
@@ -378,7 +385,7 @@ static int predict_hit(uintptr_t game, const MpMonsterState* source, DWORD now)
     UnitPuppetSample sample = unit_puppet_sample(game);
     if (sample.state == UNIT_PUPPET_FAULT)
     {
-        backoff(game, now);
+        schedule_retry(game, now);
         return 0;
     }
     if (sample.predicted_hits == monsters.predicted_hits)
@@ -396,7 +403,7 @@ static int predict_hit(uintptr_t game, const MpMonsterState* source, DWORD now)
     if (sample.transitioning)
     {
         monsters.prediction = PREDICTION_FORM;
-        monsters.predicted_vid = sample.vid == 70u ? 60u : 80u;
+        monsters.predicted_vid = mp_monster_armor_successor(sample.vid);
         monsters.predicted_health = 0; /* Native successor constructor supplies HP. */
     }
     else if (sample.captured_deaths)
@@ -411,7 +418,7 @@ static int predict_hit(uintptr_t game, const MpMonsterState* source, DWORD now)
         }
         if (unit_death_play_type(game, &pose, sample.death_animation, monsters.predicted_vid) != 1)
         {
-            backoff(game, now);
+            schedule_retry(game, now);
             return 0;
         }
         monsters.death_at = now;
@@ -477,7 +484,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
         monsters.death_animation = 0;
         memset(&monsters.host_pose, 0, sizeof(monsters.host_pose));
         monsters.state = MS_WAITING;
-        monsters.retry_delay = 2000u;
+        monsters.retry_delay = MP_RETRY_FIRST_MS;
         if (!valid_world)
             goto report;
         monsters.game = game;
@@ -493,7 +500,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
         goto report;
     if (monsters.state == MS_BACKOFF)
         monsters.state = MS_WAITING;
-    if (now - monsters.settled_at < 2000u)
+    if (now - monsters.settled_at < MONSTER_SETTLE_MS)
         goto report;
     if (monsters.role == MONSTER_HOST)
     {
@@ -528,7 +535,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
                     unit_combat_spawn_type(&spawn, expected_vid(selected_slot), &position, 1);
                 if (created != 1)
                 {
-                    backoff(game, now);
+                    schedule_retry(game, now);
                     goto report;
                 }
                 UnitCombatSample fixture = unit_combat_sample(game, 0);
@@ -540,7 +547,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
                 attached = unit_puppet_watch_first(game, local->player);
             if (attached < 0)
             {
-                backoff(game, now);
+                schedule_retry(game, now);
                 goto report;
             }
             if (!attached)
@@ -555,7 +562,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
             UnitCombatSample fixture = unit_combat_sample(game, 0);
             if (fixture.fault)
             {
-                backoff(game, now);
+                schedule_retry(game, now);
                 goto report;
             }
             if (!fixture.transitioning && fixture.root && fixture.root != frame.unit.entity &&
@@ -564,7 +571,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
                 if (!unit_puppet_release(game) ||
                     unit_puppet_watch_stationary(game, local->player, fixture.root) != 1)
                 {
-                    backoff(game, now);
+                    schedule_retry(game, now);
                     goto report;
                 }
                 monsters.seen_attacks = monsters.seen_deaths = 0;
@@ -576,7 +583,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
         }
         if (frame.unit.state == UNIT_PUPPET_FAULT)
         {
-            backoff(game, now);
+            schedule_retry(game, now);
             goto report;
         }
         if (frame.unit.entity && !monsters.seen_deaths)
@@ -592,10 +599,13 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
         uint32_t phase = frame.unit.transitioning ? MP_MONSTER_FORM_ARMOR : MP_MONSTER_FORM_ACTIVE;
         /* Medium armor already emits native debris. Large armor has no stock
            fragments, so give the host the same separate visual as its clients. */
-        if ((current_vid == 90u && phase == MP_MONSTER_FORM_ARMOR) ||
-            (monsters.vid == 90u && (current_vid == 80u || current_vid == 89u)))
+        if ((current_vid == MONSTER_VID_TANK_ARMORED && phase == MP_MONSTER_FORM_ARMOR) ||
+            (monsters.vid == MONSTER_VID_TANK_ARMORED &&
+             (current_vid == MONSTER_VID_TANK ||
+              current_vid == MONSTER_VID_TANK + MONSTER_VID_FROZEN_DELTA)))
         {
-            if (!present_armor(game, &monsters.host_pose, 90u, monsters.form_revision, now))
+            if (!present_armor(game, &monsters.host_pose, MONSTER_VID_TANK_ARMORED,
+                               monsters.form_revision, now))
                 goto report;
         }
         if (current_vid != monsters.vid || phase != monsters.form_phase)
@@ -605,7 +615,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
             monsters.form_phase = phase;
             ++monsters.form_revision;
             ++monsters.forms;
-            stage(MP_MONSTER_FORM, tick, &monsters.host_pose);
+            stage_event(MP_MONSTER_FORM, tick, &monsters.host_pose);
         }
         monsters.state = phase == MP_MONSTER_FORM_ARMOR ? MS_TRANSFORMING : MS_ACTIVE;
         /* Counters come from native action callbacks, not animation snapshots. */
@@ -617,7 +627,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
         }
         for (unsigned int i = 0; i < count; ++i)
         {
-            stage(MP_MONSTER_ATTACK, tick, &monsters.host_pose);
+            stage_event(MP_MONSTER_ATTACK, tick, &monsters.host_pose);
             ++monsters.attacks;
         }
         monsters.seen_attacks = frame.unit.captured_attacks;
@@ -630,7 +640,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
                 monsters.host_pose = frame.unit.death_pose;
             monsters.host_pose.velocity = 0;
             monsters.host_pose.moving = 0;
-            stage(MP_MONSTER_DEATH, tick, &monsters.host_pose);
+            stage_event(MP_MONSTER_DEATH, tick, &monsters.host_pose);
             ++monsters.deaths;
             monsters.seen_deaths = frame.unit.captured_deaths ? frame.unit.captured_deaths : 1u;
         }
@@ -805,8 +815,12 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
             /* Recover an omitted armor-pending packet while the successor is
                already current. A late join starts at the current form. */
             if (previous_vid && !previous_phase &&
-                ((previous_vid == 70u && (source->vid == 60u || source->vid == 69u)) ||
-                 (previous_vid == 90u && (source->vid == 80u || source->vid == 89u))))
+                ((previous_vid == MONSTER_VID_MONSTER2_ARMORED &&
+                  (source->vid == MONSTER_VID_MONSTER2 ||
+                   source->vid == MONSTER_VID_MONSTER2 + MONSTER_VID_FROZEN_DELTA)) ||
+                 (previous_vid == MONSTER_VID_TANK_ARMORED &&
+                  (source->vid == MONSTER_VID_TANK ||
+                   source->vid == MONSTER_VID_TANK + MONSTER_VID_FROZEN_DELTA))))
             {
                 UnitPuppetPose armor_pose = {source->x, source->y,         source->z,
                                              0,         source->direction, 0};
@@ -824,7 +838,8 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
             {
                 frame.visual = unit_death_sample(game);
                 if (frame.visual.fault ||
-                    (now - monsters.death_at > 30000u && !unit_death_remove(game)))
+                    (now - monsters.death_at > MONSTER_PRESENTATION_LIFETIME_MS &&
+                     !unit_death_remove(game)))
                     monsters.state = MS_ABANDONED;
             }
             goto report;
@@ -837,7 +852,7 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
         int view_health = source->health;
         if (source->form_phase == MP_MONSTER_FORM_ARMOR)
         {
-            view_vid = source->vid == 70u ? 60u : 80u;
+            view_vid = mp_monster_armor_successor(source->vid);
             view_health = 0;
             pose.velocity = 0;
             pose.moving = 0;
@@ -859,8 +874,10 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
         }
         if ((source->form_phase == MP_MONSTER_FORM_ARMOR ||
              (monsters.prediction == PREDICTION_FORM &&
-              ((monsters.presentation_vid == 70u && view_vid == 60u) ||
-               (monsters.presentation_vid == 90u && view_vid == 80u)))) &&
+              ((monsters.presentation_vid == MONSTER_VID_MONSTER2_ARMORED &&
+                view_vid == MONSTER_VID_MONSTER2) ||
+               (monsters.presentation_vid == MONSTER_VID_TANK_ARMORED &&
+                view_vid == MONSTER_VID_TANK)))) &&
             !monsters.armor_presented)
         {
             unsigned int armored = source->origin_vid;
@@ -919,14 +936,14 @@ static MonsterSyncFrame tick_slot(const Snapshot* local, enum ProbeResult result
                 continue;
             if (unit_puppet_replay(game, e->sequence, STEAM_ANIM_ATTACK) != 1)
             {
-                backoff(game, now);
+                schedule_retry(game, now);
                 break;
             }
             ++monsters.attacks;
         }
         frame.unit = unit_puppet_sample(game);
         if (monsters.state == MS_ACTIVE && frame.unit.state != UNIT_PUPPET_ACTIVE)
-            backoff(game, now);
+            schedule_retry(game, now);
     }
 report:
     monsters.rejected += received_count - considered;
@@ -936,7 +953,8 @@ report:
     {
         unit_death_select(selected_slot + MP_MONSTER_CAPACITY);
         UnitDeathSample armor = unit_death_sample(game);
-        if (armor.fault || (now - monsters.armor_at > 30000u && !unit_death_remove(game)))
+        if (armor.fault || (now - monsters.armor_at > MONSTER_PRESENTATION_LIFETIME_MS &&
+                            !unit_death_remove(game)))
             monsters.state = MS_ABANDONED;
         unit_death_select(selected_slot);
         frame.visual.entities += armor.entities;

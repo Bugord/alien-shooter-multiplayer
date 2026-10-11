@@ -62,15 +62,16 @@ int main(void)
     *(unsigned int*)(icon_vid + STEAM_VID_INDEX_OFFSET) = STEAM_STATEBAR_WEAPON_VID;
     icon[STEAM_ENTITY_DIRECTION_OFFSET] = 153; /* slot 6 is stored as 6*256/10 */
     items[0] = (uintptr_t)icon;
-    *(unsigned int*)(game + STEAM_GAME_MENU_LIST_OFFSET + 4) = 1;
-    *(unsigned int*)(game + STEAM_GAME_MENU_LIST_OFFSET + 8) = 4;
-    *(uintptr_t**)(game + STEAM_GAME_MENU_LIST_OFFSET + 12) = items;
+    *(unsigned int*)(game + STEAM_GAME_MENU_LIST_OFFSET + STEAM_LIST_COUNT_OFFSET) = 1;
+    *(unsigned int*)(game + STEAM_GAME_MENU_LIST_OFFSET + STEAM_LIST_CAPACITY_OFFSET) = 4;
+    *(uintptr_t**)(game + STEAM_GAME_MENU_LIST_OFFSET + STEAM_LIST_ITEMS_OFFSET) = items;
     CHECK(ui_show_weapon_icons((uintptr_t)game) == 1);
     CHECK(record[0] == (uintptr_t)icon && record[1] == STEAM_ACT_SET_INVISIBLE && record[2] == 0);
     *(unsigned int*)(icon_vid + STEAM_VID_INDEX_OFFSET) = 123; /* Not a state bar icon. */
     memset(record, 0, 5 * sizeof(uintptr_t));
     CHECK(ui_show_weapon_icons((uintptr_t)game) == 0 && !record[0]);
-    *(unsigned int*)(game + STEAM_GAME_MENU_LIST_OFFSET + 4) = 0; /* Panel not built yet. */
+    *(unsigned int*)(game + STEAM_GAME_MENU_LIST_OFFSET + STEAM_LIST_COUNT_OFFSET) =
+        0; /* Panel not built yet. */
     CHECK(ui_show_weapon_icons((uintptr_t)game) == 0);
     if (failures)
         return 1;

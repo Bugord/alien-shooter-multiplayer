@@ -202,16 +202,19 @@ int main(void)
     part_vt[0] = (void*)original_destroy;
     part_vt[1] = (void*)original_action;
     *(uintptr_t*)game = base + STEAM_GAME_VTABLE_RVA;
-    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + 4) = 2;
-    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + 8) = 4;
-    *(uintptr_t**)(game + STEAM_WORLD_LIST_OFFSET + 12) = entries;
+    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + STEAM_LIST_COUNT_OFFSET) = 2;
+    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + STEAM_LIST_CAPACITY_OFFSET) = 4;
+    *(uintptr_t**)(game + STEAM_WORLD_LIST_OFFSET + STEAM_LIST_ITEMS_OFFSET) = entries;
     entries[0] = (uintptr_t)other;
     entries[1] = (uintptr_t)unit;
     /* Script list beyond the native tick's 16 categories contains non-entity
        values. A scanner must never follow its entries. */
-    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + 17u * STEAM_LIST_SIZE + 4) = 1;
-    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + 17u * STEAM_LIST_SIZE + 8) = 1;
-    *(uintptr_t*)(game + STEAM_WORLD_LIST_OFFSET + 17u * STEAM_LIST_SIZE + 12) = 1;
+    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + 17u * STEAM_LIST_SIZE +
+                     STEAM_LIST_COUNT_OFFSET) = 1;
+    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + 17u * STEAM_LIST_SIZE +
+                     STEAM_LIST_CAPACITY_OFFSET) = 1;
+    *(uintptr_t*)(game + STEAM_WORLD_LIST_OFFSET + 17u * STEAM_LIST_SIZE +
+                  STEAM_LIST_ITEMS_OFFSET) = 1;
     *(uintptr_t*)unit = *(uintptr_t*)other = (uintptr_t)vt;
     *(uintptr_t*)(unit + STEAM_ENTITY_VID_OFFSET) = *(uintptr_t*)(other + STEAM_ENTITY_VID_OFFSET) =
         (uintptr_t)vid;
@@ -280,7 +283,7 @@ int main(void)
     *(unsigned int*)(child_vid + STEAM_VID_CLASS_OFFSET) = STEAM_PUPPET_PART_CLASS;
     *(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) = (uintptr_t)unit;
     entries[2] = (uintptr_t)child;
-    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + 4) = 3;
+    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + STEAM_LIST_COUNT_OFFSET) = 3;
     *(uintptr_t*)(child + STEAM_ENTITY_GOAL_OFFSET) = 123;
     *(unsigned int*)(child + STEAM_ENTITY_STACK_COUNT_OFFSET) = 2;
     CHECK(unit_puppet_attach_first((uintptr_t)game, (uintptr_t)other) == 1);
@@ -377,7 +380,7 @@ int main(void)
     *(unsigned int*)(child + STEAM_ENTITY_STACK_COUNT_OFFSET) = 2;
     entries[1] = (uintptr_t)unit;
     entries[2] = (uintptr_t)child;
-    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + 4) = 3;
+    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + STEAM_LIST_COUNT_OFFSET) = 3;
     unsigned char watch_root_before[sizeof(unit)], watch_part_before[sizeof(child)];
     memcpy(watch_root_before, unit, sizeof(unit));
     memcpy(watch_part_before, child, sizeof(child));
@@ -456,7 +459,7 @@ int main(void)
     *(unsigned int*)(unit + STEAM_ENTITY_ANIM_OFFSET) = STEAM_ANIM_IDLE;
     *(int*)(unit + STEAM_ENTITY_HEALTH_OFFSET) = 100;
     *(uintptr_t*)(unit + STEAM_ENTITY_CHILD_OFFSET) = 0;
-    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + 4) = 2;
+    *(unsigned int*)(game + STEAM_WORLD_LIST_OFFSET + STEAM_LIST_COUNT_OFFSET) = 2;
     CHECK(unit_puppet_watch_stationary((uintptr_t)game, (uintptr_t)other, (uintptr_t)unit) == 1);
     CHECK(unit_puppet_select(1));
     CHECK(!unit_puppet_watch_entity((uintptr_t)game, (uintptr_t)other, (uintptr_t)unit));

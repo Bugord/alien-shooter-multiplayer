@@ -135,8 +135,16 @@
    members include script lists, not entity lists. Use this bound when scanning. */
 #define STEAM_TICK_ENTITY_LIST_COUNT 16u
 #define STEAM_LIST_SIZE              0x10u
-#define STEAM_VID_CLASS_OFFSET       0x10u
-#define STEAM_VID_BEHAVIOR_OFFSET    0x45Cu
+/* Entity list header layout inside GAME (see world_list.h): the first word is
+   not used by the mod. Counts above the limit are treated as corruption. */
+#define STEAM_LIST_COUNT_OFFSET    4u
+#define STEAM_LIST_CAPACITY_OFFSET 8u
+#define STEAM_LIST_ITEMS_OFFSET    12u
+#define STEAM_LIST_MAX_ENTRIES     65536u
+/* Menu lists (HUD icons, buttons) are far smaller than world entity lists. */
+#define STEAM_MENU_LIST_MAX_ENTRIES 4096u
+#define STEAM_VID_CLASS_OFFSET      0x10u
+#define STEAM_VID_BEHAVIOR_OFFSET   0x45Cu
 /* Loaded MAP behavior table records: loader 43DE61 uses stride 0x264.
    UNIT constructor reads the command/AI flags at behavior+0x30. */
 #define STEAM_BEHAVIOR_SIZE               0x264u

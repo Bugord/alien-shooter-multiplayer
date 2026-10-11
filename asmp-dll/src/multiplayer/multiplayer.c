@@ -1,8 +1,14 @@
 #include <string.h>
 #include "multiplayer.h"
 #include "pose_buffer.h"
+#include "retry_policy.h"
 #include "../game/ui.h"
 #include "../game/display_hook.h"
+
+/* Retry delay doubles for this many failures, then stays at the maximum. */
+#define PEER_RETRY_DOUBLINGS 4u
+/* A peer must wait this long in RS_WAITING before its actor is spawned. */
+#define PEER_SPAWN_DELAY_MS 2000u
 
 typedef struct Remote
 {
@@ -192,10 +198,11 @@ static void report(MultiplayerFrame* frame, unsigned int id, const Remote* r,
     frame->remote[i].state = r->state;
     frame->remote[i].cleanup_failed = cleanup_failed;
 }
-static void backoff(Remote* r, DWORD now)
+static void schedule_retry(Remote* r, DWORD now)
 {
-    DWORD delay = r->failures < 4u ? (2000u << r->failures) : 30000u;
-    if (r->failures < 4u)
+    DWORD delay =
+        r->failures < PEER_RETRY_DOUBLINGS ? (MP_RETRY_FIRST_MS << r->failures) : MP_RETRY_MAX_MS;
+    if (r->failures < PEER_RETRY_DOUBLINGS)
         ++r->failures;
     r->retry_at = now + delay;
     r->state = RS_BACKOFF;
@@ -362,10 +369,10 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
             else if (r->state == RS_BACKOFF && (int32_t)(now - r->retry_at) >= 0)
             {
                 r->state = RS_WAITING;
-                r->entered_at = now - 2000u;
+                r->entered_at = now - PEER_SPAWN_DELAY_MS;
             }
-            if (r->state == RS_WAITING && now - r->entered_at >= 2000u && state == PROBE_OK &&
-                local->player)
+            if (r->state == RS_WAITING && now - r->entered_at >= PEER_SPAWN_DELAY_MS &&
+                state == PROBE_OK && local->player)
             {
                 update = actor_spawn(&r->actor, base, local, &target);
                 if (update.event == ACTOR_SPAWNED)
@@ -381,7 +388,7 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
                     if (cleanup.event == ACTOR_FAULT)
                         abandon(r, local->game, &update, &cleanup_failed);
                     else
-                        backoff(r, now);
+                        schedule_retry(r, now);
                 }
             }
             else if (r->state == RS_SPAWNING)
@@ -405,7 +412,7 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
                     if (update.event == ACTOR_FAULT)
                         abandon(r, local->game, &update, &cleanup_failed);
                     else
-                        backoff(r, now);
+                        schedule_retry(r, now);
                 }
             }
             if (r->state == RS_SPAWNED)

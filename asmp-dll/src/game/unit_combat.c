@@ -1,6 +1,7 @@
 #include <string.h>
 #include <float.h>
 #include "unit_combat.h"
+#include "../../../common/src/monster_vids.h"
 
 enum CombatFixtureState
 {
@@ -216,7 +217,8 @@ static int clone_form(uintptr_t game, uintptr_t source, unsigned int expected, u
             uintptr_t private_target;
             if (!n || n > 16u ||
                 (target_class == STEAM_UNIT_CLASS &&
-                 !(expected == 771u && a == STEAM_ANIM_DEATH && target_index == 60u && n == 1u)) ||
+                 !(expected == 771u && a == STEAM_ANIM_DEATH &&
+                   target_index == MONSTER_VID_MONSTER2 && n == 1u)) ||
                 !clone_form(game, target, target_index, &private_target))
                 return 0;
             int child_index = private_form(private_target);
@@ -234,16 +236,16 @@ static int clone_form(uintptr_t game, uintptr_t source, unsigned int expected, u
 }
 static int armor_graph(uintptr_t game, unsigned int index, uintptr_t source)
 {
-    if (index != 70u && index != 90u)
+    if (!mp_monster_armored(index))
         return 1;
     uintptr_t target = *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + STEAM_ANIM_DEATH * 4u),
               private_target;
-    unsigned int expected = index == 70u ? 771u : 80u;
+    unsigned int expected = index == MONSTER_VID_MONSTER2_ARMORED ? 771u : MONSTER_VID_TANK;
     if (!target ||
         *(unsigned int*)(source + STEAM_VID_CREATION_COUNT_OFFSET + STEAM_ANIM_DEATH * 4u) != 1u ||
         *(unsigned int*)(target + STEAM_VID_INDEX_OFFSET) != expected ||
         *(unsigned int*)(target + STEAM_VID_CLASS_OFFSET) !=
-            (index == 70u ? 5u : STEAM_UNIT_CLASS) ||
+            (index == MONSTER_VID_MONSTER2_ARMORED ? 5u : STEAM_UNIT_CLASS) ||
         !clone_form(game, target, expected, &private_target))
         return 0;
     *(uintptr_t*)(fixture.root_vid + STEAM_VID_CREATIONS_OFFSET + STEAM_ANIM_DEATH * 4u) =
@@ -296,7 +298,7 @@ static int spawn_type(const Snapshot* local, unsigned int index, const UnitPuppe
             uintptr_t behavior = *(uintptr_t*)(source + STEAM_VID_BEHAVIOR_OFFSET);
             /* Armor successors must be stationary from constructor entry,
                before a coordinator has an opportunity to attach their hooks. */
-            if (fixture.predictive || index == 70u || index == 90u)
+            if (fixture.predictive || mp_monster_armored(index))
             {
                 if (!behavior)
                     return 0;
@@ -380,7 +382,8 @@ int unit_combat_spawn(const Snapshot* local)
         return 0;
     __try
     {
-        uintptr_t source = *(uintptr_t*)(local->game + STEAM_GAME_VID_TABLE_OFFSET + 50u * 4u);
+        uintptr_t source =
+            *(uintptr_t*)(local->game + STEAM_GAME_VID_TABLE_OFFSET + MONSTER_VID_MONSTER1 * 4u);
         uintptr_t child = source ? *(uintptr_t*)(source + STEAM_VID_LINKED_OFFSET) : 0;
         if (!supported(child, 108u, STEAM_PUPPET_PART_CLASS))
             return 0;
@@ -394,7 +397,7 @@ int unit_combat_spawn(const Snapshot* local)
     pose.y = local->y;
     pose.z = local->z;
     pose.direction = local->direction;
-    return unit_combat_spawn_type(local, 50u, &pose, 0);
+    return unit_combat_spawn_type(local, MONSTER_VID_MONSTER1, &pose, 0);
 }
 UnitCombatSample unit_combat_sample(uintptr_t game, int compare_sources)
 {
@@ -411,11 +414,12 @@ UnitCombatSample unit_combat_sample(uintptr_t game, int compare_sources)
         for (unsigned int cat = 0; cat < STEAM_TICK_ENTITY_LIST_COUNT; ++cat)
         {
             uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + cat * STEAM_LIST_SIZE;
-            unsigned int count = *(unsigned int*)(list + 4), capacity = *(unsigned int*)(list + 8);
-            uintptr_t* entries = *(uintptr_t**)(list + 12);
+            unsigned int count = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET),
+                         capacity = *(unsigned int*)(list + STEAM_LIST_CAPACITY_OFFSET);
+            uintptr_t* entries = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
             if (!count)
                 continue;
-            if (!entries || count > capacity || count > 65536u)
+            if (!entries || count > capacity || count > STEAM_LIST_MAX_ENTRIES)
             {
                 s.fault = 1;
                 return s;
@@ -499,8 +503,8 @@ UnitCombatSample unit_combat_sample(uintptr_t game, int compare_sources)
             uintptr_t vid = *(uintptr_t*)(s.root + STEAM_ENTITY_VID_OFFSET);
             unsigned int current = *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET);
             unsigned int animation = *(unsigned int*)(s.root + STEAM_ENTITY_ANIM_OFFSET);
-            int pending = (fixture.host || fixture.predictive) &&
-                          (current == 70u || current == 90u) && animation == STEAM_ANIM_DEATH;
+            int pending = (fixture.host || fixture.predictive) && mp_monster_armored(current) &&
+                          animation == STEAM_ANIM_DEATH;
             if (current != fixture.current_vid || pending != fixture.transitioning)
             {
                 ++fixture.form_revision;
@@ -519,9 +523,10 @@ UnitCombatSample unit_combat_sample(uintptr_t game, int compare_sources)
                 for (unsigned int cat = 0; cat < STEAM_TICK_ENTITY_LIST_COUNT && !found; ++cat)
                 {
                     uintptr_t l = game + STEAM_WORLD_LIST_OFFSET + cat * STEAM_LIST_SIZE;
-                    unsigned int n = *(unsigned int*)(l + 4), cap = *(unsigned int*)(l + 8);
-                    uintptr_t* items = *(uintptr_t**)(l + 12);
-                    if (n > cap || n > 65536u || (n && !items))
+                    unsigned int n = *(unsigned int*)(l + STEAM_LIST_COUNT_OFFSET),
+                                 cap = *(unsigned int*)(l + STEAM_LIST_CAPACITY_OFFSET);
+                    uintptr_t* items = *(uintptr_t**)(l + STEAM_LIST_ITEMS_OFFSET);
+                    if (n > cap || n > STEAM_LIST_MAX_ENTRIES || (n && !items))
                     {
                         s.fault = 1;
                         return s;
@@ -588,8 +593,9 @@ int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* priv
                 continue;
             if (requested_vid)
             {
-                if (fixture.current_vid < 40u || fixture.current_vid > 90u ||
-                    fixture.current_vid % 10u || requested_vid != fixture.current_vid + 9u)
+                if (fixture.current_vid < MONSTER_VID_FIRST ||
+                    fixture.current_vid > MONSTER_VID_LAST || fixture.current_vid % 10u ||
+                    requested_vid != fixture.current_vid + 9u)
                     break;
                 uintptr_t source =
                     *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + requested_vid * 4u);
@@ -616,7 +622,7 @@ int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* priv
                 *current_vid = index;
                 *revision = sample.form_revision;
                 *transitioning =
-                    (index == 70u || index == 90u) &&
+                    mp_monster_armored(index) &&
                     *(unsigned int*)(entity + STEAM_ENTITY_ANIM_OFFSET) == STEAM_ANIM_DEATH;
             }
             result = 1;
@@ -644,9 +650,10 @@ static int private_registered(uintptr_t game, uintptr_t entity)
     for (unsigned int cat = 0; cat < STEAM_TICK_ENTITY_LIST_COUNT; ++cat)
     {
         uintptr_t l = game + STEAM_WORLD_LIST_OFFSET + cat * STEAM_LIST_SIZE;
-        unsigned int n = *(unsigned int*)(l + 4), cap = *(unsigned int*)(l + 8);
-        uintptr_t* entries = *(uintptr_t**)(l + 12);
-        if (n > cap || n > 65536u || (n && !entries))
+        unsigned int n = *(unsigned int*)(l + STEAM_LIST_COUNT_OFFSET),
+                     cap = *(unsigned int*)(l + STEAM_LIST_CAPACITY_OFFSET);
+        uintptr_t* entries = *(uintptr_t**)(l + STEAM_LIST_ITEMS_OFFSET);
+        if (n > cap || n > STEAM_LIST_MAX_ENTRIES || (n && !entries))
             return 0;
         for (unsigned int i = 0; i < n; ++i)
             if (entries[i] == entity)
@@ -676,8 +683,8 @@ static int remove_forms(uintptr_t game)
         for (unsigned int cat = 0; cat < STEAM_TICK_ENTITY_LIST_COUNT && !found; ++cat)
         {
             uintptr_t l = game + STEAM_WORLD_LIST_OFFSET + cat * STEAM_LIST_SIZE;
-            unsigned int n = *(unsigned int*)(l + 4);
-            uintptr_t* entries = *(uintptr_t**)(l + 12);
+            unsigned int n = *(unsigned int*)(l + STEAM_LIST_COUNT_OFFSET);
+            uintptr_t* entries = *(uintptr_t**)(l + STEAM_LIST_ITEMS_OFFSET);
             for (unsigned int j = 0; j < n; ++j)
             {
                 uintptr_t e = entries[j];

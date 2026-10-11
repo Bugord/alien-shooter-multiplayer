@@ -1,6 +1,7 @@
 #include <string.h>
 #include <math.h>
 #include "unit_death.h"
+#include "../../../common/src/monster_vids.h"
 
 #define DEATH_VID_COUNT    9u
 #define DEATH_GRAPH_LIMIT  32u
@@ -250,7 +251,7 @@ static int graph_visit(uintptr_t game, uintptr_t source, DeathGraph* graph, unsi
         if (graph->armor && *(unsigned int*)(target + STEAM_VID_CLASS_OFFSET) == STEAM_UNIT_CLASS)
         {
             unsigned int successor = *(unsigned int*)(target + STEAM_VID_INDEX_OFFSET);
-            if ((successor != 60u && successor != 80u) ||
+            if ((successor != MONSTER_VID_MONSTER2 && successor != MONSTER_VID_TANK) ||
                 *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + successor * 4u) != target)
                 return 0;
             *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = 0;
@@ -296,14 +297,14 @@ static int prepare_type(uintptr_t game, unsigned int source_vid, unsigned int an
     death.count = 0;
     death.corpse = animation == STEAM_ANIM_DEATH ? 0u : DEATH_GRAPH_LIMIT;
     death.gib = DEATH_GRAPH_LIMIT;
-    if (armor && source_vid == 90u && root &&
-        *(unsigned int*)(root + STEAM_VID_INDEX_OFFSET) == 80u &&
+    if (armor && source_vid == MONSTER_VID_TANK_ARMORED && root &&
+        *(unsigned int*)(root + STEAM_VID_INDEX_OFFSET) == MONSTER_VID_TANK &&
         *(unsigned int*)(root + STEAM_VID_CLASS_OFFSET) == STEAM_UNIT_CLASS &&
-        *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + 80u * 4u) == root)
+        *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + MONSTER_VID_TANK * 4u) == root)
     {
         /* Custom large armor feedback: borrow the medium shell's visual graph.
            Private copies omit its living successor; native90->80 stays intact. */
-        return prepare_type(game, 70u, animation, armor, multiplicity);
+        return prepare_type(game, MONSTER_VID_MONSTER2_ARMORED, animation, armor, multiplicity);
     }
     return graph_visit(game, root, &graph, &root_index, 0) && root_index == 0u &&
            graph.cost[root_index] <= DEATH_ENTITY_LIMIT / *multiplicity;
@@ -314,9 +315,10 @@ static int find_private(uintptr_t game, uintptr_t wanted, unsigned int index)
     for (unsigned int c = 0; c < STEAM_TICK_ENTITY_LIST_COUNT; ++c)
     {
         uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + c * STEAM_LIST_SIZE;
-        unsigned int n = *(unsigned int*)(list + 4), cap = *(unsigned int*)(list + 8);
-        uintptr_t* entries = *(uintptr_t**)(list + 12);
-        if (n > cap || n > 65536u || (n && !entries))
+        unsigned int n = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET),
+                     cap = *(unsigned int*)(list + STEAM_LIST_CAPACITY_OFFSET);
+        uintptr_t* entries = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
+        if (n > cap || n > STEAM_LIST_MAX_ENTRIES || (n && !entries))
             return 0;
         for (unsigned int j = 0; j < n; ++j)
             if (entries[j] == wanted)
@@ -341,9 +343,10 @@ UnitDeathSample unit_death_sample(uintptr_t game)
         for (unsigned int c = 0; c < STEAM_TICK_ENTITY_LIST_COUNT; ++c)
         {
             uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + c * STEAM_LIST_SIZE;
-            unsigned int n = *(unsigned int*)(list + 4), cap = *(unsigned int*)(list + 8);
-            uintptr_t* entries = *(uintptr_t**)(list + 12);
-            if (n > cap || n > 65536u || (n && !entries))
+            unsigned int n = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET),
+                         cap = *(unsigned int*)(list + STEAM_LIST_CAPACITY_OFFSET);
+            uintptr_t* entries = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
+            if (n > cap || n > STEAM_LIST_MAX_ENTRIES || (n && !entries))
             {
                 s.fault = 1;
                 return s;
@@ -477,7 +480,7 @@ int unit_death_play_type(uintptr_t game, const UnitPuppetPose* p, unsigned int a
 }
 int unit_death_play_armor(uintptr_t game, const UnitPuppetPose* p, unsigned int source_vid)
 {
-    if (source_vid != 70u && source_vid != 90u)
+    if (!mp_monster_armored(source_vid))
         return 0;
     return play_type(game, p, STEAM_ANIM_DEATH, source_vid, 1);
 }
@@ -509,8 +512,8 @@ int unit_death_remove(uintptr_t game)
             for (unsigned int c = 0; c < STEAM_TICK_ENTITY_LIST_COUNT && !found; ++c)
             {
                 uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + c * STEAM_LIST_SIZE;
-                unsigned int n = *(unsigned int*)(list + 4);
-                uintptr_t* entries = *(uintptr_t**)(list + 12);
+                unsigned int n = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET);
+                uintptr_t* entries = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
                 for (unsigned int j = 0; j < n; ++j)
                 {
                     uintptr_t e = entries[j];

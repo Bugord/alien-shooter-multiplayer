@@ -1,6 +1,7 @@
 #ifndef MP_MONSTER_PROTOCOL_H
 #define MP_MONSTER_PROTOCOL_H
 #include "protocol.h"
+#include "monster_vids.h"
 
 /* Opt-in host authority; bounded IDs for the isolated death gallery. */
 #define MPT_C_MONSTER_CLAIM          0x38
@@ -58,31 +59,20 @@ static inline int mp_monster_death_animation(uint32_t animation)
 {
     return animation == 15u || animation == 16u;
 }
-static inline int mp_monster_origin(uint32_t vid)
-{
-    return vid >= 40u && vid <= 90u && vid % 10u == 0u;
-}
-static inline int mp_monster_frozen(uint32_t vid)
-{
-    return vid >= 49u && vid <= 99u && vid % 10u == 9u;
-}
-static inline int mp_monster_vid(uint32_t vid)
-{
-    return mp_monster_origin(vid) || mp_monster_frozen(vid);
-}
 static inline int mp_monster_reachable(uint32_t origin, uint32_t vid)
 {
     if (!mp_monster_origin(origin) || !mp_monster_vid(vid))
         return 0;
-    uint32_t family = mp_monster_frozen(vid) ? vid - 9u : vid;
-    return family == origin || (origin == 70u && family == 60u) || (origin == 90u && family == 80u);
+    uint32_t family = mp_monster_frozen(vid) ? vid - MONSTER_VID_FROZEN_DELTA : vid;
+    return family == origin ||
+           (mp_monster_armored(origin) && family == mp_monster_armor_successor(origin));
 }
 static inline int mp_monster_form_valid(uint32_t vid, uint32_t origin, uint32_t revision,
                                         uint32_t phase)
 {
     return revision && mp_monster_reachable(origin, vid) &&
            (phase == MP_MONSTER_FORM_ACTIVE ||
-            (phase == MP_MONSTER_FORM_ARMOR && (vid == 70u || vid == 90u)));
+            (phase == MP_MONSTER_FORM_ARMOR && mp_monster_armored(vid)));
 }
 /* Snapshots may skip intermediate armor/freeze packets, but never undo a form. */
 static inline int mp_monster_form_forward(uint32_t from, uint32_t from_phase, uint32_t to,
@@ -93,14 +83,15 @@ static inline int mp_monster_form_forward(uint32_t from, uint32_t from_phase, ui
     if (mp_monster_frozen(from))
         return 0;
     if (from_phase == MP_MONSTER_FORM_ARMOR)
-        return to_phase == MP_MONSTER_FORM_ACTIVE && (to == from - 10u || to == from - 1u);
+        return to_phase == MP_MONSTER_FORM_ACTIVE &&
+               (to == from - MONSTER_VID_STEP || to == from - 1u);
     if (from_phase != MP_MONSTER_FORM_ACTIVE)
         return 0;
     if (to_phase == MP_MONSTER_FORM_ARMOR)
-        return from == to && (from == 70u || from == 90u);
+        return from == to && mp_monster_armored(from);
     return to_phase == MP_MONSTER_FORM_ACTIVE &&
-           (to == from + 9u ||
-            ((from == 70u || from == 90u) && (to == from - 10u || to == from - 1u)));
+           (to == from + MONSTER_VID_FROZEN_DELTA ||
+            (mp_monster_armored(from) && (to == from - MONSTER_VID_STEP || to == from - 1u)));
 }
 static inline int mp_monster_state_progresses(const MpMonsterState* old, const MpMonsterState* next)
 {

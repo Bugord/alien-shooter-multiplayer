@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <string.h>
 #include "actor.h"
+#include "world_list.h"
 
 void actor_init(Actor* a, const ActorEngine* engine)
 {
@@ -13,15 +14,9 @@ static int registered(const Actor* a, uintptr_t game)
 {
     if (!game || !a->entity || a->game != game || a->category >= STEAM_WORLD_LIST_COUNT)
         return 0;
-    uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + a->category * STEAM_LIST_SIZE;
-    unsigned int count = *(unsigned int*)(list + 4), capacity = *(unsigned int*)(list + 8);
-    uintptr_t* entries = *(uintptr_t**)(list + 12);
-    if (!entries || count > capacity || count > 65536u)
+    if (!world_list_find(game, a->category, a->entity))
         return 0;
-    for (unsigned int i = 0; i < count; ++i)
-        if (entries[i] == a->entity)
-            return *(uintptr_t*)(a->entity + STEAM_ENTITY_VID_OFFSET) == (uintptr_t)a->vid;
-    return 0;
+    return *(uintptr_t*)(a->entity + STEAM_ENTITY_VID_OFFSET) == (uintptr_t)a->vid;
 }
 int actor_live(const Actor* a, uintptr_t game)
 {
