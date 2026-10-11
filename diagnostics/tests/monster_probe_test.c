@@ -16,6 +16,23 @@ static UnitPuppetSample sample;
 static unsigned int epoch, loaded, applied, released, stopped;
 static int attach_ready, load_ok = 1, release_ok = 1, stop_ok = 1, bind_ok = 1;
 static enum MonsterProbeKind test_kind;
+/* The probe always drives puppet slot 0; the real UnitPuppet is private to
+   unit_puppet.c, so this mock handle only identifies that slot. */
+struct UnitPuppet
+{
+    int unused;
+};
+static UnitPuppet probe_puppet;
+static unsigned int wrong_slot_calls;
+UnitPuppet* unit_puppet_slot(unsigned int index)
+{
+    return index == 0 ? &probe_puppet : NULL;
+}
+static void expect_probe_slot(const UnitPuppet* puppet)
+{
+    if (puppet != &probe_puppet)
+        ++wrong_slot_calls;
+}
 int unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
 {
     (void)base;
@@ -28,19 +45,22 @@ int unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
     (void)api;
     return 1;
 }
-int unit_puppet_attach_first(uintptr_t game, uintptr_t player)
+int unit_puppet_attach_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
+    expect_probe_slot(puppet);
     (void)game;
     (void)player;
     return attach_ready;
 }
-UnitPuppetSample unit_puppet_sample(uintptr_t game)
+UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
 {
+    expect_probe_slot(puppet);
     (void)game;
     return sample;
 }
-int unit_puppet_apply(uintptr_t game, const UnitPuppetPose* p)
+int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* p)
 {
+    expect_probe_slot(puppet);
     (void)game;
     ++applied;
     sample.x = p->x;
@@ -52,8 +72,9 @@ int unit_puppet_apply(uintptr_t game, const UnitPuppetPose* p)
     sample.animation = p->moving ? 2u : 0u;
     return 1;
 }
-int unit_puppet_release(uintptr_t game)
+int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
 {
+    expect_probe_slot(puppet);
     (void)game;
     ++released;
     return release_ok;
@@ -63,15 +84,18 @@ int unit_puppet_stop(void)
     ++stopped;
     return stop_ok;
 }
-int unit_puppet_replay(uintptr_t game, uint32_t sequence, unsigned int animation)
+int unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
+                       unsigned int animation)
 {
+    expect_probe_slot(puppet);
     (void)game;
     (void)sequence;
     (void)animation;
     return 0;
 }
-int unit_puppet_test_damage(uintptr_t game)
+int unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
 {
+    expect_probe_slot(puppet);
     (void)game;
     return 0;
 }
@@ -308,6 +332,7 @@ int main(int argc, char** argv)
     tick(2100, 0);
     CHECK(tick(2200, 0).state == MONSTER_PROBE_FAILED && !applied && released == 1);
     CHECK(monster_probe_stop());
+    CHECK(!wrong_slot_calls);
     puts("Monster probe phases, drift, epoch and cleanup checks passed.");
     return 0;
 }

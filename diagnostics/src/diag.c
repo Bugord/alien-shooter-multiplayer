@@ -43,21 +43,19 @@ static void observe_runtime(const RuntimeFrame* frame)
             /* Deliberately unconfirmed native hits: one ice, one gib, two armor
                successors and one nonlethal hit must all roll back to the host.
                This drives native bindings, not weapon/projectile collision. */
-            unit_puppet_select(0u);
-            ok = unit_puppet_prediction_test_hit(frame->snapshot.game, 100000, 1) == 1 && ok;
-            unit_puppet_select(8u);
-            ok = unit_puppet_prediction_test_hit(frame->snapshot.game, 100000, 0) == 1 && ok;
-            unit_puppet_select(32u);
-            ok = unit_puppet_prediction_test_hit(frame->snapshot.game,
-                                                 frame->monster.gallery[32].health, 0) == 1 &&
-                 ok;
-            unit_puppet_select(40u);
-            ok = unit_puppet_prediction_test_hit(frame->snapshot.game,
-                                                 frame->monster.gallery[40].health, 0) == 1 &&
-                 ok;
-            unit_puppet_select(16u);
-            ok = unit_puppet_prediction_test_hit(frame->snapshot.game, 1, 0) == 1 && ok;
-            unit_puppet_select(0u);
+            uintptr_t game = frame->snapshot.game;
+            int ice = unit_puppet_prediction_test_hit(unit_puppet_slot(0u), game, 100000, 1);
+            ok = ice == 1 && ok;
+            int gib = unit_puppet_prediction_test_hit(unit_puppet_slot(8u), game, 100000, 0);
+            ok = gib == 1 && ok;
+            int medium_armor = unit_puppet_prediction_test_hit(
+                unit_puppet_slot(32u), game, frame->monster.gallery[32].health, 0);
+            ok = medium_armor == 1 && ok;
+            int large_armor = unit_puppet_prediction_test_hit(unit_puppet_slot(40u), game,
+                                                              frame->monster.gallery[40].health, 0);
+            ok = large_armor == 1 && ok;
+            int nonlethal = unit_puppet_prediction_test_hit(unit_puppet_slot(16u), game, 1, 0);
+            ok = nonlethal == 1 && ok;
             monster_prediction_phase = 1u;
             InterlockedExchange(&monster_prediction_result, ok ? 1 : -1);
         }
@@ -76,16 +74,17 @@ static void observe_runtime(const RuntimeFrame* frame)
         {
             const unsigned int frozen[] = {0u, 8u, 16u, 24u, 33u, 41u};
             int ok = 1;
+            uintptr_t game = frame->snapshot.game;
             for (unsigned int i = 0; i < sizeof(frozen) / sizeof(frozen[0]); ++i)
             {
-                unit_puppet_select(frozen[i]);
-                ok = unit_puppet_host_freeze(frame->snapshot.game) == 1 && ok;
+                ok = unit_puppet_host_freeze(unit_puppet_slot(frozen[i]), game) == 1 && ok;
             }
-            unit_puppet_select(32u);
-            ok = unit_puppet_host_kill_variant(frame->snapshot.game, STEAM_ANIM_DEATH) == 1 && ok;
-            unit_puppet_select(40u);
-            ok = unit_puppet_host_kill_variant(frame->snapshot.game, STEAM_ANIM_DEATH) == 1 && ok;
-            unit_puppet_select(0u);
+            const unsigned int armored[] = {32u, 40u};
+            for (unsigned int i = 0; i < sizeof(armored) / sizeof(armored[0]); ++i)
+            {
+                UnitPuppet* puppet = unit_puppet_slot(armored[i]);
+                ok = unit_puppet_host_kill_variant(puppet, game, STEAM_ANIM_DEATH) == 1 && ok;
+            }
             monster_forms_phase = 1u;
             InterlockedExchange(&monster_forms_results[0], ok ? 1 : -1);
         }
@@ -93,13 +92,12 @@ static void observe_runtime(const RuntimeFrame* frame)
         {
             const unsigned int killed[] = {0u, 8u, 16u, 24u, 32u, 33u, 40u, 41u};
             int ok = 1;
+            uintptr_t game = frame->snapshot.game;
             for (unsigned int i = 0; i < sizeof(killed) / sizeof(killed[0]); ++i)
             {
-                unit_puppet_select(killed[i]);
-                ok = unit_puppet_host_kill_variant(frame->snapshot.game, STEAM_ANIM_DEATH) == 1 &&
-                     ok;
+                UnitPuppet* puppet = unit_puppet_slot(killed[i]);
+                ok = unit_puppet_host_kill_variant(puppet, game, STEAM_ANIM_DEATH) == 1 && ok;
             }
-            unit_puppet_select(0u);
             monster_forms_phase = 2u;
             InterlockedExchange(&monster_forms_results[1], ok ? 1 : -1);
         }
@@ -119,10 +117,9 @@ static void observe_runtime(const RuntimeFrame* frame)
         unsigned int count = frame->monster.gallery_count ? frame->monster.gallery_count : 1u;
         for (unsigned int slot = 0; slot < count; ++slot)
         {
-            unit_puppet_select(slot);
-            unit_puppet_host_kill_variant(frame->snapshot.game, monster_test_death);
+            UnitPuppet* puppet = unit_puppet_slot(slot);
+            unit_puppet_host_kill_variant(puppet, frame->snapshot.game, monster_test_death);
         }
-        unit_puppet_select(0u);
     }
 }
 #pragma comment(linker, "/EXPORT:AsmpDiagGetStatus=_AsmpDiagGetStatus@0")

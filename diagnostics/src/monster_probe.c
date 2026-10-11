@@ -9,6 +9,7 @@
 static struct
 {
     enum MonsterProbeState state;
+    UnitPuppet* puppet; /* The probe always drives puppet slot 0. */
     DWORD entered, last_log;
     DWORD combat_world_ready;
     uintptr_t game;
@@ -31,6 +32,7 @@ int monster_probe_enable_kind(uintptr_t base, enum MonsterProbeKind kind)
     if (probe.ui || probe.world || probe.hooks || probe.combat_initialized)
         return 0;
     memset(&probe, 0, sizeof(probe));
+    probe.puppet = unit_puppet_slot(0);
     UnitPuppetEngine api;
     if (kind != MONSTER_PROBE_GROUND && kind != MONSTER_PROBE_FLYING &&
         kind != MONSTER_PROBE_FLYING_RELOAD && kind != MONSTER_PROBE_COMBAT &&
@@ -84,7 +86,7 @@ int monster_probe_enable(uintptr_t base)
 }
 static void finish(MonsterProbeFrame* f, uintptr_t game, int failed)
 {
-    f->cleanup = unit_puppet_release(game);
+    f->cleanup = unit_puppet_release(probe.puppet, game);
     if (probe.combat_initialized && !unit_combat_remove(game))
         f->cleanup = 0;
     if (probe.visual_initialized && !unit_death_remove(game))
@@ -166,17 +168,17 @@ static void combat_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now)
         ++probe.violations;
     if (phase == MONSTER_COMBAT_DAMAGE && !probe.damage_blocked)
     {
-        probe.damage_blocked = unit_puppet_test_damage(local->game) == 1;
+        probe.damage_blocked = unit_puppet_test_damage(probe.puppet, local->game) == 1;
         if (!probe.damage_blocked)
             ++probe.violations;
         f->event = 1;
     }
     if (phase == MONSTER_COMBAT_ATTACK && !probe.attack_seen)
     {
-        if (unit_puppet_replay(local->game, 1u, STEAM_ANIM_ATTACK) != 1 ||
-            unit_puppet_replay(local->game, 1u, STEAM_ANIM_ATTACK) != 0)
+        if (unit_puppet_replay(probe.puppet, local->game, 1u, STEAM_ANIM_ATTACK) != 1 ||
+            unit_puppet_replay(probe.puppet, local->game, 1u, STEAM_ANIM_ATTACK) != 0)
             ++probe.violations;
-        f->unit = unit_puppet_sample(local->game);
+        f->unit = unit_puppet_sample(probe.puppet, local->game);
         probe.attack_seen =
             f->unit.animation == STEAM_ANIM_ATTACK || f->unit.child_animation == STEAM_ANIM_ATTACK;
         if (!probe.attack_seen)
@@ -193,10 +195,10 @@ static void combat_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now)
     if (phase == MONSTER_COMBAT_DEATH && !probe.death_seen)
     {
         if (!probe.damage_blocked || !probe.attack_seen || probe.phase != MONSTER_COMBAT_RECOVER ||
-            unit_puppet_replay(local->game, 2u, STEAM_ANIM_DEATH) != 1 ||
-            unit_puppet_replay(local->game, 2u, STEAM_ANIM_DEATH) != 0)
+            unit_puppet_replay(probe.puppet, local->game, 2u, STEAM_ANIM_DEATH) != 1 ||
+            unit_puppet_replay(probe.puppet, local->game, 2u, STEAM_ANIM_DEATH) != 0)
             ++probe.violations;
-        f->unit = unit_puppet_sample(local->game);
+        f->unit = unit_puppet_sample(probe.puppet, local->game);
         probe.death_seen = f->unit.animation == STEAM_ANIM_DEATH;
         if (!probe.death_seen)
             ++probe.violations;
@@ -209,7 +211,8 @@ static void combat_tick(MonsterProbeFrame* f, const Snapshot* local, DWORD now)
         f->damage_blocked = probe.damage_blocked;
         if (probe.kind == MONSTER_PROBE_DEATH && !probe.violations)
         {
-            if (!unit_puppet_release(local->game) || !unit_combat_remove(local->game) ||
+            if (!unit_puppet_release(probe.puppet, local->game) ||
+                !unit_combat_remove(local->game) ||
                 unit_death_play(local->game, &probe.anchor, STEAM_ANIM_DEATH) != 1)
             {
                 ++probe.violations;
@@ -253,7 +256,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
         return f;
     if (stop)
     {
-        f.unit = unit_puppet_sample(local->game);
+        f.unit = unit_puppet_sample(probe.puppet, local->game);
         finish(&f, local->game, 0);
         return f;
     }
@@ -301,7 +304,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
             }
             probe.combat_spawned = 1;
         }
-        int attached = unit_puppet_attach_first(local->game, local->player);
+        int attached = unit_puppet_attach_first(probe.puppet, local->game, local->player);
         if (attached < 0)
         {
             finish(&f, local->game, 1);
@@ -318,7 +321,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
         probe.anchor.z = local->z;
         if (probe.kind == MONSTER_PROBE_FLYING || probe.kind == MONSTER_PROBE_FLYING_RELOAD)
         {
-            UnitPuppetSample captured = unit_puppet_sample(local->game);
+            UnitPuppetSample captured = unit_puppet_sample(probe.puppet, local->game);
             if (captured.vid != 290u)
             {
                 finish(&f, local->game, 1);
@@ -330,7 +333,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
         if (combat_mode())
         {
             UnitCombatSample combat = unit_combat_sample(local->game, 1);
-            UnitPuppetSample captured = unit_puppet_sample(local->game);
+            UnitPuppetSample captured = unit_puppet_sample(probe.puppet, local->game);
             if (captured.entity != combat.root)
             {
                 finish(&f, local->game, 1);
@@ -345,7 +348,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
         probe.state = MONSTER_PROBE_RUNNING;
         f.event = 1;
     }
-    f.unit = unit_puppet_sample(local->game);
+    f.unit = unit_puppet_sample(probe.puppet, local->game);
     if (probe.state != MONSTER_PROBE_RUNNING)
         return f;
     if (f.unit.frame_last > f.unit.frame_first ||
@@ -424,7 +427,7 @@ MonsterProbeFrame monster_probe_tick(const Snapshot* local, enum ProbeResult res
         p.direction = 64u;
     if (phase == 4u)
         p.direction = 128u;
-    if (unit_puppet_apply(local->game, &p) != 1)
+    if (unit_puppet_apply(probe.puppet, local->game, &p) != 1)
     {
         finish(&f, local->game, 1);
         return f;

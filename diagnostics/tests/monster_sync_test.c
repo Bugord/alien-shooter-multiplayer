@@ -65,16 +65,31 @@ static int fail_install, fail_init, fail_spawn, fail_apply, fail_remove, fail_re
 static int fail_visual, fail_visual_remove;
 static unsigned int unhooks, fixture_stops;
 static DWORD clock_now;
-int unit_puppet_select(unsigned int slot)
+/* The real UnitPuppet is private to unit_puppet.c; this mock handle only
+   names the mock slot that the coordinator passed. */
+struct UnitPuppet
+{
+    unsigned int index;
+};
+static UnitPuppet mock_puppets[MP_MONSTER_CAPACITY];
+UnitPuppet* unit_puppet_slot(unsigned int index)
+{
+    if (index >= MP_MONSTER_CAPACITY)
+        return NULL;
+    mock_puppets[index].index = index;
+    return &mock_puppets[index];
+}
+static void use_puppet(const UnitPuppet* puppet)
+{
+    CHECK(puppet && puppet >= mock_puppets && puppet < mock_puppets + MP_MONSTER_CAPACITY);
+    mock_slot = puppet->index;
+}
+int unit_combat_select(unsigned int slot)
 {
     if (slot >= MP_MONSTER_CAPACITY)
         return 0;
     mock_slot = slot;
     return 1;
-}
-int unit_combat_select(unsigned int slot)
-{
-    return unit_puppet_select(slot);
 }
 int unit_death_select(unsigned int slot)
 {
@@ -207,8 +222,9 @@ int unit_combat_init(uintptr_t base, ActorCreate create, ActorDestroy destroy,
     CHECK(base == 1u && create && destroy && animation);
     return !fail_init;
 }
-int unit_puppet_watch_first(uintptr_t game, uintptr_t player)
+int unit_puppet_watch_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
+    use_puppet(puppet);
     CHECK(game == local.game && player == local.player && installed && !selected);
     ++watches;
     selected = 1;
@@ -217,8 +233,10 @@ int unit_puppet_watch_first(uintptr_t game, uintptr_t player)
     native.captured_attacks = native.captured_deaths = 0;
     return 1;
 }
-int unit_puppet_attach_entity(uintptr_t game, uintptr_t player, uintptr_t entity)
+int unit_puppet_attach_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
+                              uintptr_t entity)
 {
+    use_puppet(puppet);
     CHECK(game == local.game && player == local.player && entity == mock_slots[mock_slot].f_root &&
           owned && !selected);
     native.predicted_hits = native.captured_attacks = native.captured_deaths =
@@ -232,8 +250,9 @@ int unit_puppet_attach_entity(uintptr_t game, uintptr_t player, uintptr_t entity
     native.entity = entity;
     return 1;
 }
-int unit_puppet_prediction(uintptr_t game)
+int unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
 {
+    use_puppet(puppet);
     CHECK(game == local.game && selected == 2 && owned);
     native.predictive = 1;
     return 1;
@@ -271,10 +290,12 @@ int unit_combat_spawn_predictive(const Snapshot* spawn, unsigned int vid,
 {
     return unit_combat_spawn_type(spawn, vid, pose, 0);
 }
-int unit_puppet_watch_stationary(uintptr_t game, uintptr_t player, uintptr_t entity)
+int unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
+                                 uintptr_t entity)
 {
+    use_puppet(puppet);
     CHECK(owned && entity == mock_slots[mock_slot].f_root && spawn_host);
-    int result = unit_puppet_watch_first(game, player);
+    int result = unit_puppet_watch_first(puppet, game, player);
     native.entity = entity;
     native.behavior = native.moving = 0;
     native.velocity = 0;
@@ -292,8 +313,9 @@ UnitCombatSample unit_combat_sample(uintptr_t game, int compare_sources)
     s.transitioning = native.transitioning;
     return s;
 }
-int unit_puppet_apply(uintptr_t game, const UnitPuppetPose* pose)
+int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* pose)
 {
+    use_puppet(puppet);
     CHECK(game == local.game && selected == 2 && pose);
     ++applies;
     last_pose = *pose;
@@ -307,29 +329,34 @@ int unit_puppet_apply(uintptr_t game, const UnitPuppetPose* pose)
     native.moving = pose->moving;
     return 1;
 }
-int unit_puppet_health(uintptr_t game, int value)
+int unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int value)
 {
+    use_puppet(puppet);
     CHECK(game == local.game && selected == 2);
     ++health_writes;
     last_health = value;
     native.health = value;
     return 1;
 }
-int unit_puppet_replay(uintptr_t game, uint32_t sequence, unsigned int animation)
+int unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
+                       unsigned int animation)
 {
+    use_puppet(puppet);
     CHECK(game == local.game && selected == 2 && animation == STEAM_ANIM_ATTACK);
     CHECK(!last_replay || mp_sequence_newer(sequence, last_replay));
     last_replay = sequence;
     ++replays;
     return 1;
 }
-UnitPuppetSample unit_puppet_sample(uintptr_t game)
+UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
 {
+    use_puppet(puppet);
     CHECK(game == local.game);
     return native;
 }
-int unit_puppet_release(uintptr_t game)
+int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
 {
+    use_puppet(puppet);
     CHECK(game == local.game);
     ++releases;
     if (fail_release)

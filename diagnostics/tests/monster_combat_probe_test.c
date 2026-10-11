@@ -24,6 +24,23 @@ static unsigned int puppet_stops, combat_stops, damage_calls, replay_calls;
 static unsigned int attack_calls, death_calls, last_sequence;
 static int replay_ok, damage_ok, remove_ok, release_ok, spawn_ok;
 
+/* The probe always drives puppet slot 0; the real UnitPuppet is private to
+   unit_puppet.c, so this mock handle only identifies that slot. */
+struct UnitPuppet
+{
+    int unused;
+};
+static UnitPuppet probe_puppet;
+static unsigned int wrong_slot_calls;
+UnitPuppet* unit_puppet_slot(unsigned int index)
+{
+    return index == 0 ? &probe_puppet : NULL;
+}
+static void expect_probe_slot(const UnitPuppet* puppet)
+{
+    if (puppet != &probe_puppet)
+        ++wrong_slot_calls;
+}
 int unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
 {
     (void)base;
@@ -36,32 +53,38 @@ int unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
     (void)api;
     return 1;
 }
-int unit_puppet_attach_first(uintptr_t game, uintptr_t player)
+int unit_puppet_attach_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
+    expect_probe_slot(puppet);
     (void)game;
     (void)player;
     return 1;
 }
-UnitPuppetSample unit_puppet_sample(uintptr_t game)
+UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
 {
+    expect_probe_slot(puppet);
     (void)game;
     return unit;
 }
-int unit_puppet_apply(uintptr_t game, const UnitPuppetPose* pose)
+int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* pose)
 {
+    expect_probe_slot(puppet);
     (void)game;
     (void)pose;
     ++applies;
     return 1;
 }
-int unit_puppet_test_damage(uintptr_t game)
+int unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
 {
+    expect_probe_slot(puppet);
     (void)game;
     ++damage_calls;
     return damage_ok;
 }
-int unit_puppet_replay(uintptr_t game, uint32_t sequence, unsigned int animation)
+int unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
+                       unsigned int animation)
 {
+    expect_probe_slot(puppet);
     (void)game;
     ++replay_calls;
     if (animation == STEAM_ANIM_ATTACK)
@@ -82,8 +105,9 @@ int unit_puppet_replay(uintptr_t game, uint32_t sequence, unsigned int animation
     unit.animation = unit.child_animation = animation;
     return 1;
 }
-int unit_puppet_release(uintptr_t game)
+int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
 {
+    expect_probe_slot(puppet);
     (void)game;
     ++releases;
     return release_ok;
@@ -362,6 +386,7 @@ int main(void)
     CHECK(tick(2300, 1).state == MONSTER_PROBE_FAILED && removes == 1);
     CHECK(monster_probe_stop());
 
+    CHECK(!wrong_slot_calls);
     puts("Monster combat controller phases, native progress, isolation and cleanup checks passed.");
     return 0;
 }

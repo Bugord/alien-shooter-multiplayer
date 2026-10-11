@@ -25,6 +25,7 @@ typedef struct ReceivedMonsterEvent
 typedef struct MonsterSlot
 {
     unsigned int index; /* Position in slots[]; wire monster_id is index + 1. */
+    UnitPuppet* puppet; /* Borrowed native UNIT for this monster (same index). */
     enum MonsterRole role;
     enum MonsterSyncState state;
     volatile LONG stopping, stopped;
@@ -77,6 +78,7 @@ int monster_sync_initialize(uintptr_t base, enum MonsterRole role, const UnitPup
     for (unsigned int i = 0; i < MP_MONSTER_CAPACITY; ++i)
     {
         slots[i].index = i;
+        slots[i].puppet = unit_puppet_slot(i);
     }
     slot_count = 1u;
     gallery = 0;
@@ -218,7 +220,7 @@ static void stage_event(MonsterSlot* slot, unsigned int kind, uint32_t tick,
 }
 static int cleanup(MonsterSlot* slot, uintptr_t game)
 {
-    if (!unit_puppet_release(game))
+    if (!unit_puppet_release(slot->puppet, game))
         return 0;
     if ((slot->role == MONSTER_CLIENT || gallery) && !unit_combat_remove(game))
         return 0;
@@ -262,7 +264,7 @@ static int same_world(const MonsterSlot* slot, const MpMonsterState* s)
 }
 static int cleanup_live(MonsterSlot* slot, uintptr_t game)
 {
-    int removed = unit_puppet_release(game) && unit_combat_remove(game);
+    int removed = unit_puppet_release(slot->puppet, game) && unit_combat_remove(game);
     if (removed)
     {
         slot->presentation_vid = 0;
@@ -347,8 +349,8 @@ static int client_copy(MonsterSlot* slot, const Snapshot* local, unsigned int vi
         }
         UnitCombatSample fixture = unit_combat_sample(game, 1);
         if (fixture.fault || !fixture.sources_unchanged ||
-            unit_puppet_attach_entity(game, local->player, fixture.root) != 1 ||
-            unit_puppet_prediction(game) != 1)
+            unit_puppet_attach_entity(slot->puppet, game, local->player, fixture.root) != 1 ||
+            unit_puppet_prediction(slot->puppet, game) != 1)
         {
             schedule_retry(slot, game, now);
             return 0;
@@ -358,7 +360,8 @@ static int client_copy(MonsterSlot* slot, const Snapshot* local, unsigned int vi
         slot->retry_delay = MP_RETRY_FIRST_MS;
     }
     slot->state = MS_ACTIVE;
-    if (unit_puppet_apply(game, pose) != 1 || (health > 0 && unit_puppet_health(game, health) != 1))
+    if (unit_puppet_apply(slot->puppet, game, pose) != 1 ||
+        (health > 0 && unit_puppet_health(slot->puppet, game, health) != 1))
     {
         schedule_retry(slot, game, now);
         return 0;
@@ -388,7 +391,7 @@ static int predict_hit(MonsterSlot* slot, uintptr_t game, const MpMonsterState* 
 {
     if (!slot->presentation_vid || slot->prediction == PREDICTION_DEATH)
         return 1;
-    UnitPuppetSample sample = unit_puppet_sample(game);
+    UnitPuppetSample sample = unit_puppet_sample(slot->puppet, game);
     if (sample.state == UNIT_PUPPET_FAULT)
     {
         schedule_retry(slot, game, now);
@@ -545,12 +548,12 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
                     goto report;
                 }
                 UnitCombatSample fixture = unit_combat_sample(game, 0);
-                attached = fixture.fault
-                               ? -1
-                               : unit_puppet_watch_stationary(game, local->player, fixture.root);
+                attached = fixture.fault ? -1
+                                         : unit_puppet_watch_stationary(
+                                               slot->puppet, game, local->player, fixture.root);
             }
             else
-                attached = unit_puppet_watch_first(game, local->player);
+                attached = unit_puppet_watch_first(slot->puppet, game, local->player);
             if (attached < 0)
             {
                 schedule_retry(slot, game, now);
@@ -562,7 +565,7 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
             slot->state = MS_ACTIVE;
             InterlockedExchange(&slot->stopped, 0);
         }
-        frame.unit = unit_puppet_sample(game);
+        frame.unit = unit_puppet_sample(slot->puppet, game);
         if (gallery)
         {
             UnitCombatSample fixture = unit_combat_sample(game, 0);
@@ -574,14 +577,15 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
             if (!fixture.transitioning && fixture.root && fixture.root != frame.unit.entity &&
                 !slot->seen_deaths)
             {
-                if (!unit_puppet_release(game) ||
-                    unit_puppet_watch_stationary(game, local->player, fixture.root) != 1)
+                if (!unit_puppet_release(slot->puppet, game) ||
+                    unit_puppet_watch_stationary(slot->puppet, game, local->player, fixture.root) !=
+                        1)
                 {
                     schedule_retry(slot, game, now);
                     goto report;
                 }
                 slot->seen_attacks = slot->seen_deaths = 0;
-                frame.unit = unit_puppet_sample(game);
+                frame.unit = unit_puppet_sample(slot->puppet, game);
             }
             frame.unit.transitioning = fixture.transitioning || frame.unit.transitioning;
             if (fixture.current_vid)
@@ -734,7 +738,7 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
               (source->vid != slot->vid || source->form_phase != slot->form_phase))))
         {
             ++slot->rejected;
-            frame.unit = unit_puppet_sample(game);
+            frame.unit = unit_puppet_sample(slot->puppet, game);
             goto report;
         }
         if (slot->remote_dead && source->alive)
@@ -894,7 +898,7 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
         if (spawning)
             slot->last_event = source->event_sequence;
         if (slot->prediction != PREDICTION_NONE && !slot->predicted_health)
-            slot->predicted_health = unit_puppet_sample(game).health;
+            slot->predicted_health = unit_puppet_sample(slot->puppet, game).health;
         if (source->form_phase == MP_MONSTER_FORM_ARMOR)
             slot->state = MS_TRANSFORMING;
         for (unsigned int i = 0; i < received_count; ++i)
@@ -935,14 +939,14 @@ static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum
                must not replace a predicted frozen/successor presentation. */
             if (slot->presentation_vid != slot->vid || source->form_phase)
                 continue;
-            if (unit_puppet_replay(game, e->sequence, STEAM_ANIM_ATTACK) != 1)
+            if (unit_puppet_replay(slot->puppet, game, e->sequence, STEAM_ANIM_ATTACK) != 1)
             {
                 schedule_retry(slot, game, now);
                 break;
             }
             ++slot->attacks;
         }
-        frame.unit = unit_puppet_sample(game);
+        frame.unit = unit_puppet_sample(slot->puppet, game);
         if (slot->state == MS_ACTIVE && frame.unit.state != UNIT_PUPPET_ACTIVE)
             schedule_retry(slot, game, now);
     }
@@ -1016,7 +1020,6 @@ MonsterSyncFrame monster_sync_tick(const Snapshot* local, enum ProbeResult resul
     for (unsigned int index = 0; index < slot_count; ++index)
     {
         MonsterSlot* slot = &slots[index];
-        unit_puppet_select(index);
         unit_combat_select(index);
         unit_death_select(index);
         ReceivedMonsterEvent matching[MONSTER_EVENT_CAPACITY];
@@ -1074,7 +1077,6 @@ MonsterSyncFrame monster_sync_tick(const Snapshot* local, enum ProbeResult resul
         output.confirmations = confirmations;
         output.corrections = corrections;
     }
-    unit_puppet_select(0);
     unit_combat_select(0);
     unit_death_select(0);
     return output;
