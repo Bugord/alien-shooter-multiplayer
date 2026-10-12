@@ -8,7 +8,7 @@
 typedef struct StateClient StateClient;
 
 /* What the connection has reached so far, and how it ended. */
-typedef enum LobbyLink
+typedef enum ClientLink
 {
     LINK_NONE = 0,
     LINK_CONNECTING,  /* Waiting for the transport to answer. */
@@ -18,7 +18,7 @@ typedef enum LobbyLink
     LINK_REFUSED,     /* Answered, then dropped before the welcome. */
     LINK_LOST,        /* Was ready, then disconnected. */
     LINK_INCOMPATIBLE /* The relay is another build (lobby compat word differs). */
-} LobbyLink;
+} ClientLink;
 
 StateClient* state_client_create(const char* host, unsigned short port, const char* name,
                                  FILE* log);
@@ -74,7 +74,7 @@ int state_client_take_monster_event(StateClient*, MonsterEvent*);
 /* Lobby: the latest room snapshot and requests to the relay. Requests return 0 when
    the client is not welcomed yet; the caller repeats them until the snapshot shows
    the result. `local_id` receives this client's relay id. */
-LobbyLink state_client_link(const StateClient*);
+ClientLink state_client_link(const StateClient*);
 int state_client_lobby(const StateClient*, MpLobby* out, uint32_t* local_id);
 int state_client_send_lobby_ready(StateClient*, const MpLobbyReady*);
 int state_client_send_lobby_settings(StateClient*, const MpLobbySettings*);

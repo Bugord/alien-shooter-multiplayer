@@ -216,6 +216,24 @@ void ui_health_bar(uintptr_t game, uintptr_t entity, int health, int max_health)
     }
 }
 
+/* Draws ASCII text in screen space (the room panel in the menu). Uses the same
+   validated Render::DrawText call as the name labels; nothing is created or kept. */
+void ui_screen_text(float x, float y, const char* text, uint32_t color)
+{
+    if (!base || !text || !text[0])
+        return;
+    __try
+    {
+        uintptr_t render = *(uintptr_t*)(base + STEAM_RENDER_PTR_RVA);
+        if (!render)
+            return;
+        ((DrawLabel)(base + STEAM_DRAW_TEXT_RVA))((void*)render, NULL, x, y, text, color);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
 /* Draws an ASCII name above `entity`. */
 void ui_name_label(uintptr_t game, uintptr_t entity, const char* name)
 {

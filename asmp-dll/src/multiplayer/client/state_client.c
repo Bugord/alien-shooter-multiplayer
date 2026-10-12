@@ -25,7 +25,7 @@ struct StateClient
     char name[MP_MAX_NAME_LEN + 1];
     char map[MP_MAX_MAP_NAME_LEN];
     int ready, joined, published;
-    LobbyLink link;
+    ClientLink link;
     unsigned long previous, requested_at, sent_at, published_at;
     uint32_t sequence, sent, received, rejected;
     MpState latest;
@@ -92,7 +92,7 @@ static int monster_remote_world_(const StateClient* c, uint32_t low, uint32_t hi
 
 /* The link went down: a connection that never answered is "no answer", one that
    answered but never finished the handshake was refused, a ready one was lost. */
-static LobbyLink mark_link_down(LobbyLink link)
+static ClientLink mark_link_down(ClientLink link)
 {
     if (link == LINK_CONNECTING)
         return LINK_NO_ANSWER;
@@ -650,7 +650,7 @@ int state_client_take_monster_event(StateClient* c, MonsterEvent* out)
     return 0;
 }
 
-LobbyLink state_client_link(const StateClient* c)
+ClientLink state_client_link(const StateClient* c)
 {
     return c ? c->link : LINK_NONE;
 }
