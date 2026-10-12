@@ -1,5 +1,6 @@
-/* Network client for one relay-server connection: sends the local state, shots and
-   monster data, and keeps the latest validated peer, shot and monster data. Layer:
+/* Network client for one relay-server connection: sends the local state, shots,
+   monster data and lobby requests, and keeps the latest validated peer, shot, monster
+   and room data. It talks to the relay through the transport boundary (transport.h). Layer:
    multiplayer/client/ (connection and packet handling). It touches no native game entity and
    no rendering. Used from the worker thread only; the game thread gets data through
    multiplayer.c and monster_sync.c handoffs. */
@@ -7,7 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "state_client.h"
-#include "epnet_client.h"
 
 typedef struct Peer
 {
@@ -20,18 +20,19 @@ typedef struct Peer
 } Peer;
 struct StateClient
 {
-    epnet_client_t* transport;
+    Transport* transport;
     FILE* log;
     char name[MP_MAX_NAME_LEN + 1];
     char map[MP_MAX_MAP_NAME_LEN];
     int ready, joined, published;
+    LobbyLink link;
     unsigned long previous, requested_at, sent_at, published_at;
     uint32_t sequence, sent, received, rejected;
     MpState latest;
-    Peer peers[EPNET_MAX_CLIENTS];
+    Peer peers[MP_MAX_PEERS];
     /* Latest roster: names are trusted only for the session that the server lists. */
-    char roster_name[EPNET_MAX_CLIENTS][MP_MAX_NAME_LEN + 1];
-    uint32_t roster_session[EPNET_MAX_CLIENTS];
+    char roster_name[MP_MAX_PEERS][MP_MAX_NAME_LEN + 1];
+    uint32_t roster_session[MP_MAX_PEERS];
     uint32_t server_capacity;
     uint32_t shot_sequence, shot_dropped;
     ShotEvent shots[64];
@@ -44,6 +45,12 @@ struct StateClient
     MonsterState monster[MP_MONSTER_CAPACITY];
     MonsterEvent monster_events[64];
     unsigned int monster_head, monster_count, monster_dropped;
+    /* Latest valid room snapshot from this connection. */
+    struct
+    {
+        int known;
+        MpLobby snapshot;
+    } lobby;
 };
 
 /* Forgets all received monster states and queued monster events. */
@@ -72,7 +79,7 @@ static int monster_remote_world_(const StateClient* c, uint32_t low, uint32_t hi
     if (!c->ready || !c->monster_authority_known)
         return 0;
     uint32_t id = c->monster_authority_id;
-    if (id == epnet_client_get_id(c->transport))
+    if (id == transport_local_id(c->transport))
         return c->roster_session[id] == c->monster_authority_session &&
                monster_local_world_(c, low, high, epoch, now);
     const Peer* p = &c->peers[id];
@@ -83,30 +90,89 @@ static int monster_remote_world_(const StateClient* c, uint32_t low, uint32_t hi
            p->state.world_epoch == epoch;
 }
 
-/* Connects to the relay. Returns NULL on a bad argument or transport failure; the caller
-   owns the client and frees it with state_client_destroy. */
+/* The link went down: a connection that never answered is "no answer", one that
+   answered but never finished the handshake was refused, a ready one was lost. */
+static LobbyLink mark_link_down(LobbyLink link)
+{
+    if (link == LINK_CONNECTING)
+        return LINK_NO_ANSWER;
+    if (link == LINK_HANDSHAKE)
+        return LINK_REFUSED;
+    if (link == LINK_READY)
+        return LINK_LOST;
+    return link;
+}
+
+/* Accepts a valid snapshot of the same build that is newer than the stored one, or
+   the first snapshot of another room. A snapshot of another build marks the link
+   incompatible and is not stored. */
+static void receive_lobby(StateClient* c, const uint8_t* data, int length)
+{
+    MpLobby snapshot;
+    if (!mp_lobby_decode(data, length, &snapshot))
+    {
+        ++c->rejected;
+        return;
+    }
+
+    if (snapshot.compat != MP_COMPAT_ID)
+    {
+        c->link = LINK_INCOMPATIBLE;
+        c->lobby.known = 0;
+        return;
+    }
+
+    int same_room = c->lobby.known && c->lobby.snapshot.room == snapshot.room;
+    if (same_room && !mp_sequence_newer(snapshot.revision, c->lobby.snapshot.revision))
+        return; /* Periodic resend or an older packet. */
+
+    c->lobby.snapshot = snapshot;
+    c->lobby.known = 1;
+    if (c->log)
+        fprintf(c->log, "# LOBBY room=%u revision=%u phase=%u run=%u players=%u notice=%u\n",
+                snapshot.room, snapshot.revision, snapshot.phase, snapshot.run_epoch,
+                snapshot.count, snapshot.notice);
+}
+
+/* Wraps a connecting transport. The client takes ownership of `transport` even on
+   failure (it is destroyed then). Returns NULL on a bad name or out of memory. */
+StateClient* state_client_create_with_transport(Transport* transport, const char* name, FILE* log)
+{
+    if (!transport || !mp_is_player_name(name))
+    {
+        transport_destroy(transport);
+        return NULL;
+    }
+
+    StateClient* c = calloc(1, sizeof(*c));
+    if (!c)
+    {
+        transport_destroy(transport);
+        return NULL;
+    }
+
+    c->log = log;
+    c->transport = transport;
+    c->link = LINK_CONNECTING;
+    strcpy_s(c->name, sizeof(c->name), name);
+    return c;
+}
+
+/* Connects to the relay over UDP. Returns NULL on a bad argument or transport failure;
+   the caller owns the client and frees it with state_client_destroy. */
 StateClient* state_client_create(const char* host, unsigned short port, const char* name, FILE* log)
 {
-    if (!host || !port || !mp_is_player_name(name) || epnet_init())
+    if (!host || !port || !mp_is_player_name(name))
         return NULL;
-    StateClient* c = calloc(1, sizeof(*c));
-    if (c)
-    {
-        c->log = log;
-        strcpy_s(c->name, sizeof(c->name), name);
-        c->transport = epnet_client_create();
-        if (c->transport && !epnet_client_connect(c->transport, host, port))
-        {
-            if (log)
-                fprintf(log, "# NET_CONNECT host=%s port=%u name=%s\n", host, port, name);
-            return c;
-        }
-        if (c->transport)
-            epnet_client_destroy(c->transport);
-        free(c);
-    }
-    epnet_shutdown();
-    return NULL;
+
+    Transport* transport = transport_udp_connect(host, port);
+    if (!transport)
+        return NULL;
+
+    StateClient* c = state_client_create_with_transport(transport, name, log);
+    if (c && log)
+        fprintf(log, "# NET_CONNECT host=%s port=%u name=%s\n", host, port, name);
+    return c;
 }
 
 /* Disconnects and frees the client (NULL is accepted). */
@@ -114,9 +180,7 @@ void state_client_destroy(StateClient* c)
 {
     if (!c)
         return;
-    epnet_client_disconnect(c->transport);
-    epnet_client_destroy(c->transport);
-    epnet_shutdown();
+    transport_destroy(c->transport);
     free(c);
 }
 
@@ -138,17 +202,21 @@ void state_client_update(StateClient* c, unsigned long now)
         return;
     double dt = c->previous ? (now - c->previous) / 1000.0 : 0;
     c->previous = now;
-    epnet_client_update(c->transport, dt);
-    epnet_event_t ev;
-    while (epnet_client_poll_events(c->transport, &ev))
+    transport_update(c->transport, dt);
+    TransportEvent ev;
+    while (transport_poll(c->transport, &ev))
     {
-        if (ev.type == EPNET_EVENT_CONNECTED)
+        if (ev.type == TRANSPORT_CONNECTED)
         {
             c->joined = 1;
             c->requested_at = now - 500;
+            if (c->link == LINK_CONNECTING)
+                c->link = LINK_HANDSHAKE;
         }
-        if (ev.type == EPNET_EVENT_DISCONNECTED)
+        if (ev.type == TRANSPORT_DISCONNECTED)
         {
+            c->link = mark_link_down(c->link);
+            c->lobby.known = 0;
             c->ready = c->joined = 0;
             c->monster_authority_known = 0;
             clear_monster_(c);
@@ -157,16 +225,16 @@ void state_client_update(StateClient* c, unsigned long now)
             memset(c->roster_name, 0, sizeof(c->roster_name));
             memset(c->roster_session, 0, sizeof(c->roster_session));
             if (c->log)
-                fprintf(c->log, "# NET_DISCONNECTED reason=%u\n", ev.data.disconnect_reason);
+                fprintf(c->log, "# NET_DISCONNECTED reason=%u\n", ev.reason);
         }
-        if (ev.type != EPNET_EVENT_PACKET)
+        if (ev.type != TRANSPORT_PACKET)
             continue;
-        if (ev.data.packet.pkt_type == MPT_S_WELCOME && c->joined)
+        if (ev.packet_type == MPT_S_WELCOME && c->joined)
         {
             uint32_t id, capacity;
             char map[MP_MAX_MAP_NAME_LEN];
-            if (!mp_welcome_decode(ev.data.packet.data, ev.data.packet.len, &id, &capacity, map) ||
-                capacity > EPNET_MAX_CLIENTS || id != epnet_client_get_id(c->transport))
+            if (!mp_welcome_decode(ev.data, ev.length, &id, &capacity, map) ||
+                capacity > MP_MAX_PEERS || id != transport_local_id(c->transport))
             {
                 ++c->rejected;
                 continue;
@@ -176,18 +244,25 @@ void state_client_update(StateClient* c, unsigned long now)
             if (!c->ready && c->log)
                 fprintf(c->log, "# NET_READY id=%u\n", id);
             c->ready = 1;
+            if (c->link == LINK_HANDSHAKE)
+                c->link = LINK_READY;
         }
-        if (ev.data.packet.pkt_type == MPT_S_STATE && c->ready)
+        if (ev.packet_type == MPT_S_LOBBY && c->ready)
+        {
+            receive_lobby(c, ev.data, ev.length);
+            continue;
+        }
+        if (ev.packet_type == MPT_S_STATE && c->ready)
         {
             MpState state;
-            const uint8_t* data = ev.data.packet.data;
-            if (ev.data.packet.len != MP_STATE_RELAY_SIZE)
+            const uint8_t* data = ev.data;
+            if (ev.length != MP_STATE_RELAY_SIZE)
             {
                 ++c->rejected;
                 continue;
             }
             uint32_t id = mp_get_u32(data), session = mp_get_u32(data + 4);
-            if (id >= EPNET_MAX_CLIENTS || id == epnet_client_get_id(c->transport) || !session ||
+            if (id >= MP_MAX_PEERS || id == transport_local_id(c->transport) || !session ||
                 !mp_state_decode(data + 8, MP_STATE_SIZE, &state))
             {
                 ++c->rejected;
@@ -223,11 +298,11 @@ void state_client_update(StateClient* c, unsigned long now)
                         state.animation, state.direction, state.velocity, state.moving,
                         state.torso_present, state.torso_direction);
         }
-        if (ev.data.packet.pkt_type == MPT_S_ROSTER && c->ready)
+        if (ev.packet_type == MPT_S_ROSTER && c->ready)
         {
             MpRosterEntry entries[MP_ROSTER_MAX_ENTRIES];
             unsigned int count;
-            if (!mp_roster_decode(ev.data.packet.data, ev.data.packet.len, entries, &count))
+            if (!mp_roster_decode(ev.data, ev.length, entries, &count))
             {
                 ++c->rejected;
                 continue;
@@ -237,24 +312,24 @@ void state_client_update(StateClient* c, unsigned long now)
             memset(c->roster_session, 0, sizeof(c->roster_session));
             for (unsigned int i = 0; i < count; ++i)
             {
-                if (entries[i].id >= EPNET_MAX_CLIENTS)
+                if (entries[i].id >= MP_MAX_PEERS)
                     continue;
                 memcpy(c->roster_name[entries[i].id], entries[i].name, sizeof(entries[i].name));
                 c->roster_session[entries[i].id] = entries[i].session;
             }
         }
-        if (ev.data.packet.pkt_type == MPT_S_SHOT && c->ready)
+        if (ev.packet_type == MPT_S_SHOT && c->ready)
         {
-            const uint8_t* data = ev.data.packet.data;
+            const uint8_t* data = ev.data;
             ShotEvent event = {0};
-            if (ev.data.packet.len != MP_SHOT_RELAY_SIZE)
+            if (ev.length != MP_SHOT_RELAY_SIZE)
             {
                 ++c->rejected;
                 continue;
             }
             event.id = mp_get_u32(data);
             event.session = mp_get_u32(data + 4);
-            if (event.id >= EPNET_MAX_CLIENTS || event.id == epnet_client_get_id(c->transport) ||
+            if (event.id >= MP_MAX_PEERS || event.id == transport_local_id(c->transport) ||
                 !event.session || !mp_shot_decode(data + 8, MP_SHOT_SIZE, &event.shot))
             {
                 ++c->rejected;
@@ -281,10 +356,10 @@ void state_client_update(StateClient* c, unsigned long now)
             }
             c->shots[(c->shot_head + c->shot_count++) % 64] = event;
         }
-        if (ev.data.packet.pkt_type == MPT_S_MONSTER_AUTHORITY && c->ready)
+        if (ev.packet_type == MPT_S_MONSTER_AUTHORITY && c->ready)
         {
-            const uint8_t* data = ev.data.packet.data;
-            if (ev.data.packet.len != 12 || mp_get_u32(data) != MP_MONSTER_VERSION)
+            const uint8_t* data = ev.data;
+            if (ev.length != 12 || mp_get_u32(data) != MP_MONSTER_VERSION)
             {
                 ++c->rejected;
                 continue;
@@ -292,7 +367,7 @@ void state_client_update(StateClient* c, unsigned long now)
             uint32_t id = mp_get_u32(data + 4), session = mp_get_u32(data + 8);
             if (id == UINT32_MAX && !session)
                 continue;
-            if (id >= EPNET_MAX_CLIENTS || !session ||
+            if (id >= MP_MAX_PEERS || !session ||
                 (c->monster_authority_known &&
                  (id != c->monster_authority_id || session != c->monster_authority_session)))
             {
@@ -301,16 +376,16 @@ void state_client_update(StateClient* c, unsigned long now)
             }
             if (!c->monster_authority_known && c->log)
                 fprintf(c->log, "# MONSTER_AUTHORITY ready=1 id=%u session=%u local=%d\n", id,
-                        session, id == epnet_client_get_id(c->transport));
+                        session, id == transport_local_id(c->transport));
             c->monster_authority_known = 1;
             c->monster_authority_id = id;
             c->monster_authority_session = session;
         }
-        if (ev.data.packet.pkt_type == MPT_S_MONSTER_STATE && c->ready)
+        if (ev.packet_type == MPT_S_MONSTER_STATE && c->ready)
         {
-            const uint8_t* data = ev.data.packet.data;
+            const uint8_t* data = ev.data;
             MpMonsterState state;
-            if (ev.data.packet.len != MP_MONSTER_STATE_RELAY_SIZE || !c->monster_authority_known ||
+            if (ev.length != MP_MONSTER_STATE_RELAY_SIZE || !c->monster_authority_known ||
                 mp_get_u32(data) != c->monster_authority_id ||
                 mp_get_u32(data + 4) != c->monster_authority_session ||
                 !mp_monster_state_decode(data + 8, MP_MONSTER_STATE_SIZE, &state) ||
@@ -330,11 +405,11 @@ void state_client_update(StateClient* c, unsigned long now)
             c->monster_seen[slot] = 1;
             c->monster_received_at[slot] = now;
         }
-        if (ev.data.packet.pkt_type == MPT_S_MONSTER_EVENT && c->ready)
+        if (ev.packet_type == MPT_S_MONSTER_EVENT && c->ready)
         {
-            const uint8_t* data = ev.data.packet.data;
+            const uint8_t* data = ev.data;
             MonsterEvent event;
-            if (ev.data.packet.len != MP_MONSTER_EVENT_RELAY_SIZE || !c->monster_authority_known ||
+            if (ev.length != MP_MONSTER_EVENT_RELAY_SIZE || !c->monster_authority_known ||
                 mp_get_u32(data) != c->monster_authority_id ||
                 mp_get_u32(data + 4) != c->monster_authority_session ||
                 !mp_monster_event_decode(data + 8, MP_MONSTER_EVENT_SIZE, &event.event) ||
@@ -373,7 +448,7 @@ void state_client_update(StateClient* c, unsigned long now)
         uint8_t hello[5 + MP_MAX_NAME_LEN];
         int length = mp_hello_encode(hello, sizeof(hello), c->name);
         if (length)
-            epnet_client_send(c->transport, MPT_C_HELLO, hello, (size_t)length);
+            transport_send(c->transport, MPT_C_HELLO, hello, (size_t)length);
         c->requested_at = now;
     }
     if (c->ready && now - c->sent_at >= MP_STATE_SEND_MS)
@@ -385,20 +460,20 @@ void state_client_update(StateClient* c, unsigned long now)
         state.sequence = ++c->sequence;
         uint8_t packet[MP_STATE_SIZE];
         mp_state_encode(packet, &state);
-        epnet_client_send(c->transport, MPT_C_STATE, packet, sizeof(packet));
+        transport_send(c->transport, MPT_C_STATE, packet, sizeof(packet));
         ++c->sent;
         c->sent_at = now;
     }
     if (c->ready && c->monster_claim_requested && !c->monster_authority_known &&
         now - c->monster_claim_at >= 500u)
     {
-        uint32_t id = epnet_client_get_id(c->transport);
-        if (id < EPNET_MAX_CLIENTS && c->roster_session[id])
+        uint32_t id = transport_local_id(c->transport);
+        if (id < MP_MAX_PEERS && c->roster_session[id])
         {
             uint8_t packet[8];
             mp_put_u32(packet, MP_MONSTER_VERSION);
             mp_put_u32(packet + 4, c->roster_session[id]);
-            epnet_client_send(c->transport, MPT_C_MONSTER_CLAIM, packet, sizeof(packet));
+            transport_send(c->transport, MPT_C_MONSTER_CLAIM, packet, sizeof(packet));
             c->monster_claim_at = now;
         }
     }
@@ -417,7 +492,7 @@ int state_client_connected(const StateClient* c)
 /* Copies a peer's latest state; 0 when absent or older than one second. */
 int state_client_peer(const StateClient* c, unsigned int id, unsigned long now, MpState* state)
 {
-    if (!c || !state || id >= EPNET_MAX_CLIENTS || !c->peers[id].present ||
+    if (!c || !state || id >= MP_MAX_PEERS || !c->peers[id].present ||
         now - c->peers[id].received_at > 1000)
         return 0;
     *state = c->peers[id].state;
@@ -461,7 +536,7 @@ int state_client_send_shot(StateClient* c, const MpShot* source, unsigned long n
     MpShot checked;
     if (!mp_shot_decode(packet, sizeof(packet), &checked))
         return 0;
-    epnet_client_send(c->transport, MPT_C_SHOT, packet, sizeof(packet));
+    transport_send(c->transport, MPT_C_SHOT, packet, sizeof(packet));
     return 1;
 }
 
@@ -494,7 +569,7 @@ int state_client_monster_authority(const StateClient* c, uint32_t* id, uint32_t*
     if (session)
         *session = c->monster_authority_session;
     if (is_local)
-        *is_local = c->monster_authority_id == epnet_client_get_id(c->transport) &&
+        *is_local = c->monster_authority_id == transport_local_id(c->transport) &&
                     c->roster_session[c->monster_authority_id] == c->monster_authority_session;
     return 1;
 }
@@ -512,7 +587,7 @@ int state_client_publish_monster(StateClient* c, const MpMonsterState* state, un
     mp_monster_state_encode(packet + 4, state);
     if (!mp_monster_state_decode(packet + 4, MP_MONSTER_STATE_SIZE, &checked))
         return 0;
-    epnet_client_send(c->transport, MPT_C_MONSTER_STATE, packet, sizeof(packet));
+    transport_send(c->transport, MPT_C_MONSTER_STATE, packet, sizeof(packet));
     return 1;
 }
 
@@ -550,7 +625,7 @@ int state_client_send_monster_event(StateClient* c, const MpMonsterEvent* event,
     mp_monster_event_encode(packet + 4, event);
     if (!mp_monster_event_decode(packet + 4, MP_MONSTER_EVENT_SIZE, &checked))
         return 0;
-    epnet_client_send(c->transport, MPT_C_MONSTER_EVENT, packet, sizeof(packet));
+    transport_send(c->transport, MPT_C_MONSTER_EVENT, packet, sizeof(packet));
     return 1;
 }
 
@@ -573,4 +648,62 @@ int state_client_take_monster_event(StateClient* c, MonsterEvent* out)
         }
     }
     return 0;
+}
+
+LobbyLink state_client_link(const StateClient* c)
+{
+    return c ? c->link : LINK_NONE;
+}
+
+int state_client_lobby(const StateClient* c, MpLobby* out, uint32_t* local_id)
+{
+    if (!c || !c->ready || !c->lobby.known || c->link != LINK_READY)
+        return 0;
+    if (out)
+        *out = c->lobby.snapshot;
+    if (local_id)
+        *local_id = transport_local_id(c->transport);
+    return 1;
+}
+
+int state_client_send_lobby_ready(StateClient* c, const MpLobbyReady* request)
+{
+    if (!c || !c->ready || !request)
+        return 0;
+    uint8_t packet[MP_LOBBY_REQUEST_SIZE];
+    mp_lobby_ready_encode(packet, request);
+    transport_send(c->transport, MPT_C_LOBBY_READY, packet, sizeof(packet));
+    return 1;
+}
+
+int state_client_send_lobby_settings(StateClient* c, const MpLobbySettings* request)
+{
+    if (!c || !c->ready || !request)
+        return 0;
+    uint8_t packet[12 + 1 + MP_MAX_MAP_NAME_LEN];
+    int length = mp_lobby_settings_encode(packet, sizeof(packet), request);
+    if (!length)
+        return 0;
+    transport_send(c->transport, MPT_C_LOBBY_SETTINGS, packet, (size_t)length);
+    return 1;
+}
+
+int state_client_send_lobby_start(StateClient* c, const MpLobbyStart* request)
+{
+    if (!c || !c->ready || !request)
+        return 0;
+    uint8_t packet[MP_LOBBY_START_SIZE];
+    mp_lobby_start_encode(packet, request);
+    transport_send(c->transport, MPT_C_LOBBY_START, packet, sizeof(packet));
+    return 1;
+}
+
+int state_client_send_lobby_loaded(StateClient* c, const MpLobbyLoaded* request)
+{
+    if (!c || !c->ready || !request)
+        return 0;
+    uint8_t packet[MP_LOBBY_LOADED_SIZE];
+    mp_lobby_loaded_encode(packet, request);
+    transport_send(c->transport, MPT_C_LOBBY_LOADED, packet, sizeof(packet));
+    return 1;
 }
