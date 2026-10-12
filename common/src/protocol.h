@@ -23,6 +23,8 @@
 #define MP_MAX_HEALTH_LIMIT   100000
 #define MP_STATE_RELAY_SIZE   (8 + MP_STATE_SIZE)
 #define MP_STATE_SEND_MS      33u
+/* Port used when an address or a host request names none. */
+#define MP_DEFAULT_PORT 27020u
 typedef struct MpState
 {
     uint32_t sequence, active, tick;

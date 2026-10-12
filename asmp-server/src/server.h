@@ -19,6 +19,14 @@ typedef struct MpServer MpServer;
 MpServer* mp_server_create(unsigned short port, int max_clients);
 
 /**
+ * @brief Checks that no other socket holds the UDP port (epnet itself binds with
+ *        SO_REUSEADDR and would share it silently).
+ *
+ * @return 1 when the port can be bound exclusively, otherwise 0.
+ */
+int mp_server_port_free(unsigned short port);
+
+/**
  * @brief Destroys top-level server instance.
  *
  * @param server Pointer to server instance.

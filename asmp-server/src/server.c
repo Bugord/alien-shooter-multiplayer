@@ -4,7 +4,8 @@
  *
  * Layer: asmp-server (relay). Accepts clients over epnet, validates their
  * state, shot and monster packets, and relays them with the sender ID and
- * session. Single-threaded: mp_server_tick does all the work.
+ * session. It also keeps the room (lobby.c): members, host, ready flags and
+ * the start/load barrier. Single-threaded: mp_server_tick does all the work.
  *
  */
 #include <stdbool.h>
@@ -12,12 +13,15 @@
 #include "server.h"
 #include "protocol.h"
 #include "monster_protocol.h"
+#include "lobby_protocol.h"
+#include "lobby.h"
 #include "utils/mem/mem.h"
 #include "utils/time/time.h"
 #include "epnet.h"
 #include "epnet_server.h"
 #include <stdio.h> // TODO: Remove.
 #include <stdlib.h>
+#include <winsock2.h>
 
 typedef struct Player
 {
@@ -48,6 +52,9 @@ typedef struct MpServer
     uint32_t monster_event_sequence[MP_MONSTER_CAPACITY];
     MpMonsterState monster[MP_MONSTER_CAPACITY];
     unsigned long monster_at[MP_MONSTER_CAPACITY], monster_relay_at;
+    Lobby lobby;
+    bool lobby_dirty;
+    unsigned long lobby_sent_at;
 } MpServer;
 
 
@@ -110,13 +117,78 @@ static void send_all_monsters_(MpServer* server, unsigned int recipient)
         send_monster_state_(server, recipient, slot);
 }
 
-/* Registers the client's name and answers with welcome, authority and monster states. */
+/* Sends the current room snapshot to one client. */
+static void send_lobby_(MpServer* server, unsigned int recipient)
+{
+    MpLobby snapshot;
+    lobby_snapshot(&server->lobby, &snapshot);
+
+    uint8_t packet[MP_LOBBY_MAX_SIZE];
+    int length = mp_lobby_encode(packet, sizeof(packet), &snapshot);
+    if (length)
+        epnet_server_send(server->ns, (uint8_t)recipient, MPT_S_LOBBY, packet, (size_t)length);
+}
+
+/* Sends the room snapshot to every registered client. */
+static void broadcast_lobby_(MpServer* server)
+{
+    for (unsigned int i = 0; i < server->max_clients; ++i)
+    {
+        if (server->players[i].is_connected)
+            send_lobby_(server, i);
+    }
+    server->lobby_dirty = false;
+    server->lobby_sent_at = server->tick_time_ms;
+}
+
+/* Applies one lobby request from a registered client. Invalid packets are dropped;
+   a change is broadcast with the next tick. */
+static void process_lobby_request_(MpServer* server, uint8_t sender, uint8_t type,
+                                   const uint8_t* data, int length)
+{
+    Player* p = &server->players[sender];
+    enum LobbyResult result = LOBBY_UNCHANGED;
+
+    if (type == MPT_C_LOBBY_READY)
+    {
+        MpLobbyReady request;
+        if (mp_lobby_ready_decode(data, length, &request))
+            result = lobby_set_ready(&server->lobby, sender, p->session, &request);
+    }
+    else if (type == MPT_C_LOBBY_SETTINGS)
+    {
+        MpLobbySettings request;
+        if (mp_lobby_settings_decode(data, length, &request))
+            result = lobby_change_settings(&server->lobby, sender, p->session, &request);
+    }
+    else if (type == MPT_C_LOBBY_START)
+    {
+        MpLobbyStart request;
+        if (mp_lobby_start_decode(data, length, &request))
+            result =
+                lobby_start(&server->lobby, sender, p->session, &request, server->tick_time_ms);
+    }
+    else if (type == MPT_C_LOBBY_LOADED)
+    {
+        MpLobbyLoaded request;
+        if (mp_lobby_loaded_decode(data, length, &request))
+            result = lobby_mark_loaded(&server->lobby, sender, p->session, &request);
+    }
+
+    if (result == LOBBY_CHANGED)
+        server->lobby_dirty = true;
+}
+
+/* Registers the client's name and answers with welcome, authority, monster states and
+   the room snapshot. */
 static void process_hello_(MpServer* server, uint8_t sender, const char* name)
 {
     Player* p = &server->players[sender];
     memcpy(p->name, name, sizeof(p->name));
     p->is_connected = true;
     server->roster_dirty = true;
+    if (lobby_join(&server->lobby, sender, p->session, p->name) == LOBBY_CHANGED)
+        server->lobby_dirty = true;
     /* A repeated hello (lost welcome) is answered again. */
     uint8_t welcome[13 + MP_MAX_MAP_NAME_LEN];
     int length =
@@ -125,6 +197,7 @@ static void process_hello_(MpServer* server, uint8_t sender, const char* name)
         epnet_server_send(server->ns, sender, MPT_S_WELCOME, welcome, (size_t)length);
     send_monster_authority_(server, sender);
     send_all_monsters_(server, sender);
+    send_lobby_(server, sender);
     printf("Client %d is %s\n", sender, p->name);
 }
 
@@ -155,6 +228,10 @@ static void process_received_packets_(MpServer* server)
             printf("Client %d left\n", ev.client_id);
             if (ev.client_id < server->max_clients)
             {
+                Player* leaving = &server->players[ev.client_id];
+                if (leaving->is_connected &&
+                    lobby_leave(&server->lobby, ev.client_id, leaving->session) == LOBBY_CHANGED)
+                    server->lobby_dirty = true;
                 server->players[ev.client_id].is_connected = false;
                 server->players[ev.client_id].transport_connected = false;
                 server->roster_dirty = true;
@@ -296,6 +373,15 @@ static void process_received_packets_(MpServer* server)
                                           sizeof(packet));
                 break;
             }
+            case MPT_C_LOBBY_READY:
+            case MPT_C_LOBBY_SETTINGS:
+            case MPT_C_LOBBY_START:
+            case MPT_C_LOBBY_LOADED:
+            {
+                process_lobby_request_(server, sender, ev.data.packet.pkt_type, ev.data.packet.data,
+                                       length);
+                break;
+            }
             case MPT_C_SHOT:
             {
                 MpShot shot;
@@ -353,11 +439,46 @@ static void send_roster_(MpServer* server)
             epnet_server_send(server->ns, i, MPT_S_ROSTER, packet, (size_t)length);
 }
 
+/* epnet binds with SO_REUSEADDR, so on Windows a second server would silently share
+   the port with a running one. An exclusive bind fails if any socket holds it. The
+   probe socket is closed again before epnet binds. Winsock must be started. */
+static int port_free_(unsigned short port)
+{
+    SOCKET probe = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (probe == INVALID_SOCKET)
+        return 0;
+
+    BOOL exclusive = TRUE;
+    setsockopt(probe, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&exclusive, sizeof(exclusive));
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(port);
+
+    int bound = bind(probe, (struct sockaddr*)&address, sizeof(address)) == 0;
+    closesocket(probe);
+    return bound;
+}
+
+int mp_server_port_free(unsigned short port)
+{
+    if (epnet_init())
+        return 0;
+    int is_free = port_free_(port);
+    epnet_shutdown();
+    return is_free;
+}
+
 /* Creates the server on `port`. The map comes from ASMP_MAP when valid. Returns NULL on
-   failure; the caller frees it with mp_server_destroy. */
+   failure, including a port another socket already holds; the caller frees it with
+   mp_server_destroy. */
 MpServer* mp_server_create(unsigned short port, int max_clients)
 {
     if (max_clients < 1 || max_clients > EPNET_MAX_CLIENTS)
+        return 0;
+    if (!mp_server_port_free(port))
         return 0;
     MpServer* server = mem_alloc(sizeof(*server));
     if (server)
@@ -381,7 +502,10 @@ MpServer* mp_server_create(unsigned short port, int max_clients)
                     mp_is_level_path(configured_map))
                     strcpy_s(server->map_name, sizeof(server->map_name), configured_map);
                 server->prev_tick_time_ms = time_get_ms();
-                return server;
+                uint32_t seed = (uint32_t)server->prev_tick_time_ms ^ (uint32_t)(uintptr_t)server;
+                if (lobby_init(&server->lobby, seed, server->max_clients, server->map_name))
+                    return server;
+                mem_free(server->players);
             }
             epnet_server_destroy(server->ns);
         }
@@ -429,6 +553,11 @@ void mp_server_tick(MpServer* server)
                 send_all_monsters_(server, i);
         server->monster_relay_at = server->tick_time_ms;
     }
+
+    if (lobby_tick(&server->lobby, server->tick_time_ms) == LOBBY_CHANGED)
+        server->lobby_dirty = true;
+    if (server->lobby_dirty || server->tick_time_ms - server->lobby_sent_at >= MP_LOBBY_INTERVAL_MS)
+        broadcast_lobby_(server);
 
     if (server->roster_dirty ||
         (server->tick_time_ms - server->roster_sent_time_ms) >= MP_ROSTER_INTERVAL_MS)

@@ -65,11 +65,14 @@ try {
         Compile ($flags + @("$root\tests\window_mode_test.c", "$root\src\window_mode.c", '/Fe:window-mode-test.exe', '/link', '/MACHINE:X86'))
         & .\window-mode-test.exe
         if ($LASTEXITCODE) { throw 'Window mode checks failed.' }
-        $serverSupport = @("$repo\asmp-server\src\server.c", "$repo\common\epnet\src\server\epnet_server.c", "$repo\common\src\utils\mem\mem.c", "$repo\common\src\utils\time\time.c")
+        $serverSupport = @("$repo\asmp-server\src\server.c", "$repo\asmp-server\src\lobby.c","$repo\common\epnet\src\server\epnet_server.c", "$repo\common\src\utils\mem\mem.c", "$repo\common\src\utils\time\time.c")
         Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $serverSupport)
         $serverObjects = @($serverSupport | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
         Compile ($flags + $netIncludes + @("$root\tests\state_sync_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:state-sync-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
         Compile ($flags + $netIncludes + @("$root\tests\monster_transport_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:monster-transport-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        Compile ($flags + $netIncludes + @("$root\tests\lobby_test.c", '/Fe:lobby-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        & .\lobby-test.exe
+        if ($LASTEXITCODE) { throw 'Lobby checks failed.' }
         & .\monster-transport-test.exe
         if ($LASTEXITCODE) { throw 'Monster transport checks failed.' }
         & .\state-sync-test.exe
