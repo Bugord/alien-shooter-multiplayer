@@ -22,6 +22,23 @@ enum CombatFixtureState
 
 #define COMBAT_FORM_LIMIT   32u
 #define COMBAT_ENTITY_LIMIT 128u
+/* Room for the foreign map entities recorded before a spawn. */
+#define COMBAT_BASELINE_LIMIT 2048u
+/* Most entities one animation of a cloned visual form may create. */
+#define COMBAT_CREATION_LIMIT 16u
+/* The default test monster appears this far to the right of the player. */
+#define COMBAT_TEST_SPAWN_OFFSET 80.0f
+/* Slot of the native factory in the GAME vtable. */
+#define COMBAT_GAME_CREATE_SLOT 8u
+
+/* Depth-first colors of a form while the clone graph is built. */
+enum FormColor
+{
+    FORM_UNVISITED,
+    FORM_IN_PROGRESS, /* Seen again before it finished: a cycle, refused. */
+    FORM_DONE
+};
+
 /* One spawned fixture: private VID copies and the native entities created from
    them. Public functions receive the fixture explicitly. */
 struct UnitCombat
@@ -53,8 +70,9 @@ struct UnitCombat
     {
         struct
         {
-            uintptr_t entity, vid;
-        } entries[2048];
+            uintptr_t entity;
+            uintptr_t vid;
+        } entries[COMBAT_BASELINE_LIMIT];
         unsigned int count;
         int capturing;
     } baseline;
@@ -91,6 +109,34 @@ static struct
     int initialized;
 } shared;
 
+/* Caller in SEH. The engine's stock descriptor for table index `index`. */
+static uintptr_t stock_vid(uintptr_t game, unsigned int index)
+{
+    return *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + index * sizeof(uintptr_t));
+}
+
+/* The creation link (or creation count) entry for animation `animation` of a descriptor. */
+static uintptr_t* creation_link(uintptr_t vid, unsigned int animation)
+{
+    return (uintptr_t*)(vid + STEAM_VID_CREATIONS_OFFSET + animation * sizeof(uintptr_t));
+}
+
+static unsigned int creation_count(uintptr_t vid, unsigned int animation)
+{
+    return *(unsigned int*)(vid + STEAM_VID_CREATION_COUNT_OFFSET +
+                            animation * sizeof(unsigned int));
+}
+
+/* Caller in SEH. True when `child` is a SPRITE part of `root` with no part of its own. */
+static int is_part_of(uintptr_t child, uintptr_t root)
+{
+    if (*(uintptr_t*)child != shared.base + STEAM_SPRITE_VTABLE_RVA)
+        return 0;
+    if (*(uintptr_t*)(child + STEAM_ENTITY_CHILD_OFFSET))
+        return 0;
+    return *(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) == root;
+}
+
 /* Returns fixture `index`, or NULL when out of range. */
 UnitCombat* unit_combat_slot(unsigned int index)
 {
@@ -107,8 +153,10 @@ static int owned_descriptor(uintptr_t vid)
         if (vid == (uintptr_t)fixtures[i].root_vid || vid == (uintptr_t)fixtures[i].child_vid)
             return 1;
         for (unsigned int j = 0; j < fixtures[i].graph.count; ++j)
+        {
             if (vid == (uintptr_t)fixtures[i].graph.vids[j])
                 return 1;
+        }
     }
     return 0;
 }
@@ -117,8 +165,10 @@ static int owned_descriptor(uintptr_t vid)
 static int private_form(const UnitCombat* fixture, uintptr_t vid)
 {
     for (unsigned int i = 0; i < fixture->graph.count; ++i)
+    {
         if (vid == (uintptr_t)fixture->graph.vids[i])
             return (int)i;
+    }
     return -1;
 }
 
@@ -131,15 +181,25 @@ enum UnitResult unit_combat_bind(uintptr_t base, ActorCreate* out)
     *out = NULL;
     __try
     {
-        if (memcmp((void*)(base + STEAM_ACTOR_CREATE_RVA), signature, sizeof(signature)) ||
-            *(uintptr_t*)(base + STEAM_GAME_VTABLE_RVA + 8u * sizeof(uintptr_t)) !=
-                base + STEAM_ACTOR_CREATE_RVA ||
-            memcmp((void*)(base + STEAM_CANNON_DESTROY_RVA), cannon, sizeof(cannon)) ||
-            memcmp((void*)(base + STEAM_TERRAIN_DESTROY_RVA), terrain, sizeof(terrain)) ||
-            *(uintptr_t*)(base + STEAM_CANNON_VTABLE_RVA) != base + STEAM_CANNON_DESTROY_RVA ||
-            *(uintptr_t*)(base + STEAM_TERRAIN_VTABLE_RVA) != base + STEAM_TERRAIN_DESTROY_RVA)
+        /* The factory: its first bytes and its GAME vtable slot. */
+        uintptr_t create = base + STEAM_ACTOR_CREATE_RVA;
+        uintptr_t* game_vtable = (uintptr_t*)(base + STEAM_GAME_VTABLE_RVA);
+        if (memcmp((void*)create, signature, sizeof(signature)))
             return UNIT_REFUSED;
-        *out = (ActorCreate)(base + STEAM_ACTOR_CREATE_RVA);
+        if (game_vtable[COMBAT_GAME_CREATE_SLOT] != create)
+            return UNIT_REFUSED;
+
+        /* The CANNON and TERRAIN destructors used to remove cloned visual forms. */
+        if (memcmp((void*)(base + STEAM_CANNON_DESTROY_RVA), cannon, sizeof(cannon)))
+            return UNIT_REFUSED;
+        if (memcmp((void*)(base + STEAM_TERRAIN_DESTROY_RVA), terrain, sizeof(terrain)))
+            return UNIT_REFUSED;
+        if (*(uintptr_t*)(base + STEAM_CANNON_VTABLE_RVA) != base + STEAM_CANNON_DESTROY_RVA)
+            return UNIT_REFUSED;
+        if (*(uintptr_t*)(base + STEAM_TERRAIN_VTABLE_RVA) != base + STEAM_TERRAIN_DESTROY_RVA)
+            return UNIT_REFUSED;
+
+        *out = (ActorCreate)create;
         return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
@@ -169,12 +229,19 @@ enum UnitResult unit_combat_init(uintptr_t base, ActorCreate create, ActorDestro
    category, no service object and no special factory flag. */
 static int supported(uintptr_t vid, unsigned int index, unsigned int class_id)
 {
-    return vid && *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET) == index &&
-           *(unsigned int*)(vid + STEAM_VID_CLASS_OFFSET) == class_id &&
-           *(unsigned int*)(vid + STEAM_VID_CATEGORY_OFFSET) < STEAM_TICK_ENTITY_LIST_COUNT &&
-           !*(uintptr_t*)(vid + STEAM_VID_SERVICE_OFFSET) &&
-           !(*(unsigned int*)(vid + STEAM_VID_RESOURCE_FLAGS_OFFSET) &
-             STEAM_VID_SPECIAL_FACTORY_FLAG);
+    if (!vid)
+        return 0;
+    if (*(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET) != index)
+        return 0;
+    if (*(unsigned int*)(vid + STEAM_VID_CLASS_OFFSET) != class_id)
+        return 0;
+    if (*(unsigned int*)(vid + STEAM_VID_CATEGORY_OFFSET) >= STEAM_TICK_ENTITY_LIST_COUNT)
+        return 0;
+    if (*(uintptr_t*)(vid + STEAM_VID_SERVICE_OFFSET))
+        return 0;
+
+    unsigned int flags = *(unsigned int*)(vid + STEAM_VID_RESOURCE_FLAGS_OFFSET);
+    return !(flags & STEAM_VID_SPECIAL_FACTORY_FLAG);
 }
 
 /* Copies a stock descriptor into `destination` with counters, creations, scripts and
@@ -183,9 +250,11 @@ static void sanitize(unsigned char* destination, uintptr_t source)
 {
     memcpy(destination, (void*)source, STEAM_VID_SIZE);
     memset(destination + STEAM_VID_COUNTERS_OFFSET, 0, STEAM_VID_COUNTERS_SIZE);
-    memset(destination + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
+    memset(destination + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * sizeof(uintptr_t));
+
+    /* -1 means "no script". */
     for (unsigned int i = 0; i < STEAM_ANIMATION_COUNT; ++i)
-        *(int*)(destination + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + i * 4u) = -1;
+        *(int*)(destination + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + i * sizeof(int)) = -1;
     *(int*)(destination + STEAM_VID_DELETE_SCRIPT_OFFSET) = -1;
     *(int*)(destination + STEAM_VID_DAMAGE_SCRIPT_OFFSET) = -1;
     *(int*)(destination + STEAM_VID_COLLISION_SCRIPT_OFFSET) = -1;
@@ -197,8 +266,7 @@ static void sanitize(unsigned char* destination, uintptr_t source)
 static void preserve_death(unsigned char* destination, uintptr_t source)
 {
     for (unsigned int a = STEAM_ANIM_DEATH; a <= STEAM_ANIM_GIB_DEATH; ++a)
-        *(uintptr_t*)(destination + STEAM_VID_CREATIONS_OFFSET + a * 4u) =
-            *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + a * 4u);
+        *creation_link((uintptr_t)destination, a) = *creation_link(source, a);
 }
 
 static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, unsigned int expected,
@@ -208,15 +276,24 @@ static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, uns
    supported class with a behavior. */
 static int form_source_admissible(uintptr_t game, uintptr_t source, unsigned int expected)
 {
-    if (!source || expected >= STEAM_STOCK_VID_LIMIT ||
-        *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + expected * 4u) != source)
+    if (!source || expected >= STEAM_STOCK_VID_LIMIT)
         return 0;
+    if (stock_vid(game, expected) != source)
+        return 0;
+
     unsigned int class_id = *(unsigned int*)(source + STEAM_VID_CLASS_OFFSET);
     if (!supported(source, expected, class_id))
         return 0;
-    if (class_id != STEAM_UNIT_CLASS && class_id != STEAM_CANNON_CLASS &&
-        class_id != STEAM_TERRAIN_CLASS && class_id != STEAM_PUPPET_PART_CLASS)
+    switch (class_id)
+    {
+    case STEAM_UNIT_CLASS:
+    case STEAM_CANNON_CLASS:
+    case STEAM_TERRAIN_CLASS:
+    case STEAM_PUPPET_PART_CLASS:
+        break;
+    default:
         return 0;
+    }
     return *(uintptr_t*)(source + STEAM_VID_BEHAVIOR_OFFSET) != 0;
 }
 
@@ -228,14 +305,21 @@ static int clone_linked_part(UnitCombat* fixture, uintptr_t game, uintptr_t sour
     uintptr_t linked = *(uintptr_t*)(source + STEAM_VID_LINKED_OFFSET);
     if (!linked)
         return 1;
+
+    /* Only a non-part form may link a part, and that part links nothing further. */
+    if (fixture->graph.classes[i] == STEAM_PUPPET_PART_CLASS)
+        return 0;
+    if (*(unsigned int*)(linked + STEAM_VID_CLASS_OFFSET) != STEAM_PUPPET_PART_CLASS)
+        return 0;
+    if (*(uintptr_t*)(linked + STEAM_VID_LINKED_OFFSET))
+        return 0;
+
     uintptr_t private_link;
-    if (fixture->graph.classes[i] == STEAM_PUPPET_PART_CLASS ||
-        *(unsigned int*)(linked + STEAM_VID_CLASS_OFFSET) != STEAM_PUPPET_PART_CLASS ||
-        *(uintptr_t*)(linked + STEAM_VID_LINKED_OFFSET) ||
-        !clone_form(fixture, game, linked, *(unsigned int*)(linked + STEAM_VID_INDEX_OFFSET),
-                    &private_link))
+    unsigned int linked_index = *(unsigned int*)(linked + STEAM_VID_INDEX_OFFSET);
+    if (!clone_form(fixture, game, linked, linked_index, &private_link))
         return 0;
     *(uintptr_t*)(fixture->graph.vids[i] + STEAM_VID_LINKED_OFFSET) = private_link;
+
     int child_index = private_form(fixture, private_link);
     if (child_index < 0 || fixture->graph.cost[child_index] > COMBAT_ENTITY_LIMIT - *cost)
         return 0;
@@ -261,27 +345,37 @@ static int copy_form_behavior(UnitCombat* fixture, uintptr_t source, unsigned in
 static int clone_host_creations(UnitCombat* fixture, uintptr_t game, uintptr_t source,
                                 unsigned int expected, unsigned int i, unsigned int* cost)
 {
-    unsigned char* d = fixture->graph.vids[i];
+    uintptr_t d = (uintptr_t)fixture->graph.vids[i];
     for (unsigned int a = 0; a < STEAM_ANIMATION_COUNT; ++a)
     {
-        uintptr_t target = *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + a * 4u);
+        uintptr_t target = *creation_link(source, a);
         if (!target)
             continue;
-        unsigned int n = *(unsigned int*)(source + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u);
+
+        unsigned int n = creation_count(source, a);
+        if (!n || n > COMBAT_CREATION_LIMIT)
+            return 0;
+
+        /* A creation may be a live UNIT only for the medium armor shell's death. */
         unsigned int target_index = *(unsigned int*)(target + STEAM_VID_INDEX_OFFSET);
         unsigned int target_class = *(unsigned int*)(target + STEAM_VID_CLASS_OFFSET);
         int shell_successor = expected == MONSTER_VID_MONSTER2_ARMOR_SHELL &&
                               a == STEAM_ANIM_DEATH && target_index == MONSTER_VID_MONSTER2 &&
                               n == 1u;
+        if (target_class == STEAM_UNIT_CLASS && !shell_successor)
+            return 0;
+
         uintptr_t private_target;
-        if (!n || n > 16u || (target_class == STEAM_UNIT_CLASS && !shell_successor) ||
-            !clone_form(fixture, game, target, target_index, &private_target))
+        if (!clone_form(fixture, game, target, target_index, &private_target))
             return 0;
         int child_index = private_form(fixture, private_target);
-        if (child_index < 0 || fixture->graph.cost[child_index] > (COMBAT_ENTITY_LIMIT - *cost) / n)
+        if (child_index < 0)
             return 0;
+        if (fixture->graph.cost[child_index] > (COMBAT_ENTITY_LIMIT - *cost) / n)
+            return 0;
+
         *cost += n * fixture->graph.cost[child_index];
-        *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = private_target;
+        *creation_link(d, a) = private_target;
     }
     return 1;
 }
@@ -298,7 +392,7 @@ static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, uns
     {
         if (fixture->graph.sources[i] == source)
         {
-            if (fixture->graph.colors[i] != 2u)
+            if (fixture->graph.colors[i] != FORM_DONE)
                 return 0;
             *output = (uintptr_t)fixture->graph.vids[i];
             return 1;
@@ -310,7 +404,7 @@ static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, uns
     unsigned int i = fixture->graph.count++;
     fixture->graph.sources[i] = source;
     fixture->graph.classes[i] = class_id;
-    fixture->graph.colors[i] = 1u;
+    fixture->graph.colors[i] = FORM_IN_PROGRESS;
     unsigned char* d = fixture->graph.vids[i];
     sanitize(d, source);
     unsigned int cost = 1u;
@@ -337,7 +431,7 @@ static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, uns
             return 0;
     }
     fixture->graph.cost[i] = cost;
-    fixture->graph.colors[i] = 2u;
+    fixture->graph.colors[i] = FORM_DONE;
     *output = (uintptr_t)d;
     return 1;
 }
@@ -347,19 +441,24 @@ static int armor_graph(UnitCombat* fixture, uintptr_t game, unsigned int index, 
 {
     if (!mp_monster_armored(index))
         return 1;
-    uintptr_t target = *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + STEAM_ANIM_DEATH * 4u),
-              private_target;
-    unsigned int expected =
-        index == MONSTER_VID_MONSTER2_ARMORED ? MONSTER_VID_MONSTER2_ARMOR_SHELL : MONSTER_VID_TANK;
-    if (!target ||
-        *(unsigned int*)(source + STEAM_VID_CREATION_COUNT_OFFSET + STEAM_ANIM_DEATH * 4u) != 1u ||
-        *(unsigned int*)(target + STEAM_VID_INDEX_OFFSET) != expected ||
-        *(unsigned int*)(target + STEAM_VID_CLASS_OFFSET) !=
-            (index == MONSTER_VID_MONSTER2_ARMORED ? STEAM_CANNON_CLASS : STEAM_UNIT_CLASS) ||
-        !clone_form(fixture, game, target, expected, &private_target))
+
+    /* Medium armor drops a CANNON shell; large armor turns into the plain tank UNIT. */
+    int medium = index == MONSTER_VID_MONSTER2_ARMORED;
+    unsigned int expected = medium ? MONSTER_VID_MONSTER2_ARMOR_SHELL : MONSTER_VID_TANK;
+    unsigned int expected_class = medium ? STEAM_CANNON_CLASS : STEAM_UNIT_CLASS;
+
+    uintptr_t target = *creation_link(source, STEAM_ANIM_DEATH);
+    if (!target || creation_count(source, STEAM_ANIM_DEATH) != 1u)
         return 0;
-    *(uintptr_t*)(fixture->root_vid + STEAM_VID_CREATIONS_OFFSET + STEAM_ANIM_DEATH * 4u) =
-        private_target;
+    if (*(unsigned int*)(target + STEAM_VID_INDEX_OFFSET) != expected)
+        return 0;
+    if (*(unsigned int*)(target + STEAM_VID_CLASS_OFFSET) != expected_class)
+        return 0;
+
+    uintptr_t private_target;
+    if (!clone_form(fixture, game, target, expected, &private_target))
+        return 0;
+    *creation_link((uintptr_t)fixture->root_vid, STEAM_ANIM_DEATH) = private_target;
     return 1;
 }
 
@@ -375,26 +474,38 @@ enum SpawnMode
 static int spawn_request_valid(const UnitCombat* fixture, const Snapshot* local, unsigned int index,
                                const UnitPuppetPose* pose)
 {
-    if (!fixture || fixture->state != COMBAT_FIXTURE_READY || fixture->game || !local ||
-        !local->game || !local->in_level || local->health <= 0)
+    if (!fixture || fixture->state != COMBAT_FIXTURE_READY || fixture->game)
         return 0;
-    return index < STEAM_STOCK_VID_LIMIT && pose && _finite(pose->x) && _finite(pose->y) &&
-           _finite(pose->z) && pose->direction <= 255u;
+    if (!local || !local->game || !local->in_level || local->health <= 0)
+        return 0;
+    if (index >= STEAM_STOCK_VID_LIMIT || !pose)
+        return 0;
+    if (!_finite(pose->x) || !_finite(pose->y) || !_finite(pose->z))
+        return 0;
+    return pose->direction <= STEAM_DIRECTION_MAX;
 }
 
 /* Caller in SEH. Finds the stock UNIT `index` and its optional part, and
    saves copies of both so later samples can prove they stayed unchanged. */
 static int capture_spawn_sources(UnitCombat* fixture, uintptr_t game, unsigned int index)
 {
-    uintptr_t source = *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + index * 4u);
+    uintptr_t source = stock_vid(game, index);
     if (!supported(source, index, STEAM_UNIT_CLASS))
         return 0;
+
     uintptr_t child = *(uintptr_t*)(source + STEAM_VID_LINKED_OFFSET);
-    unsigned int part_index = child ? *(unsigned int*)(child + STEAM_VID_INDEX_OFFSET) : 0;
-    if (child && (part_index >= STEAM_STOCK_VID_LIMIT ||
-                  !supported(child, part_index, STEAM_PUPPET_PART_CLASS) ||
-                  *(uintptr_t*)(child + STEAM_VID_LINKED_OFFSET)))
-        return 0;
+    unsigned int part_index = 0;
+    if (child)
+    {
+        part_index = *(unsigned int*)(child + STEAM_VID_INDEX_OFFSET);
+        if (part_index >= STEAM_STOCK_VID_LIMIT)
+            return 0;
+        if (!supported(child, part_index, STEAM_PUPPET_PART_CLASS))
+            return 0;
+        if (*(uintptr_t*)(child + STEAM_VID_LINKED_OFFSET))
+            return 0;
+    }
+
     memcpy(fixture->sources.root_before, (void*)source, STEAM_VID_SIZE);
     if (child)
         memcpy(fixture->sources.part_before, (void*)child, STEAM_VID_SIZE);
@@ -452,8 +563,9 @@ static int prepare_spawn(UnitCombat* fixture, uintptr_t game, unsigned int index
     sanitize(fixture->root_vid, fixture->sources.root);
     if (child)
         sanitize(fixture->child_vid, child);
-    *(uintptr_t*)(fixture->root_vid + STEAM_VID_LINKED_OFFSET) =
-        child ? (uintptr_t)fixture->child_vid : 0;
+
+    uintptr_t* root_link = (uintptr_t*)(fixture->root_vid + STEAM_VID_LINKED_OFFSET);
+    *root_link = child ? (uintptr_t)fixture->child_vid : 0;
     if (fixture->host || fixture->predictive)
         return prepare_live_root(fixture, game, index);
     return 1;
@@ -463,11 +575,15 @@ static int prepare_spawn(UnitCombat* fixture, uintptr_t game, unsigned int index
    the expected vtables and linked to each other. */
 static int created_entities_valid(const UnitCombatSample* s)
 {
-    if (*(uintptr_t*)s->root != shared.base + STEAM_UNIT_VTABLE_RVA ||
-        *(uintptr_t*)(s->root + STEAM_ENTITY_CHILD_OFFSET) != s->child)
+    if (*(uintptr_t*)s->root != shared.base + STEAM_UNIT_VTABLE_RVA)
         return 0;
-    return !s->child || (*(uintptr_t*)s->child == shared.base + STEAM_SPRITE_VTABLE_RVA &&
-                         *(uintptr_t*)(s->child + STEAM_ENTITY_PARENT_OFFSET) == s->root);
+    if (*(uintptr_t*)(s->root + STEAM_ENTITY_CHILD_OFFSET) != s->child)
+        return 0;
+    if (!s->child)
+        return 1;
+    if (*(uintptr_t*)s->child != shared.base + STEAM_SPRITE_VTABLE_RVA)
+        return 0;
+    return *(uintptr_t*)(s->child + STEAM_ENTITY_PARENT_OFFSET) == s->root;
 }
 
 /* Caller in SEH, fixture already owned. Records the map baseline, creates
@@ -492,8 +608,12 @@ static enum UnitResult create_fixture_entity(UnitCombat* fixture, uintptr_t game
     /* Find identity through the map lists before dereferencing the result.
        A failed factory may still have created a linked private part. */
     UnitCombatSample s = unit_combat_sample(fixture, game, 1);
-    if (!created || s.root != created || (!!s.child != !!child) ||
-        s.private_entities != (child ? 2u : 1u) || !s.sources_unchanged || s.fault)
+    unsigned int expected_entities = child ? 2u : 1u;
+    int has_part = s.child != 0;
+    int wants_part = child != 0;
+    int created_as_expected = created && s.root == created && has_part == wants_part &&
+                              s.private_entities == expected_entities;
+    if (!created_as_expected || !s.sources_unchanged || s.fault)
     {
         fixture->state = COMBAT_FIXTURE_FAULT;
         return UNIT_FAULT;
@@ -555,9 +675,10 @@ enum UnitResult unit_combat_spawn(UnitCombat* fixture, const Snapshot* local)
         return UNIT_REFUSED;
     __try
     {
-        uintptr_t source =
-            *(uintptr_t*)(local->game + STEAM_GAME_VID_TABLE_OFFSET + MONSTER_VID_MONSTER1 * 4u);
-        uintptr_t child = source ? *(uintptr_t*)(source + STEAM_VID_LINKED_OFFSET) : 0;
+        uintptr_t source = stock_vid(local->game, MONSTER_VID_MONSTER1);
+        uintptr_t child = 0;
+        if (source)
+            child = *(uintptr_t*)(source + STEAM_VID_LINKED_OFFSET);
         if (!supported(child, MONSTER_VID_MONSTER1_PART, STEAM_PUPPET_PART_CLASS))
             return UNIT_REFUSED;
     }
@@ -566,7 +687,7 @@ enum UnitResult unit_combat_spawn(UnitCombat* fixture, const Snapshot* local)
         return UNIT_REFUSED;
     }
     UnitPuppetPose pose = {0};
-    pose.x = local->x + 80.0f;
+    pose.x = local->x + COMBAT_TEST_SPAWN_OFFSET;
     pose.y = local->y;
     pose.z = local->z;
     pose.direction = local->direction;
@@ -580,8 +701,7 @@ static int track_foreign_entity(UnitCombat* fixture, uintptr_t e, uintptr_t vid,
 {
     if (fixture->baseline.capturing)
     {
-        if (fixture->baseline.count >=
-            sizeof(fixture->baseline.entries) / sizeof(fixture->baseline.entries[0]))
+        if (fixture->baseline.count >= COMBAT_BASELINE_LIMIT)
             return 0;
         fixture->baseline.entries[fixture->baseline.count].entity = e;
         fixture->baseline.entries[fixture->baseline.count++].vid = vid;
@@ -607,9 +727,11 @@ static int count_form_entity(const UnitCombat* fixture, uintptr_t e, int form, U
         return 0;
     if (class_id != STEAM_UNIT_CLASS)
         return 1;
-    if (s->root &&
-        *(uintptr_t*)(s->root + STEAM_ENTITY_VID_OFFSET) != (uintptr_t)fixture->root_vid &&
-        s->root != e)
+
+    /* A second UNIT may replace a root only while that root still has the spawn form. */
+    int root_from_spawn =
+        s->root && *(uintptr_t*)(s->root + STEAM_ENTITY_VID_OFFSET) == (uintptr_t)fixture->root_vid;
+    if (s->root && !root_from_spawn && s->root != e)
         return 0;
     s->root = e;
     return 1;
@@ -654,11 +776,11 @@ static int linked_part_valid(uintptr_t game, uintptr_t root, uintptr_t child, ui
             return 0;
         for (unsigned int j = 0; j < n; ++j)
         {
-            if (items[j] == child)
-                return *(uintptr_t*)child == shared.base + STEAM_SPRITE_VTABLE_RVA &&
-                       *(uintptr_t*)(child + STEAM_ENTITY_VID_OFFSET) == expected &&
-                       *(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) == root &&
-                       !*(uintptr_t*)(child + STEAM_ENTITY_CHILD_OFFSET);
+            if (items[j] != child)
+                continue;
+            if (*(uintptr_t*)(child + STEAM_ENTITY_VID_OFFSET) != expected)
+                return 0;
+            return is_part_of(child, root);
         }
     }
     return 0;
@@ -704,9 +826,9 @@ static int sources_unchanged(const UnitCombat* fixture, uintptr_t game)
         return 0;
     if (!fixture->sources.part)
         return 1;
-    return *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + fixture->sources.part_index * 4u) ==
-               fixture->sources.part &&
-           !memcmp((void*)fixture->sources.part, fixture->sources.part_before, STEAM_VID_SIZE);
+    if (stock_vid(game, fixture->sources.part_index) != fixture->sources.part)
+        return 0;
+    return !memcmp((void*)fixture->sources.part, fixture->sources.part_before, STEAM_VID_SIZE);
 }
 
 /* Caller in SEH. Counts every map entity into s. Returns 0 on a fault. */
@@ -740,21 +862,28 @@ UnitCombatSample unit_combat_sample(UnitCombat* fixture, uintptr_t game, int com
     }
     __try
     {
-        if (fixture->state == COMBAT_FIXTURE_OFF || !game ||
-            *(uintptr_t*)game != shared.base + STEAM_GAME_VTABLE_RVA ||
-            !count_map_entities(fixture, game, &s) ||
-            (s.root && !follow_root_form(fixture, game, &s)))
+        int world_valid = fixture->state != COMBAT_FIXTURE_OFF && game &&
+                          *(uintptr_t*)game == shared.base + STEAM_GAME_VTABLE_RVA;
+        if (!world_valid || !count_map_entities(fixture, game, &s))
         {
             s.fault = 1;
             return s;
         }
+        if (s.root && !follow_root_form(fixture, game, &s))
+        {
+            s.fault = 1;
+            return s;
+        }
+
         s.current_vid = fixture->form.current_vid;
         s.form_revision = fixture->form.revision;
         s.transitions = fixture->form.transitions;
         s.transitioning = fixture->form.transitioning;
-        if (compare_sources && game == fixture->game && fixture->sources.root &&
-            *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + fixture->sources.root_index * 4u) ==
-                fixture->sources.root)
+
+        int same_spawn_world =
+            game == fixture->game && fixture->sources.root &&
+            stock_vid(game, fixture->sources.root_index) == fixture->sources.root;
+        if (compare_sources && same_spawn_world)
             s.sources_unchanged = sources_unchanged(fixture, game);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
@@ -774,10 +903,10 @@ static UnitCombat* find_live_fixture(uintptr_t game, uintptr_t entity)
         if (fixture->game != game || (!fixture->host && !fixture->predictive))
             continue;
         uintptr_t identity = *(uintptr_t*)(entity + STEAM_ENTITY_VID_OFFSET);
-        if (fixture->root != entity && identity != (uintptr_t)fixture->root_vid &&
-            private_form(fixture, identity) < 0)
-            continue;
-        return fixture;
+        if (fixture->root == entity || identity == (uintptr_t)fixture->root_vid)
+            return fixture;
+        if (private_form(fixture, identity) >= 0)
+            return fixture;
     }
     return NULL;
 }
@@ -787,12 +916,15 @@ static UnitCombat* find_live_fixture(uintptr_t game, uintptr_t entity)
 static enum UnitResult prepare_frozen_form(UnitCombat* fixture, uintptr_t game,
                                            unsigned int requested_vid, uintptr_t* private_vid)
 {
-    if (!mp_monster_origin(fixture->form.current_vid) ||
-        requested_vid != fixture->form.current_vid + MONSTER_VID_FROZEN_DELTA)
+    if (!mp_monster_origin(fixture->form.current_vid))
         return UNIT_REFUSED;
-    uintptr_t source = *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + requested_vid * 4u);
-    if (!supported(source, requested_vid, STEAM_UNIT_CLASS) ||
-        !clone_form(fixture, game, source, requested_vid, private_vid))
+    if (requested_vid != fixture->form.current_vid + MONSTER_VID_FROZEN_DELTA)
+        return UNIT_REFUSED;
+
+    uintptr_t source = stock_vid(game, requested_vid);
+    if (!supported(source, requested_vid, STEAM_UNIT_CLASS))
+        return UNIT_FAULT;
+    if (!clone_form(fixture, game, source, requested_vid, private_vid))
         return UNIT_FAULT;
     return UNIT_OK;
 }
@@ -812,8 +944,8 @@ static enum UnitResult describe_settled_form(UnitCombat* fixture, uintptr_t game
     *private_vid = descriptor;
     *current_vid = index;
     *revision = sample.form_revision;
-    *transitioning = mp_monster_armored(index) &&
-                     *(unsigned int*)(entity + STEAM_ENTITY_ANIM_OFFSET) == STEAM_ANIM_DEATH;
+    unsigned int animation = *(unsigned int*)(entity + STEAM_ENTITY_ANIM_OFFSET);
+    *transitioning = mp_monster_armored(index) && animation == STEAM_ANIM_DEATH;
     return UNIT_OK;
 }
 
@@ -853,6 +985,8 @@ static unsigned int private_class(const UnitCombat* fixture, uintptr_t vid)
     return i >= 0 ? fixture->graph.classes[i] : 0u;
 }
 
+/* Caller in SEH. True when `entity` is in a map list, has one of our private descriptors
+   and the vtable of that descriptor's class. */
 static int private_registered(const UnitCombat* fixture, uintptr_t game, uintptr_t entity)
 {
     for (unsigned int cat = 0; cat < STEAM_TICK_ENTITY_LIST_COUNT; ++cat)
@@ -862,13 +996,14 @@ static int private_registered(const UnitCombat* fixture, uintptr_t game, uintptr
         if (!world_list_read(game, cat, &entries, &n))
             return 0;
         for (unsigned int i = 0; i < n; ++i)
-            if (entries[i] == entity)
-            {
-                unsigned int c =
-                    private_class(fixture, *(uintptr_t*)(entity + STEAM_ENTITY_VID_OFFSET));
-                uintptr_t expected = shared.base + entity_class_vtable_rva(c);
-                return c && *(uintptr_t*)entity == expected;
-            }
+        {
+            if (entries[i] != entity)
+                continue;
+            unsigned int c =
+                private_class(fixture, *(uintptr_t*)(entity + STEAM_ENTITY_VID_OFFSET));
+            uintptr_t expected = shared.base + entity_class_vtable_rva(c);
+            return c && *(uintptr_t*)entity == expected;
+        }
     }
     return 0;
 }
@@ -880,13 +1015,22 @@ static int private_links_valid(const UnitCombat* fixture, uintptr_t game, uintpt
     if (!private_registered(fixture, game, e))
         return 0;
     uintptr_t child = *(uintptr_t*)(e + STEAM_ENTITY_CHILD_OFFSET);
-    if (child && (!private_registered(fixture, game, child) ||
-                  *(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) != e ||
-                  *(uintptr_t*)(child + STEAM_ENTITY_CHILD_OFFSET)))
-        return 0;
+    if (child)
+    {
+        if (!private_registered(fixture, game, child))
+            return 0;
+        if (*(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) != e)
+            return 0;
+        if (*(uintptr_t*)(child + STEAM_ENTITY_CHILD_OFFSET))
+            return 0;
+    }
+
     uintptr_t parent = *(uintptr_t*)(e + STEAM_ENTITY_PARENT_OFFSET);
-    return !parent || (private_registered(fixture, game, parent) &&
-                       *(uintptr_t*)(parent + STEAM_ENTITY_CHILD_OFFSET) == e);
+    if (!parent)
+        return 1;
+    if (!private_registered(fixture, game, parent))
+        return 0;
+    return *(uintptr_t*)(parent + STEAM_ENTITY_CHILD_OFFSET) == e;
 }
 
 /* Caller in SEH. Finds one of our entities without a parent (a part goes
@@ -923,10 +1067,12 @@ static int remove_forms(UnitCombat* fixture, uintptr_t game)
     /* Disable creation before the first deleting destructor. Linked children
        retain their native recursive ownership, all other graph roots are found
        again by private descriptor identity after each deletion. */
-    memset(fixture->root_vid + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
-    memset(fixture->child_vid + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
+    const size_t creations_size = STEAM_ANIMATION_COUNT * sizeof(uintptr_t);
+    memset(fixture->root_vid + STEAM_VID_CREATIONS_OFFSET, 0, creations_size);
+    memset(fixture->child_vid + STEAM_VID_CREATIONS_OFFSET, 0, creations_size);
     for (unsigned int i = 0; i < fixture->graph.count; ++i)
-        memset(fixture->graph.vids[i] + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
+        memset(fixture->graph.vids[i] + STEAM_VID_CREATIONS_OFFSET, 0, creations_size);
+
     for (unsigned int attempt = 0; attempt < COMBAT_ENTITY_LIMIT; ++attempt)
     {
         uintptr_t found = 0;
@@ -934,14 +1080,17 @@ static int remove_forms(UnitCombat* fixture, uintptr_t game)
             return 0;
         if (!found)
             break;
+
+        /* A UNIT uses the hooked-through destructor; other classes their vtable's first slot. */
         unsigned int c = private_class(fixture, *(uintptr_t*)(found + STEAM_ENTITY_VID_OFFSET));
-        ActorDestroy destroy = c == STEAM_UNIT_CLASS
-                                   ? shared.destroy
-                                   : *(ActorDestroy*)(shared.base + entity_class_vtable_rva(c));
+        ActorDestroy destroy = shared.destroy;
+        if (c != STEAM_UNIT_CLASS)
+            destroy = *(ActorDestroy*)(shared.base + entity_class_vtable_rva(c));
         if (!destroy)
             return 0;
         destroy((void*)found, NULL, 1);
     }
+
     UnitCombatSample after = unit_combat_sample(fixture, game, 0);
     return !after.fault && !after.private_entities;
 }
@@ -957,23 +1106,30 @@ static void mark_fixture_ready(UnitCombat* fixture)
 
 /* Caller in SEH. Deletes the root (with its part), or a part left alone by a
    failed factory. Returns 0 when the entities are not the expected shape. */
+/* Caller in SEH. True when the sample holds just a UNIT root and, optionally, its part. */
+static int root_with_part(const UnitCombatSample* s)
+{
+    if (!s->root || s->private_entities > 2u)
+        return 0;
+    if (*(uintptr_t*)s->root != shared.base + STEAM_UNIT_VTABLE_RVA)
+        return 0;
+    if (*(uintptr_t*)(s->root + STEAM_ENTITY_CHILD_OFFSET) != s->child)
+        return 0;
+    return !s->child || is_part_of(s->child, s->root);
+}
+
 static int destroy_spawned_entities(const UnitCombatSample* s)
 {
-    if (s->root && s->private_entities <= 2u &&
-        *(uintptr_t*)s->root == shared.base + STEAM_UNIT_VTABLE_RVA &&
-        *(uintptr_t*)(s->root + STEAM_ENTITY_CHILD_OFFSET) == s->child &&
-        (!s->child || (*(uintptr_t*)s->child == shared.base + STEAM_SPRITE_VTABLE_RVA &&
-                       !*(uintptr_t*)(s->child + STEAM_ENTITY_CHILD_OFFSET) &&
-                       *(uintptr_t*)(s->child + STEAM_ENTITY_PARENT_OFFSET) == s->root)))
+    if (root_with_part(s))
     {
         shared.destroy((void*)s->root, NULL, 1);
         return 1;
     }
-    if (!s->child || s->root || s->private_entities != 1u ||
-        *(uintptr_t*)s->child != shared.base + STEAM_SPRITE_VTABLE_RVA ||
-        *(uintptr_t*)(s->child + STEAM_ENTITY_PARENT_OFFSET))
+
+    /* Otherwise only a lone part (no root, no parent) is removable. */
+    if (!s->child || s->root || s->private_entities != 1u)
         return 0;
-    if (*(uintptr_t*)(s->child + STEAM_ENTITY_CHILD_OFFSET))
+    if (!is_part_of(s->child, 0))
         return 0;
     /* A factory failure can leave only its private part registered.
        Its deleting destructor is still validated by unit_puppet_bind. */
@@ -993,7 +1149,7 @@ enum UnitResult unit_combat_remove(UnitCombat* fixture, uintptr_t game)
     UnitCombatSample s = unit_combat_sample(fixture, game, 0);
     if (s.fault)
         return UNIT_REFUSED;
-    if (!s.root && !s.child && !s.private_entities && !s.fault)
+    if (!s.root && !s.child && !s.private_entities)
     {
         mark_fixture_ready(fixture);
         return UNIT_OK;
@@ -1029,8 +1185,10 @@ enum UnitResult unit_combat_remove(UnitCombat* fixture, uintptr_t game)
 enum UnitResult unit_combat_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_COMBAT_CAPACITY; ++i)
+    {
         if (fixtures[i].game)
             return UNIT_REFUSED;
+    }
     for (unsigned int i = 0; i < UNIT_COMBAT_CAPACITY; ++i)
         fixtures[i].state = COMBAT_FIXTURE_OFF;
     shared.initialized = 0;
