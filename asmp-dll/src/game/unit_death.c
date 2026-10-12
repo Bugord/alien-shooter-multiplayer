@@ -16,6 +16,7 @@ enum DeathState
     DEATH_FAULT,
     DEATH_ABANDONED
 };
+
 static const unsigned int indices[DEATH_VID_COUNT] = {51, 52, 916, 910, 110, 151, 152, 120, 108};
 static const unsigned int legacy_classes[DEATH_VID_COUNT] = {5, 8, 8, 5, 8, 5, 8, 8, 9};
 /* Exact observed DAG. Admit no new edge, including another approved VID. */
@@ -37,14 +38,17 @@ struct UnitDeath
     unsigned int count, classes[DEATH_GRAPH_LIMIT], linked[DEATH_GRAPH_LIMIT];
     unsigned int corpse, gib;
 };
+
 static UnitDeath slots[UNIT_DEATH_SLOT_COUNT];
 static int initialized;
+
 UnitDeath* unit_death_slot(unsigned int index)
 {
     if (index >= UNIT_DEATH_SLOT_COUNT)
         return NULL;
     return &slots[index];
 }
+
 static int private_index(const UnitDeath* death, uintptr_t vid)
 {
     for (unsigned int i = 0; i < death->count; ++i)
@@ -52,10 +56,12 @@ static int private_index(const UnitDeath* death, uintptr_t vid)
             return (int)i;
     return -1;
 }
+
 static uintptr_t vtable(const UnitDeath* death, unsigned int i)
 {
     return death->base + entity_class_vtable_rva(death->classes[i]);
 }
+
 enum UnitResult unit_death_init(uintptr_t base, ActorCreate create)
 {
     static const unsigned char cannon[] = {0x55, 0x8B, 0xEC, 0x56, 0x8B, 0xF1, 0xE8, 0x55};
@@ -79,6 +85,7 @@ enum UnitResult unit_death_init(uintptr_t base, ActorCreate create)
                            (ActorDestroy)(base + STEAM_SPRITE_DESTROY_RVA)};
     return unit_death_initialize(base, &api);
 }
+
 enum UnitResult unit_death_initialize(uintptr_t base, const UnitDeathEngine* api)
 {
     if (initialized || !base || !api || !api->create || !api->cannon_destroy ||
@@ -97,6 +104,7 @@ enum UnitResult unit_death_initialize(uintptr_t base, const UnitDeathEngine* api
     initialized = 1;
     return UNIT_OK;
 }
+
 #define DEATH_EDGE_COUNT (sizeof(edges) / sizeof(edges[0]))
 
 /* Caller in SEH. True when a stock VID can be copied: a plain native factory
@@ -207,6 +215,7 @@ static int prepare(UnitDeath* death, uintptr_t game)
     }
     return 1;
 }
+
 #define DEATH_CREATION_LIMIT 16u
 typedef struct DeathGraph
 {
@@ -214,6 +223,7 @@ typedef struct DeathGraph
     unsigned int colors[DEATH_GRAPH_LIMIT], cost[DEATH_GRAPH_LIMIT];
     int armor;
 } DeathGraph;
+
 static int graph_visit(UnitDeath* death, uintptr_t game, uintptr_t source, DeathGraph* graph,
                        unsigned int* result, int linked_art);
 
@@ -339,6 +349,7 @@ static int graph_visit(UnitDeath* death, uintptr_t game, uintptr_t source, Death
     *result = i;
     return 1;
 }
+
 static int prepare_type(UnitDeath* death, uintptr_t game, unsigned int source_vid,
                         unsigned int animation, int armor, unsigned int* multiplicity)
 {
@@ -374,6 +385,7 @@ static int prepare_type(UnitDeath* death, uintptr_t game, unsigned int source_vi
     return graph_visit(death, game, root, &graph, &root_index, 0) && root_index == 0u &&
            graph.cost[root_index] <= DEATH_ENTITY_LIMIT / *multiplicity;
 }
+
 /* Caller in SEH. Check identity in a map list before following a child pointer. */
 static int find_private(const UnitDeath* death, uintptr_t game, uintptr_t wanted,
                         unsigned int index)
@@ -392,6 +404,7 @@ static int find_private(const UnitDeath* death, uintptr_t game, uintptr_t wanted
     }
     return 0;
 }
+
 /* Caller in SEH. Checks that private entity e (node i) is linked to its part
    and parent exactly as the private graph says. */
 static int private_links_valid(const UnitDeath* death, uintptr_t game, uintptr_t e, unsigned int i)
@@ -472,6 +485,7 @@ UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
     }
     return s;
 }
+
 /* True when a ready, empty slot may play a death animation at pose p. */
 static int play_request_valid(const UnitDeath* death, const UnitPuppetPose* p,
                               unsigned int animation)
@@ -511,6 +525,7 @@ enum UnitResult unit_death_play(UnitDeath* death, uintptr_t game, const UnitPupp
         return UNIT_FAULT;
     }
 }
+
 static enum UnitResult play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
                                  unsigned int animation, unsigned int source_vid, int armor)
 {
@@ -551,11 +566,13 @@ static enum UnitResult play_type(UnitDeath* death, uintptr_t game, const UnitPup
         return UNIT_FAULT;
     }
 }
+
 enum UnitResult unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
                                      unsigned int animation, unsigned int source_vid)
 {
     return play_type(death, game, p, animation, source_vid, 0);
 }
+
 enum UnitResult unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
                                       unsigned int source_vid)
 {
@@ -563,6 +580,7 @@ enum UnitResult unit_death_play_armor(UnitDeath* death, uintptr_t game, const Un
         return UNIT_REFUSED;
     return play_type(death, game, p, STEAM_ANIM_DEATH, source_vid, 1);
 }
+
 /* Caller in SEH. Finds one of our entities without a parent (a part goes with
    its parent). *found stays 0 when none is left. Returns 0 on a list fault. */
 static int find_private_root(const UnitDeath* death, uintptr_t game, uintptr_t* found, int* index)
@@ -648,6 +666,7 @@ enum UnitResult unit_death_remove(UnitDeath* death, uintptr_t game)
         return UNIT_REFUSED;
     }
 }
+
 enum UnitResult unit_death_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_DEATH_SLOT_COUNT; ++i)

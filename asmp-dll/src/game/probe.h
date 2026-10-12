@@ -28,4 +28,15 @@ enum ProbeResult
 };
 enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output);
 const char* probe_result_name(enum ProbeResult result);
+
+/* True when the probe found a level the local player is in. Death can
+   temporarily remove the
+ * player: the probe still validates GAME and parses
+   its map before returning NO_PLAYER or
+ * NO_ARMY, so those count as in level. */
+static inline int probe_in_level(const Snapshot* sample, enum ProbeResult result)
+{
+    return (result == PROBE_OK || result == PROBE_NO_PLAYER || result == PROBE_NO_ARMY) &&
+           sample->in_level;
+}
 #endif

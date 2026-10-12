@@ -186,9 +186,7 @@ static void publish_frame(const RuntimeFrame* frame)
 {
     const Snapshot* sample = &frame->snapshot;
     MpState state = {0};
-    if ((frame->result == PROBE_OK || frame->result == PROBE_NO_PLAYER ||
-         frame->result == PROBE_NO_ARMY) &&
-        sample->in_level)
+    if (probe_in_level(sample, frame->result))
     {
         state.world_low = sample->world_low;
         state.world_high = sample->world_high;

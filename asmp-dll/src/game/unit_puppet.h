@@ -8,9 +8,8 @@
    private to unit_puppet.c. Every per-slot function below takes the slot as its
    first argument; there is no "currently selected" slot. The hooks find the
    owning slot of each native callback by entity identity. */
-/* Every function below that returns enum UnitResult follows unit_result.h:
-   UNIT_OK done,
- * UNIT_REFUSED not done, UNIT_FAULT native fault. */
+/* Functions returning enum UnitResult follow unit_result.h: UNIT_OK done,
+   UNIT_REFUSED not done, UNIT_FAULT native fault. */
 typedef struct UnitPuppet UnitPuppet;
 
 /* Returns slot `index`, or NULL when index >= UNIT_PUPPET_CAPACITY. Slots are

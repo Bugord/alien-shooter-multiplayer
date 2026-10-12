@@ -13,6 +13,7 @@ enum CombatFixtureState
     COMBAT_FIXTURE_FAULT,
     COMBAT_FIXTURE_ABANDONED
 };
+
 #define COMBAT_FORM_LIMIT   32u
 #define COMBAT_ENTITY_LIMIT 128u
 /* One spawned fixture: private VID copies and the native entities created from
@@ -73,6 +74,7 @@ struct UnitCombat
         int transitioning;
     } form;
 };
+
 static UnitCombat fixtures[UNIT_COMBAT_CAPACITY];
 static struct
 {
@@ -82,12 +84,14 @@ static struct
     UnitAnimation animation;
     int initialized;
 } shared;
+
 UnitCombat* unit_combat_slot(unsigned int index)
 {
     if (index >= UNIT_COMBAT_CAPACITY)
         return NULL;
     return &fixtures[index];
 }
+
 static int owned_descriptor(uintptr_t vid)
 {
     for (unsigned int i = 0; i < UNIT_COMBAT_CAPACITY; ++i)
@@ -100,6 +104,7 @@ static int owned_descriptor(uintptr_t vid)
     }
     return 0;
 }
+
 static int private_form(const UnitCombat* fixture, uintptr_t vid)
 {
     for (unsigned int i = 0; i < fixture->graph.count; ++i)
@@ -132,6 +137,7 @@ enum UnitResult unit_combat_bind(uintptr_t base, ActorCreate* out)
         return UNIT_REFUSED;
     }
 }
+
 enum UnitResult unit_combat_init(uintptr_t base, ActorCreate create, ActorDestroy destroy,
                                  UnitAnimation animation)
 {
@@ -147,6 +153,7 @@ enum UnitResult unit_combat_init(uintptr_t base, ActorCreate create, ActorDestro
         fixtures[i].state = COMBAT_FIXTURE_READY;
     return UNIT_OK;
 }
+
 static int supported(uintptr_t vid, unsigned int index, unsigned int class_id)
 {
     return vid && *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET) == index &&
@@ -156,6 +163,7 @@ static int supported(uintptr_t vid, unsigned int index, unsigned int class_id)
            !(*(unsigned int*)(vid + STEAM_VID_RESOURCE_FLAGS_OFFSET) &
              STEAM_VID_SPECIAL_FACTORY_FLAG);
 }
+
 static void sanitize(unsigned char* destination, uintptr_t source)
 {
     memcpy(destination, (void*)source, STEAM_VID_SIZE);
@@ -169,12 +177,14 @@ static void sanitize(unsigned char* destination, uintptr_t source)
     *(int*)(destination + STEAM_VID_DAMAGE_OFFSET) = 0;
     *(int*)(destination + STEAM_VID_CREATE_SCRIPT_OFFSET) = -1;
 }
+
 static void preserve_death(unsigned char* destination, uintptr_t source)
 {
     for (unsigned int a = STEAM_ANIM_DEATH; a <= STEAM_ANIM_GIB_DEATH; ++a)
         *(uintptr_t*)(destination + STEAM_VID_CREATIONS_OFFSET + a * 4u) =
             *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + a * 4u);
 }
+
 static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, unsigned int expected,
                       uintptr_t* output);
 
@@ -315,6 +325,7 @@ static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, uns
     *output = (uintptr_t)d;
     return 1;
 }
+
 static int armor_graph(UnitCombat* fixture, uintptr_t game, unsigned int index, uintptr_t source)
 {
     if (!mp_monster_armored(index))
@@ -334,6 +345,7 @@ static int armor_graph(UnitCombat* fixture, uintptr_t game, unsigned int index, 
         private_target;
     return 1;
 }
+
 /* How spawn_type prepares the private descriptors. */
 enum SpawnMode
 {
@@ -502,16 +514,19 @@ static enum UnitResult spawn_type(UnitCombat* fixture, const Snapshot* local, un
         return UNIT_FAULT;
     }
 }
+
 enum UnitResult unit_combat_spawn_type(UnitCombat* fixture, const Snapshot* local,
                                        unsigned int index, const UnitPuppetPose* pose, int host)
 {
     return spawn_type(fixture, local, index, pose, host ? SPAWN_HOST : SPAWN_FIXTURE);
 }
+
 enum UnitResult unit_combat_spawn_predictive(UnitCombat* fixture, const Snapshot* local,
                                              unsigned int index, const UnitPuppetPose* pose)
 {
     return spawn_type(fixture, local, index, pose, SPAWN_PREDICTIVE);
 }
+
 enum UnitResult unit_combat_spawn(UnitCombat* fixture, const Snapshot* local)
 {
     if (!local)
@@ -535,6 +550,7 @@ enum UnitResult unit_combat_spawn(UnitCombat* fixture, const Snapshot* local)
     pose.direction = local->direction;
     return unit_combat_spawn_type(fixture, local, MONSTER_VID_MONSTER1, &pose, 0);
 }
+
 /* Records a foreign map entity in the spawn baseline, or counts it as
    unexpected when it was not there before the spawn. Returns 0 when full. */
 static int track_foreign_entity(UnitCombat* fixture, uintptr_t e, uintptr_t vid,
@@ -723,6 +739,7 @@ UnitCombatSample unit_combat_sample(UnitCombat* fixture, uintptr_t game, int com
     }
     return s;
 }
+
 /* Caller in SEH. Finds the host or predictive fixture in world game that owns
    entity (its root, or any entity with one of its descriptors). */
 static UnitCombat* find_live_fixture(uintptr_t game, uintptr_t entity)
@@ -798,6 +815,7 @@ enum UnitResult unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uin
     }
     return result;
 }
+
 static unsigned int private_class(const UnitCombat* fixture, uintptr_t vid)
 {
     if (vid == (uintptr_t)fixture->root_vid)
@@ -807,6 +825,7 @@ static unsigned int private_class(const UnitCombat* fixture, uintptr_t vid)
     int i = private_form(fixture, vid);
     return i >= 0 ? fixture->graph.classes[i] : 0u;
 }
+
 static int private_registered(const UnitCombat* fixture, uintptr_t game, uintptr_t entity)
 {
     for (unsigned int cat = 0; cat < STEAM_TICK_ENTITY_LIST_COUNT; ++cat)
@@ -826,6 +845,7 @@ static int private_registered(const UnitCombat* fixture, uintptr_t game, uintptr
     }
     return 0;
 }
+
 /* Caller in SEH. True when private entity e is registered and linked to its
    part and parent exactly as the private descriptors say. */
 static int private_links_valid(const UnitCombat* fixture, uintptr_t game, uintptr_t e)
@@ -896,6 +916,7 @@ static int remove_forms(UnitCombat* fixture, uintptr_t game)
     UnitCombatSample after = unit_combat_sample(fixture, game, 0);
     return !after.fault && !after.private_entities;
 }
+
 /* The fixture owns no entity in any world any more; it may spawn again. */
 static void mark_fixture_ready(UnitCombat* fixture)
 {
@@ -973,6 +994,7 @@ enum UnitResult unit_combat_remove(UnitCombat* fixture, uintptr_t game)
         return UNIT_REFUSED;
     }
 }
+
 enum UnitResult unit_combat_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_COMBAT_CAPACITY; ++i)

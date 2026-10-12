@@ -12,6 +12,7 @@ enum PuppetMode
     PUPPET_WATCH,
     PUPPET_STATIONARY
 };
+
 /* One borrowed UNIT (and optional class-9 part). The hooks find the slot that
    owns an entity with route(); public functions receive the slot explicitly. */
 struct UnitPuppet
@@ -73,6 +74,7 @@ struct UnitPuppet
         unsigned int duplicates;
     } stats;
 };
+
 static UnitPuppet puppets[UNIT_PUPPET_CAPACITY];
 static struct
 {
@@ -81,16 +83,19 @@ static struct
     SlotHook action, movement, destroy, part_action, part_destroy;
     UnitFormObserver forms;
 } shared;
+
 void unit_puppet_set_form_observer(UnitFormObserver observer)
 {
     shared.forms = observer;
 }
+
 UnitPuppet* unit_puppet_slot(unsigned int index)
 {
     if (index >= UNIT_PUPPET_CAPACITY)
         return NULL;
     return &puppets[index];
 }
+
 /* Finds the slot that currently owns a native root (part = 0) or part entity.
    NULL means no slot owns it, and the hook passes the call to the engine. */
 static UnitPuppet* route(void* entity, int part)
@@ -151,6 +156,7 @@ enum UnitResult unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
     out->part_destroy = (ActorDestroy)(base + STEAM_SPRITE_DESTROY_RVA);
     return UNIT_OK;
 }
+
 /* Caller is inside SEH. Never dereference a cached entity before finding it
    in the current map list. Destructor hook invalidates before native deletion,
    including same-address/same-VID allocation reuse in the same world. */
@@ -164,22 +170,26 @@ static int registered(UnitPuppet* puppet, uintptr_t game)
     return *(uintptr_t*)puppet->entity == shared.base + STEAM_UNIT_VTABLE_RVA &&
            *(uintptr_t*)(puppet->entity + STEAM_ENTITY_VID_OFFSET) == puppet->vid;
 }
+
 static void mark_entity_lost(UnitPuppet* puppet)
 {
     puppet->entity = 0;
     puppet->child = 0;
     puppet->state = UNIT_PUPPET_LOST;
 }
+
 static int owns_entity(const UnitPuppet* puppet, void* e)
 {
     return puppet->entity == (uintptr_t)e &&
            (puppet->state == UNIT_PUPPET_ACTIVE || puppet->state == UNIT_PUPPET_FAULT);
 }
+
 static int owns_part(const UnitPuppet* puppet, void* e)
 {
     return puppet->child && puppet->child == (uintptr_t)e &&
            (puppet->state == UNIT_PUPPET_ACTIVE || puppet->state == UNIT_PUPPET_FAULT);
 }
+
 /* Child is dereferenced only after finding it in its current category list. */
 static int child_registered(UnitPuppet* puppet)
 {
@@ -198,12 +208,14 @@ static int child_registered(UnitPuppet* puppet)
            !*(uintptr_t*)(puppet->child + STEAM_ENTITY_CHILD_OFFSET) &&
            *(uintptr_t*)(puppet->child + STEAM_ENTITY_PARENT_OFFSET) == puppet->entity;
 }
+
 static void select_animation(UnitPuppet* puppet, void* entity)
 {
     unsigned int animation =
         puppet->pose.moving && puppet->pose.velocity != 0 ? STEAM_ANIM_RUN : STEAM_ANIM_IDLE;
     shared.api.animation(entity, NULL, animation);
 }
+
 static void capture_death(UnitPuppet* puppet, uintptr_t e)
 {
     puppet->death.dying = 1;
@@ -215,6 +227,7 @@ static void capture_death(UnitPuppet* puppet, uintptr_t e)
     puppet->death.pose.z = *(float*)(e + STEAM_ENTITY_Z_OFFSET);
     puppet->death.pose.direction = *(unsigned char*)(e + STEAM_ENTITY_DIRECTION_OFFSET);
 }
+
 /* Caller in SEH. True when a watched stock monster changed to the stock
    frozen form of its current origin. */
 static int is_stock_frozen_form(const UnitPuppet* puppet, uintptr_t actual)
@@ -227,15 +240,15 @@ static int is_stock_frozen_form(const UnitPuppet* puppet, uintptr_t actual)
 }
 
 /* Caller in SEH. Follows the entity to its new descriptor vid (stock index
-   `index`) as a new form revision. Returns 0 (and faults) for a bad category. */
-static int adopt_form(UnitPuppet* puppet, uintptr_t entity, uintptr_t vid, unsigned int index,
-                      unsigned int revision)
+   `index`) as a new form revision. Returns UNIT_FAULT for a bad category. */
+static enum UnitResult adopt_form(UnitPuppet* puppet, uintptr_t entity, uintptr_t vid,
+                                  unsigned int index, unsigned int revision)
 {
     unsigned int category = *(unsigned int*)(vid + STEAM_VID_CATEGORY_OFFSET);
     if (category >= STEAM_TICK_ENTITY_LIST_COUNT)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return 0;
+        return UNIT_FAULT;
     }
     puppet->vid = vid;
     puppet->form.current_vid = index;
@@ -246,52 +259,57 @@ static int adopt_form(UnitPuppet* puppet, uintptr_t entity, uintptr_t vid, unsig
     puppet->behavior = *(unsigned int*)(entity + STEAM_UNIT_BEHAVIOR_OFFSET);
     puppet->child = *(uintptr_t*)(entity + STEAM_ENTITY_CHILD_OFFSET);
     puppet->child_vid = puppet->child ? *(uintptr_t*)(puppet->child + STEAM_ENTITY_VID_OFFSET) : 0;
-    return 1;
+    return UNIT_OK;
 }
 
 /* Called only while the entity is live in a native action or after locating it
    in its category list. Native CHANGE_VID performs child teardown and counters;
-   observe the resulting descriptor rather than editing those structures. */
-static int observe_form(UnitPuppet* puppet, uintptr_t entity, unsigned int requested,
-                        uintptr_t* prepared)
+   observe the resulting descriptor rather than editing those structures.
+   Returns the observer's result: UNIT_OK when a form was prepared or adopted. */
+static enum UnitResult observe_form(UnitPuppet* puppet, uintptr_t entity, unsigned int requested,
+                                    uintptr_t* prepared)
 {
     uintptr_t vid = 0;
-    unsigned int index = puppet->form.current_vid, revision = puppet->form.revision;
-    int transitioning = puppet->form.transitioning, result = 0;
+    unsigned int index = puppet->form.current_vid;
+    unsigned int revision = puppet->form.revision;
+    int transitioning = puppet->form.transitioning;
+    enum UnitResult result = UNIT_REFUSED;
     if (shared.forms)
         result =
             shared.forms(puppet->game, entity, &vid, &index, &revision, &transitioning, requested);
-    if (result < 0)
+    if (result == UNIT_FAULT)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
     if (requested)
     {
         if (prepared)
-            *prepared = result > 0 ? vid : 0;
+            *prepared = result == UNIT_OK ? vid : 0;
         return result;
     }
     uintptr_t actual = *(uintptr_t*)(entity + STEAM_ENTITY_VID_OFFSET);
     if (!result && actual != puppet->vid && puppet->watching)
     {
         if (!is_stock_frozen_form(puppet, actual))
-            return 0;
+            return UNIT_REFUSED;
         vid = actual;
         index = puppet->form.current_vid + MONSTER_VID_FROZEN_DELTA;
         revision = puppet->form.revision + 1u;
-        result = 1;
+        result = UNIT_OK;
     }
-    if (result > 0)
+    if (result == UNIT_OK)
     {
         puppet->form.transitioning = transitioning;
         if (vid && actual == vid && vid != puppet->vid &&
-            !adopt_form(puppet, entity, vid, index, revision))
-            return -1;
+            adopt_form(puppet, entity, vid, index, revision) == UNIT_FAULT)
+            return UNIT_FAULT;
     }
     return result;
 }
+
 static int sanitized(uintptr_t vid);
+
 static int prediction_descriptor(const UnitPuppet* puppet, uintptr_t vid, int root)
 {
     if (!vid || !sanitized(vid) || *(int*)(vid + STEAM_VID_CREATE_SCRIPT_OFFSET) != -1)
@@ -309,6 +327,7 @@ static int prediction_descriptor(const UnitPuppet* puppet, uintptr_t vid, int ro
     }
     return 1;
 }
+
 /* Before native CHANGE_VID on our root: asks the form observer for a private
    descriptor for table index a. Returns 0 when the change must be blocked. */
 static int prepare_change_vid(UnitPuppet* puppet, void* e, intptr_t a, uintptr_t* prepared)
@@ -318,7 +337,7 @@ static int prepare_change_vid(UnitPuppet* puppet, void* e, intptr_t a, uintptr_t
          a != (intptr_t)(puppet->form.current_vid + MONSTER_VID_FROZEN_DELTA)))
         return 0;
     if (a > 0 && a < STEAM_STOCK_VID_LIMIT &&
-        observe_form(puppet, (uintptr_t)e, (unsigned int)a, prepared) < 0)
+        observe_form(puppet, (uintptr_t)e, (unsigned int)a, prepared) == UNIT_FAULT)
         return 0;
     /* Prediction must never escape through an unsupported stock descriptor. */
     if (puppet->predictive && (!*prepared || !prediction_descriptor(puppet, *prepared, 1)))
@@ -385,6 +404,7 @@ static int observed_action(UnitPuppet* puppet, void* e, unsigned int kind, intpt
     }
     return result;
 }
+
 /* Caller in SEH. Native animation completion may leave pain and resume the
    replicated movement pose, but never reset frozen/death forms. */
 static void resume_predicted_pose(UnitPuppet* puppet, void* e, int part)
@@ -454,6 +474,7 @@ static int prediction_action(UnitPuppet* puppet, void* e, unsigned int kind, int
         return 0;
     }
 }
+
 static int scoped_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_t a, intptr_t b,
                          intptr_t c)
 {
@@ -504,6 +525,7 @@ static int scoped_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_
     }
     return shared.api.action(e, NULL, kind, a, b, c);
 }
+
 static void scoped_movement(UnitPuppet* puppet, void* e)
 {
     if (puppet->watching == PUPPET_WATCH && owns_entity(puppet, e))
@@ -532,6 +554,7 @@ static void scoped_movement(UnitPuppet* puppet, void* e)
     }
     shared.api.movement(e, NULL);
 }
+
 static void* scoped_destroy(UnitPuppet* puppet, void* e, int release)
 {
     if ((puppet->watching || puppet->predictive) && puppet->entity == (uintptr_t)e &&
@@ -555,6 +578,7 @@ static void* scoped_destroy(UnitPuppet* puppet, void* e, int release)
         mark_entity_lost(puppet);
     return shared.api.destroy(e, NULL, release);
 }
+
 static int scoped_part_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_t a,
                               intptr_t b, intptr_t c)
 {
@@ -600,6 +624,7 @@ static int scoped_part_action(UnitPuppet* puppet, void* e, unsigned int kind, in
     }
     return shared.api.part_action(e, NULL, kind, a, b, c);
 }
+
 static void* scoped_part_destroy(UnitPuppet* puppet, void* e, int release)
 {
     if (puppet->child == (uintptr_t)e)
@@ -610,6 +635,7 @@ static void* scoped_part_destroy(UnitPuppet* puppet, void* e, int release)
     }
     return shared.api.part_destroy(e, NULL, release);
 }
+
 /* Vtable hooks. Native callbacks may interleave slots, including recursive
    root/part calls, so each call looks up its own slot by entity identity.
    Entities that no slot owns go straight to the original engine function. */
@@ -692,6 +718,7 @@ enum UnitResult unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
         puppets[i].state = UNIT_PUPPET_READY;
     return UNIT_OK;
 }
+
 /* What attach looks for: any suitable UNIT except the player, or exactly
    `required` when it is nonzero, in the given mode. */
 typedef struct AttachRequest
@@ -884,33 +911,40 @@ static enum UnitResult attach(UnitPuppet* puppet, uintptr_t game, uintptr_t play
     }
     return UNIT_REFUSED;
 }
+
 enum UnitResult unit_puppet_attach_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
     return attach(puppet, game, player, 0, PUPPET_CONTROLLED);
 }
+
 enum UnitResult unit_puppet_watch_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
     return attach(puppet, game, player, 0, PUPPET_WATCH);
 }
+
 enum UnitResult unit_puppet_attach_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                                           uintptr_t entity)
 {
     return entity ? attach(puppet, game, player, entity, PUPPET_CONTROLLED) : UNIT_REFUSED;
 }
+
 enum UnitResult unit_puppet_watch_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                                          uintptr_t entity)
 {
     return entity ? attach(puppet, game, player, entity, PUPPET_WATCH) : UNIT_REFUSED;
 }
+
 enum UnitResult unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                                              uintptr_t entity)
 {
     return entity ? attach(puppet, game, player, entity, PUPPET_STATIONARY) : UNIT_REFUSED;
 }
+
 enum UnitResult unit_puppet_host_kill(UnitPuppet* puppet, uintptr_t game)
 {
     return unit_puppet_host_kill_variant(puppet, game, STEAM_ANIM_DEATH);
 }
+
 enum UnitResult unit_puppet_host_freeze(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet || !puppet->watching || puppet->death.dying ||
@@ -937,6 +971,7 @@ enum UnitResult unit_puppet_host_freeze(UnitPuppet* puppet, uintptr_t game)
         return UNIT_FAULT;
     }
 }
+
 enum UnitResult unit_puppet_host_kill_variant(UnitPuppet* puppet, uintptr_t game,
                                               unsigned int animation)
 {
@@ -959,6 +994,7 @@ enum UnitResult unit_puppet_host_kill_variant(UnitPuppet* puppet, uintptr_t game
         return UNIT_FAULT;
     }
 }
+
 enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* p)
 {
     if (!puppet || puppet->watching || puppet->death.dying || puppet->state != UNIT_PUPPET_ACTIVE ||
@@ -1005,6 +1041,7 @@ enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const Unit
         return UNIT_FAULT;
     }
 }
+
 static int sanitized(uintptr_t vid)
 {
     if (*(int*)(vid + STEAM_VID_DAMAGE_OFFSET) ||
@@ -1019,6 +1056,7 @@ static int sanitized(uintptr_t vid)
             return 0;
     return 1;
 }
+
 enum UnitResult unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || puppet->death.dying)
@@ -1038,6 +1076,7 @@ enum UnitResult unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
         return UNIT_FAULT;
     }
 }
+
 enum UnitResult unit_puppet_prediction_test_hit(UnitPuppet* puppet, uintptr_t game, int damage,
                                                 int freeze)
 {
@@ -1075,6 +1114,7 @@ enum UnitResult unit_puppet_prediction_test_hit(UnitPuppet* puppet, uintptr_t ga
         return UNIT_FAULT;
     }
 }
+
 enum UnitResult unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int health)
 {
     if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || health <= 0 ||
@@ -1094,6 +1134,7 @@ enum UnitResult unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int healt
         return UNIT_FAULT;
     }
 }
+
 enum UnitResult unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
                                    unsigned int animation)
 {
@@ -1135,6 +1176,7 @@ enum UnitResult unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t 
         return UNIT_FAULT;
     }
 }
+
 enum UnitResult unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet || puppet->state != UNIT_PUPPET_ACTIVE)
@@ -1164,6 +1206,7 @@ enum UnitResult unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
         return UNIT_FAULT;
     }
 }
+
 /* Caller in SEH, root registered. Notices an armor transition or a death in
    the root's animation and counts its native frame progression. */
 static void sample_root_animation(UnitPuppet* puppet, uintptr_t e, UnitPuppetSample* s)
@@ -1306,6 +1349,7 @@ UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
     copy_tracked_state(puppet, &s);
     return s;
 }
+
 enum UnitResult unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet)
@@ -1332,6 +1376,7 @@ enum UnitResult unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
         return UNIT_REFUSED;
     }
 }
+
 enum UnitResult unit_puppet_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_PUPPET_CAPACITY; ++i)
