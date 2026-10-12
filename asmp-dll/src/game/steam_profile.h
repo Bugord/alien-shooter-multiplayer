@@ -65,6 +65,11 @@
 #define STEAM_ACT_SET_ANIMATION            15u
 #define STEAM_ACT_SET_HP                   88u
 #define STEAM_ACT_GET_HP                   87u
+/* Native bookkeeping actions that a controlled unit must still pass through. Their exact
+   purpose is not decoded; they read or update native counters only. */
+#define STEAM_ACT_BOOKKEEPING_5C           0x5Cu
+#define STEAM_ACT_BOOKKEEPING_5E           0x5Eu
+#define STEAM_ACT_BOOKKEEPING_60           0x60u
 #define STEAM_ANIM_ATTACK                  8u
 #define STEAM_ACT_USE_AMMO                 0x5Du
 /* Native SPRITE CHANGE_VID: a=table index, b=animation (-1 keeps current). */
@@ -107,6 +112,10 @@
 #define STEAM_END_SCENE_SLOT        42u
 #define STEAM_GAME_TICK_RVA         0x40CA0u
 #define STEAM_GAME_TICK_SLOT        3u
+/* UNIT and SPRITE vtable slots the puppet hooks replace. */
+#define STEAM_ENTITY_DESTROY_SLOT   0u
+#define STEAM_ENTITY_ACTION_SLOT    1u
+#define STEAM_UNIT_MOVEMENT_SLOT    3u
 #define STEAM_LOAD_MAP_RVA          0x3C7D0u
 #define STEAM_LOAD_MAP_SLOT         6u
 /* Native UI/text bindings used by ui.c. STEXT vtable slots 0 and 1
@@ -169,6 +178,8 @@
 #define STEAM_ENTITY_Z_OFFSET             0x38u
 #define STEAM_ENTITY_ANIM_OFFSET          0x4Cu
 #define STEAM_ENTITY_DIRECTION_OFFSET     0x50u
+/* Directions are one byte: 0..255 around the circle. */
+#define STEAM_DIRECTION_MAX               255u
 #define STEAM_ENTITY_HEALTH_OFFSET        0x58u
 #define STEAM_ENTITY_CHILD_OFFSET         0x40u
 #define STEAM_ENTITY_FRAME_FIRST_OFFSET   0x08u
