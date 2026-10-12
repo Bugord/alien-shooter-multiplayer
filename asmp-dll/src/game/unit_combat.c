@@ -19,26 +19,59 @@ enum CombatFixtureState
    them. Public functions receive the fixture explicitly. */
 struct UnitCombat
 {
-    uintptr_t game, root, child, source, part_source;
-    unsigned int source_index, part_index;
-    int host, predictive;
-    unsigned char root_vid[STEAM_VID_SIZE], child_vid[STEAM_VID_SIZE];
-    unsigned char source_before[STEAM_VID_SIZE], part_before[STEAM_VID_SIZE];
     enum CombatFixtureState state;
+    uintptr_t game;
+    uintptr_t root;  /* Native root created by the factory; owned by the map. */
+    uintptr_t child; /* Native part of root, or 0. */
+    int host;
+    int predictive;
+    /* Private descriptors owned by this fixture (pinned in the DLL). */
+    unsigned char root_vid[STEAM_VID_SIZE];
+    unsigned char child_vid[STEAM_VID_SIZE];
+    unsigned char root_behavior[STEAM_BEHAVIOR_SIZE];
+
+    /* Borrowed stock descriptors and their bytes at spawn time. */
     struct
     {
-        uintptr_t entity, vid;
-    } baseline[2048];
-    unsigned int baseline_count;
-    int capture_baseline;
-    unsigned char forms[COMBAT_FORM_LIMIT][STEAM_VID_SIZE];
-    unsigned char form_behaviors[COMBAT_FORM_LIMIT][STEAM_BEHAVIOR_SIZE];
-    unsigned char root_behavior[STEAM_BEHAVIOR_SIZE];
-    uintptr_t form_sources[COMBAT_FORM_LIMIT];
-    unsigned int form_classes[COMBAT_FORM_LIMIT], form_colors[COMBAT_FORM_LIMIT],
-        form_cost[COMBAT_FORM_LIMIT], form_count;
-    unsigned int current_vid, form_revision, transitions;
-    int transitioning;
+        uintptr_t root;
+        uintptr_t part;
+        unsigned int root_index;
+        unsigned int part_index;
+        unsigned char root_before[STEAM_VID_SIZE];
+        unsigned char part_before[STEAM_VID_SIZE];
+    } sources;
+
+    /* Foreign map entities present before the spawn. */
+    struct
+    {
+        struct
+        {
+            uintptr_t entity, vid;
+        } entries[2048];
+        unsigned int count;
+        int capturing;
+    } baseline;
+
+    /* Private copies of the successor/visual form graph (DFS colors, costs). */
+    struct
+    {
+        unsigned char vids[COMBAT_FORM_LIMIT][STEAM_VID_SIZE];
+        unsigned char behaviors[COMBAT_FORM_LIMIT][STEAM_BEHAVIOR_SIZE];
+        uintptr_t sources[COMBAT_FORM_LIMIT];
+        unsigned int classes[COMBAT_FORM_LIMIT];
+        unsigned int colors[COMBAT_FORM_LIMIT];
+        unsigned int cost[COMBAT_FORM_LIMIT];
+        unsigned int count;
+    } graph;
+
+    /* Current native form of the root. */
+    struct
+    {
+        unsigned int current_vid;
+        unsigned int revision;
+        unsigned int transitions;
+        int transitioning;
+    } form;
 };
 static UnitCombat fixtures[UNIT_COMBAT_CAPACITY];
 static struct
@@ -61,16 +94,16 @@ static int owned_descriptor(uintptr_t vid)
     {
         if (vid == (uintptr_t)fixtures[i].root_vid || vid == (uintptr_t)fixtures[i].child_vid)
             return 1;
-        for (unsigned int j = 0; j < fixtures[i].form_count; ++j)
-            if (vid == (uintptr_t)fixtures[i].forms[j])
+        for (unsigned int j = 0; j < fixtures[i].graph.count; ++j)
+            if (vid == (uintptr_t)fixtures[i].graph.vids[j])
                 return 1;
     }
     return 0;
 }
 static int private_form(const UnitCombat* fixture, uintptr_t vid)
 {
-    for (unsigned int i = 0; i < fixture->form_count; ++i)
-        if (vid == (uintptr_t)fixture->forms[i])
+    for (unsigned int i = 0; i < fixture->graph.count; ++i)
+        if (vid == (uintptr_t)fixture->graph.vids[i])
             return (int)i;
     return -1;
 }
@@ -170,17 +203,17 @@ static int clone_linked_part(UnitCombat* fixture, uintptr_t game, uintptr_t sour
     if (!linked)
         return 1;
     uintptr_t private_link;
-    if (fixture->form_classes[i] == STEAM_PUPPET_PART_CLASS ||
+    if (fixture->graph.classes[i] == STEAM_PUPPET_PART_CLASS ||
         *(unsigned int*)(linked + STEAM_VID_CLASS_OFFSET) != STEAM_PUPPET_PART_CLASS ||
         *(uintptr_t*)(linked + STEAM_VID_LINKED_OFFSET) ||
         !clone_form(fixture, game, linked, *(unsigned int*)(linked + STEAM_VID_INDEX_OFFSET),
                     &private_link))
         return 0;
-    *(uintptr_t*)(fixture->forms[i] + STEAM_VID_LINKED_OFFSET) = private_link;
+    *(uintptr_t*)(fixture->graph.vids[i] + STEAM_VID_LINKED_OFFSET) = private_link;
     int child_index = private_form(fixture, private_link);
-    if (child_index < 0 || fixture->form_cost[child_index] > COMBAT_ENTITY_LIMIT - *cost)
+    if (child_index < 0 || fixture->graph.cost[child_index] > COMBAT_ENTITY_LIMIT - *cost)
         return 0;
-    *cost += fixture->form_cost[child_index];
+    *cost += fixture->graph.cost[child_index];
     return 1;
 }
 
@@ -190,10 +223,10 @@ static int copy_form_behavior(UnitCombat* fixture, uintptr_t source, unsigned in
     uintptr_t behavior = *(uintptr_t*)(source + STEAM_VID_BEHAVIOR_OFFSET);
     if (!behavior)
         return 0;
-    memcpy(fixture->form_behaviors[i], (void*)behavior, STEAM_BEHAVIOR_SIZE);
-    *(unsigned int*)(fixture->form_behaviors[i] + STEAM_BEHAVIOR_UNIT_FLAGS_OFFSET) = 0;
-    *(uintptr_t*)(fixture->forms[i] + STEAM_VID_BEHAVIOR_OFFSET) =
-        (uintptr_t)fixture->form_behaviors[i];
+    memcpy(fixture->graph.behaviors[i], (void*)behavior, STEAM_BEHAVIOR_SIZE);
+    *(unsigned int*)(fixture->graph.behaviors[i] + STEAM_BEHAVIOR_UNIT_FLAGS_OFFSET) = 0;
+    *(uintptr_t*)(fixture->graph.vids[i] + STEAM_VID_BEHAVIOR_OFFSET) =
+        (uintptr_t)fixture->graph.behaviors[i];
     return 1;
 }
 
@@ -202,7 +235,7 @@ static int copy_form_behavior(UnitCombat* fixture, uintptr_t source, unsigned in
 static int clone_host_creations(UnitCombat* fixture, uintptr_t game, uintptr_t source,
                                 unsigned int expected, unsigned int i, unsigned int* cost)
 {
-    unsigned char* d = fixture->forms[i];
+    unsigned char* d = fixture->graph.vids[i];
     for (unsigned int a = 0; a < STEAM_ANIMATION_COUNT; ++a)
     {
         uintptr_t target = *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + a * 4u);
@@ -219,9 +252,9 @@ static int clone_host_creations(UnitCombat* fixture, uintptr_t game, uintptr_t s
             !clone_form(fixture, game, target, target_index, &private_target))
             return 0;
         int child_index = private_form(fixture, private_target);
-        if (child_index < 0 || fixture->form_cost[child_index] > (COMBAT_ENTITY_LIMIT - *cost) / n)
+        if (child_index < 0 || fixture->graph.cost[child_index] > (COMBAT_ENTITY_LIMIT - *cost) / n)
             return 0;
-        *cost += n * fixture->form_cost[child_index];
+        *cost += n * fixture->graph.cost[child_index];
         *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = private_target;
     }
     return 1;
@@ -235,24 +268,24 @@ static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, uns
     if (!form_source_admissible(game, source, expected))
         return 0;
     unsigned int class_id = *(unsigned int*)(source + STEAM_VID_CLASS_OFFSET);
-    for (unsigned int i = 0; i < fixture->form_count; ++i)
+    for (unsigned int i = 0; i < fixture->graph.count; ++i)
     {
-        if (fixture->form_sources[i] == source)
+        if (fixture->graph.sources[i] == source)
         {
-            if (fixture->form_colors[i] != 2u)
+            if (fixture->graph.colors[i] != 2u)
                 return 0;
-            *output = (uintptr_t)fixture->forms[i];
+            *output = (uintptr_t)fixture->graph.vids[i];
             return 1;
         }
     }
-    if (fixture->form_count >= COMBAT_FORM_LIMIT)
+    if (fixture->graph.count >= COMBAT_FORM_LIMIT)
         return 0;
 
-    unsigned int i = fixture->form_count++;
-    fixture->form_sources[i] = source;
-    fixture->form_classes[i] = class_id;
-    fixture->form_colors[i] = 1u;
-    unsigned char* d = fixture->forms[i];
+    unsigned int i = fixture->graph.count++;
+    fixture->graph.sources[i] = source;
+    fixture->graph.classes[i] = class_id;
+    fixture->graph.colors[i] = 1u;
+    unsigned char* d = fixture->graph.vids[i];
     sanitize(d, source);
     unsigned int cost = 1u;
     if (class_id != STEAM_UNIT_CLASS && !fixture->predictive)
@@ -277,8 +310,8 @@ static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, uns
         if (!clone_host_creations(fixture, game, source, expected, i, &cost))
             return 0;
     }
-    fixture->form_cost[i] = cost;
-    fixture->form_colors[i] = 2u;
+    fixture->graph.cost[i] = cost;
+    fixture->graph.colors[i] = 2u;
     *output = (uintptr_t)d;
     return 1;
 }
@@ -333,13 +366,13 @@ static int capture_spawn_sources(UnitCombat* fixture, uintptr_t game, unsigned i
                   !supported(child, part_index, STEAM_PUPPET_PART_CLASS) ||
                   *(uintptr_t*)(child + STEAM_VID_LINKED_OFFSET)))
         return 0;
-    memcpy(fixture->source_before, (void*)source, STEAM_VID_SIZE);
+    memcpy(fixture->sources.root_before, (void*)source, STEAM_VID_SIZE);
     if (child)
-        memcpy(fixture->part_before, (void*)child, STEAM_VID_SIZE);
-    fixture->source = source;
-    fixture->part_source = child;
-    fixture->source_index = index;
-    fixture->part_index = part_index;
+        memcpy(fixture->sources.part_before, (void*)child, STEAM_VID_SIZE);
+    fixture->sources.root = source;
+    fixture->sources.part = child;
+    fixture->sources.root_index = index;
+    fixture->sources.part_index = part_index;
     return 1;
 }
 
@@ -347,8 +380,8 @@ static int capture_spawn_sources(UnitCombat* fixture, uintptr_t game, unsigned i
    native death creation links. Returns 0 when the graph is not supported. */
 static int prepare_live_root(UnitCombat* fixture, uintptr_t game, unsigned int index)
 {
-    uintptr_t source = fixture->source;
-    uintptr_t child = fixture->part_source;
+    uintptr_t source = fixture->sources.root;
+    uintptr_t child = fixture->sources.part;
     uintptr_t behavior = *(uintptr_t*)(source + STEAM_VID_BEHAVIOR_OFFSET);
     /* Armor successors must be stationary from constructor entry,
        before a coordinator has an opportunity to attach their hooks. */
@@ -379,15 +412,15 @@ static int prepare_spawn(UnitCombat* fixture, uintptr_t game, unsigned int index
 {
     if (!capture_spawn_sources(fixture, game, index))
         return 0;
-    uintptr_t child = fixture->part_source;
+    uintptr_t child = fixture->sources.part;
     fixture->host = mode == SPAWN_HOST;
     fixture->predictive = mode == SPAWN_PREDICTIVE;
-    fixture->form_count = 0;
-    fixture->current_vid = index;
-    fixture->form_revision = 1u;
-    fixture->transitions = 0;
-    fixture->transitioning = 0;
-    sanitize(fixture->root_vid, fixture->source);
+    fixture->graph.count = 0;
+    fixture->form.current_vid = index;
+    fixture->form.revision = 1u;
+    fixture->form.transitions = 0;
+    fixture->form.transitioning = 0;
+    sanitize(fixture->root_vid, fixture->sources.root);
     if (child)
         sanitize(fixture->child_vid, child);
     *(uintptr_t*)(fixture->root_vid + STEAM_VID_LINKED_OFFSET) =
@@ -412,11 +445,11 @@ static int created_entities_valid(const UnitCombatSample* s)
    the entity through the native factory and verifies it. Returns 1 or -1. */
 static int create_fixture_entity(UnitCombat* fixture, uintptr_t game, const UnitPuppetPose* pose)
 {
-    uintptr_t child = fixture->part_source;
-    fixture->baseline_count = 0;
-    fixture->capture_baseline = 1;
+    uintptr_t child = fixture->sources.part;
+    fixture->baseline.count = 0;
+    fixture->baseline.capturing = 1;
     UnitCombatSample before = unit_combat_sample(fixture, game, 0);
-    fixture->capture_baseline = 0;
+    fixture->baseline.capturing = 0;
     if (before.fault || before.private_entities)
     {
         fixture->state = COMBAT_FIXTURE_FAULT;
@@ -506,17 +539,18 @@ int unit_combat_spawn(UnitCombat* fixture, const Snapshot* local)
 static int track_foreign_entity(UnitCombat* fixture, uintptr_t e, uintptr_t vid,
                                 UnitCombatSample* s)
 {
-    if (fixture->capture_baseline)
+    if (fixture->baseline.capturing)
     {
-        if (fixture->baseline_count >= sizeof(fixture->baseline) / sizeof(fixture->baseline[0]))
+        if (fixture->baseline.count >=
+            sizeof(fixture->baseline.entries) / sizeof(fixture->baseline.entries[0]))
             return 0;
-        fixture->baseline[fixture->baseline_count].entity = e;
-        fixture->baseline[fixture->baseline_count++].vid = vid;
+        fixture->baseline.entries[fixture->baseline.count].entity = e;
+        fixture->baseline.entries[fixture->baseline.count++].vid = vid;
         return 1;
     }
-    for (unsigned int j = 0; j < fixture->baseline_count; ++j)
+    for (unsigned int j = 0; j < fixture->baseline.count; ++j)
     {
-        if (fixture->baseline[j].entity == e && fixture->baseline[j].vid == vid)
+        if (fixture->baseline.entries[j].entity == e && fixture->baseline.entries[j].vid == vid)
             return 1;
     }
     ++s->unexpected_entities;
@@ -528,7 +562,7 @@ static int track_foreign_entity(UnitCombat* fixture, uintptr_t e, uintptr_t vid,
 static int count_form_entity(const UnitCombat* fixture, uintptr_t e, int form, UnitCombatSample* s)
 {
     ++s->private_entities;
-    unsigned int class_id = fixture->form_classes[form];
+    unsigned int class_id = fixture->graph.classes[form];
     uintptr_t vt = shared.base + entity_class_vtable_rva(class_id);
     if (*(uintptr_t*)e != vt || s->private_entities > COMBAT_ENTITY_LIMIT)
         return 0;
@@ -600,13 +634,13 @@ static int follow_root_form(UnitCombat* fixture, uintptr_t game, UnitCombatSampl
     unsigned int animation = *(unsigned int*)(s->root + STEAM_ENTITY_ANIM_OFFSET);
     int pending = (fixture->host || fixture->predictive) && mp_monster_armored(current) &&
                   animation == STEAM_ANIM_DEATH;
-    if (current != fixture->current_vid || pending != fixture->transitioning)
+    if (current != fixture->form.current_vid || pending != fixture->form.transitioning)
     {
-        ++fixture->form_revision;
-        ++fixture->transitions;
+        ++fixture->form.revision;
+        ++fixture->form.transitions;
     }
-    fixture->current_vid = current;
-    fixture->transitioning = pending;
+    fixture->form.current_vid = current;
+    fixture->form.transitioning = pending;
     fixture->root = s->root;
 
     uintptr_t child = *(uintptr_t*)(s->root + STEAM_ENTITY_CHILD_OFFSET);
@@ -627,13 +661,13 @@ static int follow_root_form(UnitCombat* fixture, uintptr_t game, UnitCombatSampl
    bytes saved at spawn time. */
 static int sources_unchanged(const UnitCombat* fixture, uintptr_t game)
 {
-    if (memcmp((void*)fixture->source, fixture->source_before, STEAM_VID_SIZE))
+    if (memcmp((void*)fixture->sources.root, fixture->sources.root_before, STEAM_VID_SIZE))
         return 0;
-    if (!fixture->part_source)
+    if (!fixture->sources.part)
         return 1;
-    return *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + fixture->part_index * 4u) ==
-               fixture->part_source &&
-           !memcmp((void*)fixture->part_source, fixture->part_before, STEAM_VID_SIZE);
+    return *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + fixture->sources.part_index * 4u) ==
+               fixture->sources.part &&
+           !memcmp((void*)fixture->sources.part, fixture->sources.part_before, STEAM_VID_SIZE);
 }
 
 /* Caller in SEH. Counts every map entity into s. Returns 0 on a fault. */
@@ -673,13 +707,13 @@ UnitCombatSample unit_combat_sample(UnitCombat* fixture, uintptr_t game, int com
             s.fault = 1;
             return s;
         }
-        s.current_vid = fixture->current_vid;
-        s.form_revision = fixture->form_revision;
-        s.transitions = fixture->transitions;
-        s.transitioning = fixture->transitioning;
-        if (compare_sources && game == fixture->game && fixture->source &&
-            *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + fixture->source_index * 4u) ==
-                fixture->source)
+        s.current_vid = fixture->form.current_vid;
+        s.form_revision = fixture->form.revision;
+        s.transitions = fixture->form.transitions;
+        s.transitioning = fixture->form.transitioning;
+        if (compare_sources && game == fixture->game && fixture->sources.root &&
+            *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + fixture->sources.root_index * 4u) ==
+                fixture->sources.root)
             s.sources_unchanged = sources_unchanged(fixture, game);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
@@ -711,8 +745,8 @@ static UnitCombat* find_live_fixture(uintptr_t game, uintptr_t entity)
 static int prepare_frozen_form(UnitCombat* fixture, uintptr_t game, unsigned int requested_vid,
                                uintptr_t* private_vid)
 {
-    if (!mp_monster_origin(fixture->current_vid) ||
-        requested_vid != fixture->current_vid + MONSTER_VID_FROZEN_DELTA)
+    if (!mp_monster_origin(fixture->form.current_vid) ||
+        requested_vid != fixture->form.current_vid + MONSTER_VID_FROZEN_DELTA)
         return 0;
     uintptr_t source = *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + requested_vid * 4u);
     if (!supported(source, requested_vid, STEAM_UNIT_CLASS) ||
@@ -770,7 +804,7 @@ static unsigned int private_class(const UnitCombat* fixture, uintptr_t vid)
     if (vid == (uintptr_t)fixture->child_vid)
         return STEAM_PUPPET_PART_CLASS;
     int i = private_form(fixture, vid);
-    return i >= 0 ? fixture->form_classes[i] : 0u;
+    return i >= 0 ? fixture->graph.classes[i] : 0u;
 }
 static int private_registered(const UnitCombat* fixture, uintptr_t game, uintptr_t entity)
 {
@@ -841,8 +875,8 @@ static int remove_forms(UnitCombat* fixture, uintptr_t game)
        again by private descriptor identity after each deletion. */
     memset(fixture->root_vid + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
     memset(fixture->child_vid + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
-    for (unsigned int i = 0; i < fixture->form_count; ++i)
-        memset(fixture->forms[i] + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
+    for (unsigned int i = 0; i < fixture->graph.count; ++i)
+        memset(fixture->graph.vids[i] + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
     for (unsigned int attempt = 0; attempt < COMBAT_ENTITY_LIMIT; ++attempt)
     {
         uintptr_t found = 0;
@@ -918,7 +952,7 @@ int unit_combat_remove(UnitCombat* fixture, uintptr_t game)
     fixture->state = COMBAT_FIXTURE_ABANDONED;
     __try
     {
-        if (fixture->form_count)
+        if (fixture->graph.count)
         {
             if (!remove_forms(fixture, game))
                 return 0;
