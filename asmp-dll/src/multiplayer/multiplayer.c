@@ -92,11 +92,20 @@ static volatile LONG event_drops;
 
 /* Binds the engine functions and resets all peers. Returns 0 if already enabled or an
    engine function is missing. */
+static int engine_complete(const ActorEngine* api)
+{
+    if (!api->create || !api->destroy)
+        return 0;
+    if (!api->move || !api->rotate)
+        return 0;
+    return api->action && api->weapon && api->health;
+}
+
 int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
 {
-    if (enabled || !image_base || !api || !api->create || !api->destroy || !api->move ||
-        !api->rotate || !api->action || !api->weapon || !api->health)
+    if (enabled || !image_base || !api || !engine_complete(api))
         return 0;
+
     engine = *api;
     base = image_base;
     memset(remote, 0, sizeof(remote));
@@ -106,13 +115,27 @@ int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
         remote[i].weapon.last = -1;
         remote[i].weapon.rejected = -1;
     }
-    local_game = local_player = armory_player = 0;
+
+    local_game = 0;
+    local_player = 0;
+    armory_player = 0;
     armory_epoch = 0;
-    local_low = local_high = world_epoch = map_started = world_load = 0;
+    local_low = 0;
+    local_high = 0;
+    world_epoch = 0;
+    map_started = 0;
+    world_load = 0;
+
     memset(incoming, 0, sizeof(incoming));
     memset(current, 0, sizeof(current));
-    published_at = current_at = received_count = pending_count = outgoing_head = outgoing_count =
-        staged_count = 0;
+    published_at = 0;
+    current_at = 0;
+    received_count = 0;
+    pending_count = 0;
+    outgoing_head = 0;
+    outgoing_count = 0;
+    staged_count = 0;
+
     InterlockedExchange(&stop_requested, 0);
     InterlockedExchange(&game_thread, 0);
     InterlockedExchange(&event_drops, 0);
@@ -161,14 +184,20 @@ void multiplayer_capture_shot(int x, int y, unsigned int weapon)
 {
     if (GetCurrentThreadId() != (DWORD)InterlockedCompareExchange(&game_thread, 0, 0))
         return;
-    if (!enabled || !local_player || !world_epoch || weapon >= 10u ||
-        InterlockedCompareExchange(&stop_requested, 0, 0))
+    if (!enabled || !local_player || !world_epoch)
         return;
+    if (weapon >= STEAM_WEAPON_SLOT_COUNT || InterlockedCompareExchange(&stop_requested, 0, 0))
+        return;
+
+    /* Only a shot by the living local player in the current world is sent. */
     Snapshot sample;
-    if (probe_read(base, &sample) != PROBE_OK || !sample.in_level || sample.health <= 0 ||
-        sample.player != local_player || sample.world_low != local_low ||
-        sample.world_high != local_high)
+    if (probe_read(base, &sample) != PROBE_OK || !sample.in_level || sample.health <= 0)
         return;
+    if (sample.player != local_player)
+        return;
+    if (sample.world_low != local_low || sample.world_high != local_high)
+        return;
+
     if (staged_count < SHOT_QUEUE_CAPACITY)
     {
         MpShot* shot = &staged[staged_count++];
@@ -309,8 +338,9 @@ static int update_local_world(const Snapshot* local, enum ProbeResult state)
         return 0;
     }
 
-    if (local->world_low != local_low || local->world_high != local_high ||
-        local->map_started != map_started || local->world_load != world_load)
+    int same_map = local->world_low == local_low && local->world_high == local_high;
+    int same_load = local->map_started == map_started && local->world_load == world_load;
+    if (!same_map || !same_load)
     {
         if (!++world_epoch)
             ++world_epoch;
@@ -320,7 +350,9 @@ static int update_local_world(const Snapshot* local, enum ProbeResult state)
         local_high = local->world_high;
     }
     local_game = local->game;
-    local_player = state == PROBE_OK && local->health > 0 ? local->player : 0;
+    local_player = 0;
+    if (state == PROBE_OK && local->health > 0)
+        local_player = local->player;
     return 1;
 }
 
@@ -363,8 +395,8 @@ static void flush_local_shots(int gameplay, int stopping)
 
     if (!TryAcquireSRWLockExclusive(&outgoing_lock))
         return;
-    if (!gameplay || stopping ||
-        (outgoing_count && outgoing[outgoing_head].world_epoch != world_epoch))
+    int queue_from_old_world = outgoing_count && outgoing[outgoing_head].world_epoch != world_epoch;
+    if (!gameplay || stopping || queue_from_old_world)
     {
         outgoing_count = 0;
         outgoing_head = 0;
@@ -401,20 +433,27 @@ static void take_peer_handoff(MultiplayerFrame* result)
     ReleaseSRWLockExclusive(&incoming_lock);
 }
 
+/* True when the replica was made for another map or local world epoch. */
 static int remote_world_changed(const Remote* r)
 {
-    return r->world.low != local_low || r->world.high != local_high ||
-           r->world.local_epoch != world_epoch;
+    if (r->world.low != local_low || r->world.high != local_high)
+        return 1;
+    return r->world.local_epoch != world_epoch;
 }
 
 /* True when this peer should have a replica in the local world now. */
 static int remote_wanted(const LocalTick* tick, const PeerState* peer)
 {
     const MpState* s = &peer->state;
-    return tick->gameplay && !tick->stopping && peer->present &&
-           tick->now - current_at <= PEER_STATE_TIMEOUT_MS && s->active && s->health > 0 &&
-           s->world_epoch && s->world_low == tick->local->world_low &&
-           s->world_high == tick->local->world_high;
+    if (!tick->gameplay || tick->stopping)
+        return 0;
+    if (!peer->present || tick->now - current_at > PEER_STATE_TIMEOUT_MS)
+        return 0;
+    if (!s->active || s->health <= 0)
+        return 0;
+    if (!s->world_epoch)
+        return 0;
+    return s->world_low == tick->local->world_low && s->world_high == tick->local->world_high;
 }
 
 /* Removes the replica when the peer left, changed session or world. */
@@ -514,8 +553,10 @@ static void arm_remote(Remote* r, const LocalTick* tick, RemoteTick* rt)
         r->weapon.last = slot;
         return;
     }
-    if (slot == r->weapon.last ||
-        (slot == r->weapon.rejected && (int32_t)(tick->now - r->weapon.retry_at) < 0))
+    if (slot == r->weapon.last)
+        return;
+    int retry_pending = (int32_t)(tick->now - r->weapon.retry_at) < 0;
+    if (slot == r->weapon.rejected && retry_pending)
         return;
 
     int armed = actor_arm(&r->actor, slot);
@@ -565,8 +606,8 @@ static void apply_remote_pose(Remote* r, const LocalTick* tick, RemoteTick* rt)
 /* Drives a wanted peer through waiting, spawning and spawned. */
 static void tick_wanted_remote(Remote* r, const LocalTick* tick, RemoteTick* rt)
 {
-    if ((r->state == RS_SPAWNING || r->state == RS_SPAWNED) &&
-        !actor_live(&r->actor, tick->local->game))
+    int has_entity = r->state == RS_SPAWNING || r->state == RS_SPAWNED;
+    if (has_entity && !actor_live(&r->actor, tick->local->game))
     {
         rt->update.event = ACTOR_LOST;
         rt->update.entity = r->actor.entity;
@@ -576,8 +617,9 @@ static void tick_wanted_remote(Remote* r, const LocalTick* tick, RemoteTick* rt)
     }
     enter_waiting(r, tick, rt->peer);
 
-    if (r->state == RS_WAITING && tick->now - r->entered_at >= PEER_SPAWN_DELAY_MS &&
-        tick->probe == PROBE_OK && tick->local->player)
+    int waited = tick->now - r->entered_at >= PEER_SPAWN_DELAY_MS;
+    int local_ready = tick->probe == PROBE_OK && tick->local->player;
+    if (r->state == RS_WAITING && waited && local_ready)
         spawn_remote(r, tick, rt);
     else if (r->state == RS_SPAWNING)
         wait_for_torso(r, tick, rt);
@@ -639,11 +681,18 @@ static int shot_is_stale(const PendingShot* p, const LocalTick* tick)
     const ShotEvent* e = &p->event;
     const Remote* r = &remote[e->id];
     const MpState* s = &current[e->id].state;
-    return tick->stopping || !tick->gameplay || tick->now - p->received > SHOT_MAX_AGE_MS ||
-           r->state == RS_ABANDONED || e->session != r->session ||
-           e->shot.world_epoch != r->epoch || e->shot.world_low != tick->local->world_low ||
-           e->shot.world_high != tick->local->world_high || !current[e->id].present || !s->active ||
-           s->health <= 0;
+    if (tick->stopping || !tick->gameplay)
+        return 1;
+    if (tick->now - p->received > SHOT_MAX_AGE_MS)
+        return 1;
+    if (r->state == RS_ABANDONED || e->session != r->session)
+        return 1;
+    if (e->shot.world_epoch != r->epoch)
+        return 1;
+    if (e->shot.world_low != tick->local->world_low ||
+        e->shot.world_high != tick->local->world_high)
+        return 1;
+    return !current[e->id].present || !s->active || s->health <= 0;
 }
 
 /* Replays at most one pending shot per peer through the native attack action.

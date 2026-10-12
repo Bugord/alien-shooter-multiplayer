@@ -12,6 +12,13 @@
 #include "slot_hook.h"
 #include "world_list.h"
 
+/* Largest health or damage value a caller may pass to a native action. */
+#define PUPPET_HEALTH_LIMIT 100000
+/* SET_HP value that makes the engine choose the gib death instead of the normal one. */
+#define PUPPET_GIB_HEALTH (-PUPPET_HEALTH_LIMIT)
+/* A replay sequence this far ahead or more is treated as older (wrapped). */
+#define PUPPET_SEQUENCE_HALF_RANGE 0x80000000u
+
 enum PuppetMode
 {
     PUPPET_CONTROLLED,
@@ -171,13 +178,16 @@ enum UnitResult unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
    including same-address/same-VID allocation reuse in the same world. */
 static int registered(UnitPuppet* puppet, uintptr_t game)
 {
-    if (!puppet->entity || !game || game != puppet->game ||
-        *(uintptr_t*)game != shared.base + STEAM_GAME_VTABLE_RVA)
+    if (!puppet->entity || !game || game != puppet->game)
+        return 0;
+    if (*(uintptr_t*)game != shared.base + STEAM_GAME_VTABLE_RVA)
         return 0;
     if (!world_list_find(game, puppet->category, puppet->entity))
         return 0;
-    return *(uintptr_t*)puppet->entity == shared.base + STEAM_UNIT_VTABLE_RVA &&
-           *(uintptr_t*)(puppet->entity + STEAM_ENTITY_VID_OFFSET) == puppet->vid;
+
+    if (*(uintptr_t*)puppet->entity != shared.base + STEAM_UNIT_VTABLE_RVA)
+        return 0;
+    return *(uintptr_t*)(puppet->entity + STEAM_ENTITY_VID_OFFSET) == puppet->vid;
 }
 
 /* Forgets the borrowed pointers after the world dropped the entity; the slot goes to LOST. */
@@ -188,18 +198,22 @@ static void mark_entity_lost(UnitPuppet* puppet)
     puppet->state = UNIT_PUPPET_LOST;
 }
 
-/* True while this slot controls `e` (ACTIVE, or FAULT so the hooks keep blocking it). */
+/* True while the slot holds an entity: ACTIVE, or FAULT so the hooks keep blocking it. */
+static int holds_entity(const UnitPuppet* puppet)
+{
+    return puppet->state == UNIT_PUPPET_ACTIVE || puppet->state == UNIT_PUPPET_FAULT;
+}
+
+/* True while this slot controls `e`. */
 static int owns_entity(const UnitPuppet* puppet, void* e)
 {
-    return puppet->entity == (uintptr_t)e &&
-           (puppet->state == UNIT_PUPPET_ACTIVE || puppet->state == UNIT_PUPPET_FAULT);
+    return puppet->entity == (uintptr_t)e && holds_entity(puppet);
 }
 
 /* Same as owns_entity for the slot's class-9 part. */
 static int owns_part(const UnitPuppet* puppet, void* e)
 {
-    return puppet->child && puppet->child == (uintptr_t)e &&
-           (puppet->state == UNIT_PUPPET_ACTIVE || puppet->state == UNIT_PUPPET_FAULT);
+    return puppet->child && puppet->child == (uintptr_t)e && holds_entity(puppet);
 }
 
 /* Child is dereferenced only after finding it in its current category list. */
@@ -207,25 +221,33 @@ static int child_registered(UnitPuppet* puppet)
 {
     if (!puppet->child)
         return 1;
-    if (!registered(puppet, puppet->game) ||
-        *(uintptr_t*)(puppet->entity + STEAM_ENTITY_CHILD_OFFSET) != puppet->child)
+    if (!registered(puppet, puppet->game))
         return 0;
+    if (*(uintptr_t*)(puppet->entity + STEAM_ENTITY_CHILD_OFFSET) != puppet->child)
+        return 0;
+
     unsigned int category = *(unsigned int*)(puppet->child_vid + STEAM_VID_CATEGORY_OFFSET);
     if (category >= STEAM_TICK_ENTITY_LIST_COUNT)
         return 0;
     if (!world_list_find(puppet->game, category, puppet->child))
         return 0;
-    return *(uintptr_t*)puppet->child == shared.base + STEAM_SPRITE_VTABLE_RVA &&
-           *(uintptr_t*)(puppet->child + STEAM_ENTITY_VID_OFFSET) == puppet->child_vid &&
-           !*(uintptr_t*)(puppet->child + STEAM_ENTITY_CHILD_OFFSET) &&
-           *(uintptr_t*)(puppet->child + STEAM_ENTITY_PARENT_OFFSET) == puppet->entity;
+
+    uintptr_t child = puppet->child;
+    if (*(uintptr_t*)child != shared.base + STEAM_SPRITE_VTABLE_RVA)
+        return 0;
+    if (*(uintptr_t*)(child + STEAM_ENTITY_VID_OFFSET) != puppet->child_vid)
+        return 0;
+    if (*(uintptr_t*)(child + STEAM_ENTITY_CHILD_OFFSET))
+        return 0;
+    return *(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) == puppet->entity;
 }
 
 /* Chooses run or idle from the last pose, because the native AI decision is skipped. */
 static void select_animation(UnitPuppet* puppet, void* entity)
 {
-    unsigned int animation =
-        puppet->pose.moving && puppet->pose.velocity != 0 ? STEAM_ANIM_RUN : STEAM_ANIM_IDLE;
+    unsigned int animation = STEAM_ANIM_IDLE;
+    if (puppet->pose.moving && puppet->pose.velocity != 0)
+        animation = STEAM_ANIM_RUN;
     shared.api.animation(entity, NULL, animation);
 }
 
@@ -242,15 +264,24 @@ static void capture_death(UnitPuppet* puppet, uintptr_t e)
     puppet->death.pose.direction = *(unsigned char*)(e + STEAM_ENTITY_DIRECTION_OFFSET);
 }
 
+/* Caller in SEH. The engine's stock descriptor for table index `index`. */
+static uintptr_t stock_vid(uintptr_t game, unsigned int index)
+{
+    return *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + index * sizeof(uintptr_t));
+}
+
 /* Caller in SEH. True when a watched stock monster changed to the stock
    frozen form of its current origin. */
 static int is_stock_frozen_form(const UnitPuppet* puppet, uintptr_t actual)
 {
     unsigned int frozen = puppet->form.current_vid + MONSTER_VID_FROZEN_DELTA;
-    return mp_monster_origin(puppet->form.current_vid) && frozen < STEAM_STOCK_VID_LIMIT &&
-           actual == *(uintptr_t*)(puppet->game + STEAM_GAME_VID_TABLE_OFFSET + frozen * 4u) &&
-           actual && *(unsigned int*)(actual + STEAM_VID_INDEX_OFFSET) == frozen &&
-           *(unsigned int*)(actual + STEAM_VID_CLASS_OFFSET) == STEAM_UNIT_CLASS;
+    if (!mp_monster_origin(puppet->form.current_vid) || frozen >= STEAM_STOCK_VID_LIMIT)
+        return 0;
+    if (!actual || actual != stock_vid(puppet->game, frozen))
+        return 0;
+    if (*(unsigned int*)(actual + STEAM_VID_INDEX_OFFSET) != frozen)
+        return 0;
+    return *(unsigned int*)(actual + STEAM_VID_CLASS_OFFSET) == STEAM_UNIT_CLASS;
 }
 
 /* Caller in SEH. Follows the entity to its new descriptor vid (stock index
@@ -272,7 +303,9 @@ static enum UnitResult adopt_form(UnitPuppet* puppet, uintptr_t entity, uintptr_
     puppet->death.dying = 0;
     puppet->behavior = *(unsigned int*)(entity + STEAM_UNIT_BEHAVIOR_OFFSET);
     puppet->child = *(uintptr_t*)(entity + STEAM_ENTITY_CHILD_OFFSET);
-    puppet->child_vid = puppet->child ? *(uintptr_t*)(puppet->child + STEAM_ENTITY_VID_OFFSET) : 0;
+    puppet->child_vid = 0;
+    if (puppet->child)
+        puppet->child_vid = *(uintptr_t*)(puppet->child + STEAM_ENTITY_VID_OFFSET);
     return UNIT_OK;
 }
 
@@ -289,21 +322,26 @@ static enum UnitResult observe_form(UnitPuppet* puppet, uintptr_t entity, unsign
     int transitioning = puppet->form.transitioning;
     enum UnitResult result = UNIT_REFUSED;
     if (shared.forms)
+    {
         result =
             shared.forms(puppet->game, entity, &vid, &index, &revision, &transitioning, requested);
+    }
     if (result == UNIT_FAULT)
     {
         puppet->state = UNIT_PUPPET_FAULT;
         return UNIT_FAULT;
     }
+
     if (requested)
     {
         if (prepared)
             *prepared = result == UNIT_OK ? vid : 0;
         return result;
     }
+
+    /* Without an observer answer, a watched stock monster may still have frozen. */
     uintptr_t actual = *(uintptr_t*)(entity + STEAM_ENTITY_VID_OFFSET);
-    if (!result && actual != puppet->vid && puppet->watching)
+    if (result == UNIT_REFUSED && actual != puppet->vid && puppet->watching)
     {
         if (!is_stock_frozen_form(puppet, actual))
             return UNIT_REFUSED;
@@ -312,27 +350,34 @@ static enum UnitResult observe_form(UnitPuppet* puppet, uintptr_t entity, unsign
         revision = puppet->form.revision + 1u;
         result = UNIT_OK;
     }
-    if (result == UNIT_OK)
-    {
-        puppet->form.transitioning = transitioning;
-        if (vid && actual == vid && vid != puppet->vid &&
-            adopt_form(puppet, entity, vid, index, revision) == UNIT_FAULT)
-            return UNIT_FAULT;
-    }
+    if (result != UNIT_OK)
+        return result;
+
+    puppet->form.transitioning = transitioning;
+    int entity_changed_form = vid && actual == vid && vid != puppet->vid;
+    if (entity_changed_form && adopt_form(puppet, entity, vid, index, revision) == UNIT_FAULT)
+        return UNIT_FAULT;
     return result;
 }
 
 static int sanitized(uintptr_t vid);
 
+/* Caller in SEH. True when `vid` is a private, sanitized descriptor that a predictive
+   copy may use; a root descriptor must also have an idle behavior. */
 static int prediction_descriptor(const UnitPuppet* puppet, uintptr_t vid, int root)
 {
-    if (!vid || !sanitized(vid) || *(int*)(vid + STEAM_VID_CREATE_SCRIPT_OFFSET) != -1)
+    if (!vid || !sanitized(vid))
         return 0;
+    if (*(int*)(vid + STEAM_VID_CREATE_SCRIPT_OFFSET) != -1)
+        return 0;
+
     unsigned int index = *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET);
-    if (index >= STEAM_STOCK_VID_LIMIT ||
-        (vid == *(uintptr_t*)(puppet->game + STEAM_GAME_VID_TABLE_OFFSET + index * 4u) &&
-         vid != puppet->form.changing_vid))
+    if (index >= STEAM_STOCK_VID_LIMIT)
         return 0;
+    /* A stock descriptor is allowed only while it is our in-flight private form. */
+    if (vid == stock_vid(puppet->game, index) && vid != puppet->form.changing_vid)
+        return 0;
+
     if (root)
     {
         uintptr_t behavior = *(uintptr_t*)(vid + STEAM_VID_BEHAVIOR_OFFSET);
@@ -346,16 +391,25 @@ static int prediction_descriptor(const UnitPuppet* puppet, uintptr_t vid, int ro
    descriptor for table index a. Returns 0 when the change must be blocked. */
 static int prepare_change_vid(UnitPuppet* puppet, void* e, intptr_t a, uintptr_t* prepared)
 {
-    if (puppet->predictive &&
-        (!mp_monster_origin(puppet->form.current_vid) ||
-         a != (intptr_t)(puppet->form.current_vid + MONSTER_VID_FROZEN_DELTA)))
+    if (puppet->predictive)
+    {
+        /* A predictive copy may only freeze, into the frozen form of its origin. */
+        if (!mp_monster_origin(puppet->form.current_vid))
+            return 0;
+        if (a != (intptr_t)(puppet->form.current_vid + MONSTER_VID_FROZEN_DELTA))
+            return 0;
+    }
+
+    int stock_index = a > 0 && a < STEAM_STOCK_VID_LIMIT;
+    if (stock_index && observe_form(puppet, (uintptr_t)e, (unsigned int)a, prepared) == UNIT_FAULT)
         return 0;
-    if (a > 0 && a < STEAM_STOCK_VID_LIMIT &&
-        observe_form(puppet, (uintptr_t)e, (unsigned int)a, prepared) == UNIT_FAULT)
-        return 0;
+
     /* Prediction must never escape through an unsupported stock descriptor. */
-    if (puppet->predictive && (!*prepared || !prediction_descriptor(puppet, *prepared, 1)))
-        return 0;
+    if (puppet->predictive)
+    {
+        if (!*prepared || !prediction_descriptor(puppet, *prepared, 1))
+            return 0;
+    }
     return 1;
 }
 
@@ -366,8 +420,8 @@ static int change_vid_to_prepared(UnitPuppet* puppet, void* e, unsigned int kind
                                   intptr_t b, intptr_t c, ActorAction original, uintptr_t prepared)
 {
     int result = 0;
-    uintptr_t* entry =
-        (uintptr_t*)(puppet->game + STEAM_GAME_VID_TABLE_OFFSET + (unsigned int)a * 4u);
+    uintptr_t* entry = (uintptr_t*)(puppet->game + STEAM_GAME_VID_TABLE_OFFSET +
+                                    (unsigned int)a * sizeof(uintptr_t));
     uintptr_t saved = *entry;
     uintptr_t saved_changing = puppet->form.changing_vid;
     __try
@@ -384,6 +438,12 @@ static int change_vid_to_prepared(UnitPuppet* puppet, void* e, unsigned int kind
     return result;
 }
 
+/* True for the native attack: USE_AMMO with no ammo cost requested (a <= 0). */
+static int is_attack(unsigned int kind, intptr_t a)
+{
+    return kind == STEAM_ACT_USE_AMMO && a <= 0;
+}
+
 /* Watch mode: runs the original action, then counts attacks and observes the form.
    Only CHANGE_VID is altered (a prepared private form replaces the stock index). */
 static int observed_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_t a, intptr_t b,
@@ -394,19 +454,22 @@ static int observed_action(UnitPuppet* puppet, void* e, unsigned int kind, intpt
        lets the native path perform linked teardown, health and VID counters on
        a sanitized private form. */
     uintptr_t prepared = 0;
-    if ((uintptr_t)e == puppet->entity && kind == STEAM_ACT_CHANGE_VID &&
-        !prepare_change_vid(puppet, e, a, &prepared))
+    int on_root = (uintptr_t)e == puppet->entity;
+    if (on_root && kind == STEAM_ACT_CHANGE_VID && !prepare_change_vid(puppet, e, a, &prepared))
         return 0;
-    if (puppet->predictive && (uintptr_t)e == puppet->entity && kind == STEAM_ACT_DAMAGE)
+    if (on_root && puppet->predictive && kind == STEAM_ACT_DAMAGE)
         ++puppet->predicted_hits;
+
     if (prepared)
         result = change_vid_to_prepared(puppet, e, kind, a, b, c, original, prepared);
     else
         result = original(e, NULL, kind, a, b, c);
+
     /* Verified native ExecuteCommand(46A8A0) calls USE_AMMO then animation8.
        It also does this for zero-cost melee; no pose/frame inference is used. */
-    if (kind == STEAM_ACT_USE_AMMO && a <= 0 && !puppet->death.dying)
+    if (is_attack(kind, a) && !puppet->death.dying)
         ++puppet->captured_attacks;
+
     __try
     {
         if (puppet->entity)
@@ -425,13 +488,24 @@ static int observed_action(UnitPuppet* puppet, void* e, unsigned int kind, intpt
    replicated movement pose, but never reset frozen/death forms. */
 static void resume_predicted_pose(UnitPuppet* puppet, void* e, int part)
 {
+    if (puppet->death.dying || puppet->form.transitioning)
+        return;
+    if (mp_monster_frozen(puppet->form.current_vid))
+        return;
+
     unsigned int anim = *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET);
-    if (puppet->death.dying || puppet->form.transitioning ||
-        mp_monster_frozen(puppet->form.current_vid))
+    switch (anim)
+    {
+    case STEAM_ANIM_IDLE:
+    case STEAM_ANIM_RUN:
+    case STEAM_ANIM_ATTACK:
+    case STEAM_ANIM_PAIN:
+    case STEAM_ANIM_PAIN_ALT:
+        break;
+    default:
         return;
-    if (anim != STEAM_ANIM_IDLE && anim != STEAM_ANIM_RUN && anim != STEAM_ANIM_ATTACK &&
-        anim != STEAM_ANIM_PAIN && anim != STEAM_ANIM_PAIN_ALT)
-        return;
+    }
+
     if (part)
         shared.api.animation(e, NULL, STEAM_ANIM_IDLE);
     else
@@ -442,12 +516,63 @@ static void resume_predicted_pose(UnitPuppet* puppet, void* e, int part)
    its own form change, idle/stop and the native bookkeeping queries. */
 static int prediction_allows(unsigned int kind, intptr_t a, int part)
 {
-    return kind == STEAM_ACT_DAMAGE || kind == STEAM_ACT_SET_HP ||
-           (!part && kind == STEAM_ACT_CHANGE_VID) ||
-           (kind == STEAM_ACT_SET_ANIMATION && a == STEAM_ANIM_IDLE) ||
-           (kind == STEAM_ACT_SET_BEHAVIOR && a == 0) || kind == STEAM_ACT_CLEAR_COMMAND ||
-           kind == STEAM_ACT_CLEAR_STACK || kind == STEAM_ACT_STOP || kind == STEAM_ACT_GET_HP ||
-           kind == 0x5Cu || kind == 0x5Eu || kind == 0x60u;
+    switch (kind)
+    {
+    case STEAM_ACT_DAMAGE:
+    case STEAM_ACT_SET_HP:
+    case STEAM_ACT_GET_HP:
+    case STEAM_ACT_CLEAR_COMMAND:
+    case STEAM_ACT_CLEAR_STACK:
+    case STEAM_ACT_STOP:
+    case STEAM_ACT_BOOKKEEPING_5C:
+    case STEAM_ACT_BOOKKEEPING_5E:
+    case STEAM_ACT_BOOKKEEPING_60:
+        return 1;
+    case STEAM_ACT_CHANGE_VID:
+        return !part;
+    case STEAM_ACT_SET_ANIMATION:
+        return a == STEAM_ANIM_IDLE;
+    case STEAM_ACT_SET_BEHAVIOR:
+        return a == 0;
+    default:
+        return 0;
+    }
+}
+
+/* Actions a controlled (movement-only) copy passes to the engine: animation changes,
+   health queries and native bookkeeping. Everything else is blocked. */
+static int controlled_allows(unsigned int kind)
+{
+    switch (kind)
+    {
+    case STEAM_ACT_SET_ANIMATION:
+    case STEAM_ACT_GET_HP:
+    case STEAM_ACT_BOOKKEEPING_5C:
+    case STEAM_ACT_BOOKKEEPING_5E:
+    case STEAM_ACT_BOOKKEEPING_60:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* True for the actions a stationary gallery monster skips: AI decisions and attacks. */
+static int stationary_skips(unsigned int kind, intptr_t a)
+{
+    return kind == STEAM_ACT_NEXT_COMMAND || is_attack(kind, a);
+}
+
+/* Caller in SEH. True when the root, its part and both descriptors are still the
+   private, registered objects a predictive copy expects. */
+static int prediction_intact(UnitPuppet* puppet)
+{
+    if (!child_registered(puppet))
+        return 0;
+    if (!prediction_descriptor(puppet, puppet->vid, 1))
+        return 0;
+    if (puppet->child && !prediction_descriptor(puppet, puppet->child_vid, 0))
+        return 0;
+    return 1;
 }
 
 static int prediction_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_t a, intptr_t b,
@@ -459,20 +584,21 @@ static int prediction_action(UnitPuppet* puppet, void* e, unsigned int kind, int
             return 0;
         /* Native CHANGE_VID can recurse into actions after assigning its new
            descriptor. Adopt only our explicitly in-flight private form. */
-        if (!part && puppet->form.changing_vid &&
-            *(uintptr_t*)((uintptr_t)e + STEAM_ENTITY_VID_OFFSET) == puppet->form.changing_vid)
+        uintptr_t entity_vid = *(uintptr_t*)((uintptr_t)e + STEAM_ENTITY_VID_OFFSET);
+        if (!part && puppet->form.changing_vid && entity_vid == puppet->form.changing_vid)
             observe_form(puppet, (uintptr_t)e, 0, NULL);
+
         if (!registered(puppet, puppet->game))
         {
             mark_entity_lost(puppet);
             return 0;
         }
-        if (!child_registered(puppet) || !prediction_descriptor(puppet, puppet->vid, 1) ||
-            (puppet->child && !prediction_descriptor(puppet, puppet->child_vid, 0)))
+        if (!prediction_intact(puppet))
         {
             puppet->state = UNIT_PUPPET_FAULT;
             return 0;
         }
+
         if (kind == STEAM_ACT_NEXT_COMMAND)
         {
             ++puppet->stats.decisions;
@@ -500,17 +626,17 @@ static int scoped_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_
         return prediction_action(puppet, e, kind, a, b, c, shared.api.action, 0);
     if (puppet->watching && owns_entity(puppet, e))
     {
-        if (puppet->watching == PUPPET_STATIONARY &&
-            (kind == STEAM_ACT_NEXT_COMMAND || (kind == STEAM_ACT_USE_AMMO && a <= 0)))
+        if (puppet->watching == PUPPET_STATIONARY && stationary_skips(kind, a))
         {
             ++puppet->stats.decisions;
             return 0;
         }
         return observed_action(puppet, e, kind, a, b, c, shared.api.action);
     }
+
     if (owns_entity(puppet, e))
     {
-        if (puppet->state == UNIT_PUPPET_FAULT && kind != 15u)
+        if (puppet->state == UNIT_PUPPET_FAULT && kind != STEAM_ACT_SET_ANIMATION)
             return 0;
         __try
         {
@@ -525,8 +651,7 @@ static int scoped_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_
                     select_animation(puppet, e);
                 return 0;
             }
-            else if (kind != 15u && kind != 0x57u && kind != 0x5Cu && kind != 0x5Eu &&
-                     kind != 0x60u)
+            else if (!controlled_allows(kind))
             {
                 /* This movement-only experiment rejects ALL other actions,
                    including scripts assigning targets/stack, damage and HP.
@@ -578,14 +703,16 @@ static void scoped_movement(UnitPuppet* puppet, void* e)
    death or armor transition, then the slot is invalidated so no stale pointer is used. */
 static void* scoped_destroy(UnitPuppet* puppet, void* e, int release)
 {
-    if ((puppet->watching || puppet->predictive) && puppet->entity == (uintptr_t)e &&
-        !puppet->death.dying)
+    int observed = puppet->watching || puppet->predictive;
+    if (observed && puppet->entity == (uintptr_t)e && !puppet->death.dying)
     {
         __try
         {
             observe_form(puppet, (uintptr_t)e, 0, NULL);
-            if (mp_monster_armored(puppet->form.current_vid) &&
-                *(unsigned int*)((uintptr_t)e + STEAM_ENTITY_ANIM_OFFSET) == STEAM_ANIM_DEATH)
+
+            /* An armored monster "dies" when it loses its armor; that is a form change. */
+            unsigned int anim = *(unsigned int*)((uintptr_t)e + STEAM_ENTITY_ANIM_OFFSET);
+            if (mp_monster_armored(puppet->form.current_vid) && anim == STEAM_ANIM_DEATH)
                 puppet->form.transitioning = 1;
             if (!puppet->form.transitioning)
                 capture_death(puppet, (uintptr_t)e);
@@ -607,14 +734,14 @@ static int scoped_part_action(UnitPuppet* puppet, void* e, unsigned int kind, in
         return prediction_action(puppet, e, kind, a, b, c, shared.api.part_action, 1);
     if (puppet->watching && owns_part(puppet, e))
     {
-        if (puppet->watching == PUPPET_STATIONARY &&
-            (kind == STEAM_ACT_NEXT_COMMAND || (kind == STEAM_ACT_USE_AMMO && a <= 0)))
+        if (puppet->watching == PUPPET_STATIONARY && stationary_skips(kind, a))
         {
             ++puppet->stats.decisions;
             return 0;
         }
         return observed_action(puppet, e, kind, a, b, c, shared.api.part_action);
     }
+
     if (owns_part(puppet, e))
     {
         __try
@@ -631,7 +758,7 @@ static int scoped_part_action(UnitPuppet* puppet, void* e, unsigned int kind, in
                     shared.api.animation(e, NULL, STEAM_ANIM_IDLE);
                 return 0;
             }
-            if (kind != 15u && kind != 0x57u && kind != 0x5Cu && kind != 0x5Eu && kind != 0x60u)
+            if (!controlled_allows(kind))
             {
                 ++puppet->stats.blocked;
                 return 0;
@@ -712,31 +839,60 @@ static void* __fastcall on_part_destroy(void* e, void* unused, int release)
 }
 
 /* Hooks the five vtable slots. Call unit_puppet_stop to roll back. */
+/* True when every engine function the hooks call is present. */
+static int engine_complete(const UnitPuppetEngine* api)
+{
+    if (!api->action || !api->destroy || !api->movement || !api->animation)
+        return 0;
+    if (!api->move || !api->rotate)
+        return 0;
+    return api->part_action && api->part_destroy;
+}
+
+/* True while any of the five vtable slots is still hooked. */
+static int hooks_installed(void)
+{
+    return shared.action.slot || shared.movement.slot || shared.destroy.slot ||
+           shared.part_action.slot || shared.part_destroy.slot;
+}
+
+/* Installs the five vtable hooks, parts first. Returns 0 at the first failure. */
+static int install_hooks(uintptr_t base, const UnitPuppetEngine* api)
+{
+    void* volatile* vt = (void* volatile*)(base + STEAM_UNIT_VTABLE_RVA);
+    void* volatile* part_vt = (void* volatile*)(base + STEAM_SPRITE_VTABLE_RVA);
+
+    if (slot_install(&shared.part_destroy, part_vt + STEAM_ENTITY_DESTROY_SLOT,
+                     (void*)api->part_destroy, (void*)on_part_destroy) != SLOT_OK)
+        return 0;
+    if (slot_install(&shared.part_action, part_vt + STEAM_ENTITY_ACTION_SLOT,
+                     (void*)api->part_action, (void*)on_part_action) != SLOT_OK)
+        return 0;
+    if (slot_install(&shared.destroy, vt + STEAM_ENTITY_DESTROY_SLOT, (void*)api->destroy,
+                     (void*)on_destroy) != SLOT_OK)
+        return 0;
+    if (slot_install(&shared.movement, vt + STEAM_UNIT_MOVEMENT_SLOT, (void*)api->movement,
+                     (void*)on_movement) != SLOT_OK)
+        return 0;
+    return slot_install(&shared.action, vt + STEAM_ENTITY_ACTION_SLOT, (void*)api->action,
+                        (void*)on_action) == SLOT_OK;
+}
+
 enum UnitResult unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
 {
-    if (shared.action.slot || shared.movement.slot || shared.destroy.slot ||
-        shared.part_action.slot || shared.part_destroy.slot || !base || !api || !api->action ||
-        !api->destroy || !api->movement || !api->animation || !api->move || !api->rotate ||
-        !api->part_action || !api->part_destroy)
+    if (hooks_installed() || !base || !api || !engine_complete(api))
         return UNIT_REFUSED;
+
     memset(puppets, 0, sizeof(puppets));
     memset(&shared, 0, sizeof(shared));
     shared.base = base;
     shared.api = *api;
-    void* volatile* vt = (void* volatile*)(base + STEAM_UNIT_VTABLE_RVA);
-    void* volatile* part_vt = (void* volatile*)(base + STEAM_SPRITE_VTABLE_RVA);
-    if (slot_install(&shared.part_destroy, part_vt, (void*)api->part_destroy,
-                     (void*)on_part_destroy) != SLOT_OK ||
-        slot_install(&shared.part_action, part_vt + 1, (void*)api->part_action,
-                     (void*)on_part_action) != SLOT_OK ||
-        slot_install(&shared.destroy, vt, (void*)api->destroy, (void*)on_destroy) != SLOT_OK ||
-        slot_install(&shared.movement, vt + 3, (void*)api->movement, (void*)on_movement) !=
-            SLOT_OK ||
-        slot_install(&shared.action, vt + 1, (void*)api->action, (void*)on_action) != SLOT_OK)
+    if (!install_hooks(base, api))
     {
         unit_puppet_stop();
         return UNIT_REFUSED;
     }
+
     for (unsigned int i = 0; i < UNIT_PUPPET_CAPACITY; ++i)
         puppets[i].state = UNIT_PUPPET_READY;
     return UNIT_OK;
@@ -756,18 +912,28 @@ typedef struct AttachRequest
    supported animation that this request may attach to. */
 static int unit_candidate(const AttachRequest* request, uintptr_t e, unsigned int cat)
 {
-    if (!e || e == request->player || (request->required && e != request->required) ||
-        *(uintptr_t*)e != shared.base + STEAM_UNIT_VTABLE_RVA)
+    if (!e || e == request->player)
         return 0;
+    if (request->required && e != request->required)
+        return 0;
+    if (*(uintptr_t*)e != shared.base + STEAM_UNIT_VTABLE_RVA)
+        return 0;
+
     uintptr_t vid = *(uintptr_t*)(e + STEAM_ENTITY_VID_OFFSET);
-    unsigned int anim = *(unsigned int*)(e + STEAM_ENTITY_ANIM_OFFSET);
-    if (!vid ||
-        (request->watching == PUPPET_WATCH && !request->required &&
-         *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET) != MONSTER_VID_MONSTER1) ||
-        *(unsigned int*)(vid + STEAM_VID_CLASS_OFFSET) != STEAM_UNIT_CLASS ||
-        *(unsigned int*)(vid + STEAM_VID_CATEGORY_OFFSET) != cat ||
-        *(int*)(e + STEAM_ENTITY_HEALTH_OFFSET) <= 0)
+    if (!vid)
         return 0;
+    /* Without a required entity, watch mode looks only for the ordinary monster. */
+    int searching = request->watching == PUPPET_WATCH && !request->required;
+    if (searching && *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET) != MONSTER_VID_MONSTER1)
+        return 0;
+    if (*(unsigned int*)(vid + STEAM_VID_CLASS_OFFSET) != STEAM_UNIT_CLASS)
+        return 0;
+    if (*(unsigned int*)(vid + STEAM_VID_CATEGORY_OFFSET) != cat)
+        return 0;
+    if (*(int*)(e + STEAM_ENTITY_HEALTH_OFFSET) <= 0)
+        return 0;
+
+    unsigned int anim = *(unsigned int*)(e + STEAM_ENTITY_ANIM_OFFSET);
     if (request->watching == PUPPET_STATIONARY && request->required)
         return anim < STEAM_ANIMATION_COUNT;
     return anim == STEAM_ANIM_IDLE || anim == STEAM_ANIM_RUN;
@@ -776,11 +942,15 @@ static int unit_candidate(const AttachRequest* request, uintptr_t e, unsigned in
 /* Caller in SEH. True when child is the stock linked part of UNIT e. */
 static int linked_part_candidate(uintptr_t e, uintptr_t vid, uintptr_t child, uintptr_t child_vid)
 {
-    return child_vid && child_vid == *(uintptr_t*)(vid + STEAM_VID_LINKED_OFFSET) &&
-           *(unsigned int*)(child_vid + STEAM_VID_CLASS_OFFSET) == STEAM_PUPPET_PART_CLASS &&
-           *(uintptr_t*)child == shared.base + STEAM_SPRITE_VTABLE_RVA &&
-           !*(uintptr_t*)(child + STEAM_ENTITY_CHILD_OFFSET) &&
-           *(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) == e;
+    if (!child_vid || child_vid != *(uintptr_t*)(vid + STEAM_VID_LINKED_OFFSET))
+        return 0;
+    if (*(unsigned int*)(child_vid + STEAM_VID_CLASS_OFFSET) != STEAM_PUPPET_PART_CLASS)
+        return 0;
+    if (*(uintptr_t*)child != shared.base + STEAM_SPRITE_VTABLE_RVA)
+        return 0;
+    if (*(uintptr_t*)(child + STEAM_ENTITY_CHILD_OFFSET))
+        return 0;
+    return *(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) == e;
 }
 
 /* True when another slot already owns entity e. */
@@ -853,6 +1023,11 @@ static void take_control(UnitPuppet* puppet, uintptr_t e, uintptr_t child, unsig
     }
 }
 
+static int is_death_animation(unsigned int animation)
+{
+    return animation == STEAM_ANIM_DEATH || animation == STEAM_ANIM_GIB_DEATH;
+}
+
 /* Caller in SEH. Attaches the slot to e when it qualifies. Returns 1 attached. */
 static int try_attach_entity(UnitPuppet* puppet, const AttachRequest* request, uintptr_t e,
                              unsigned int cat)
@@ -891,8 +1066,7 @@ static int try_attach_entity(UnitPuppet* puppet, const AttachRequest* request, u
     /* A private armor successor may already be hit or killed before
        the next coordinator tick. Adopt that native state without
        rejecting it or restarting its death animation. */
-    if (request->watching == PUPPET_STATIONARY &&
-        (anim == STEAM_ANIM_DEATH || anim == STEAM_ANIM_GIB_DEATH))
+    if (request->watching == PUPPET_STATIONARY && is_death_animation(anim))
     {
         puppet->form.transitioning =
             anim == STEAM_ANIM_DEATH && mp_monster_armored(puppet->form.current_vid);
@@ -970,6 +1144,35 @@ enum UnitResult unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game,
     return entity ? attach(puppet, game, player, entity, PUPPET_STATIONARY) : UNIT_REFUSED;
 }
 
+/* True when the slot watches a live native monster. */
+static int watching_alive(const UnitPuppet* puppet)
+{
+    if (!puppet || !puppet->watching)
+        return 0;
+    return puppet->state == UNIT_PUPPET_ACTIVE && !puppet->death.dying;
+}
+
+/* True when the slot controls a live private copy (not watch mode). */
+static int controlling_alive(const UnitPuppet* puppet)
+{
+    if (!puppet || puppet->watching)
+        return 0;
+    return puppet->state == UNIT_PUPPET_ACTIVE && !puppet->death.dying;
+}
+
+/* Caller in SEH. True when the root and part are registered and both descriptors are
+   sanitized private copies, so native actions cannot run stock scripts. */
+static int private_copy_intact(UnitPuppet* puppet, uintptr_t game)
+{
+    if (!registered(puppet, game) || !child_registered(puppet))
+        return 0;
+    if (!sanitized(puppet->vid))
+        return 0;
+    if (puppet->child && !sanitized(puppet->child_vid))
+        return 0;
+    return 1;
+}
+
 /* Diagnostic: kills the watched monster through native SET_HP. */
 enum UnitResult unit_puppet_host_kill(UnitPuppet* puppet, uintptr_t game)
 {
@@ -979,8 +1182,7 @@ enum UnitResult unit_puppet_host_kill(UnitPuppet* puppet, uintptr_t game)
 /* Diagnostic: plays the frozen form stage through native CHANGE_VID. */
 enum UnitResult unit_puppet_host_freeze(UnitPuppet* puppet, uintptr_t game)
 {
-    if (!puppet || !puppet->watching || puppet->death.dying ||
-        puppet->state != UNIT_PUPPET_ACTIVE || !mp_monster_origin(puppet->form.current_vid))
+    if (!watching_alive(puppet) || !mp_monster_origin(puppet->form.current_vid))
         return UNIT_REFUSED;
     __try
     {
@@ -1007,16 +1209,15 @@ enum UnitResult unit_puppet_host_freeze(UnitPuppet* puppet, uintptr_t game)
 enum UnitResult unit_puppet_host_kill_variant(UnitPuppet* puppet, uintptr_t game,
                                               unsigned int animation)
 {
-    if (!puppet || !puppet->watching || puppet->death.dying || puppet->state != UNIT_PUPPET_ACTIVE)
-        return UNIT_REFUSED;
-    if (animation != STEAM_ANIM_DEATH && animation != STEAM_ANIM_GIB_DEATH)
+    if (!watching_alive(puppet) || !is_death_animation(animation))
         return UNIT_REFUSED;
     __try
     {
         if (!registered(puppet, game))
             return UNIT_REFUSED;
-        on_action((void*)puppet->entity, NULL, STEAM_ACT_SET_HP,
-                  animation == STEAM_ANIM_GIB_DEATH ? -100000 : 0, 0, 0);
+
+        int health = animation == STEAM_ANIM_GIB_DEATH ? PUPPET_GIB_HEALTH : 0;
+        on_action((void*)puppet->entity, NULL, STEAM_ACT_SET_HP, health, 0, 0);
         (void)unit_puppet_sample(puppet, game);
         return UNIT_OK;
     }
@@ -1027,13 +1228,50 @@ enum UnitResult unit_puppet_host_kill_variant(UnitPuppet* puppet, uintptr_t game
     }
 }
 
+/* True when every number in the pose is finite and in range. */
+static int pose_valid(const UnitPuppetPose* p)
+{
+    if (!p)
+        return 0;
+    if (!_finite(p->x) || !_finite(p->y) || !_finite(p->z) || !_finite(p->velocity))
+        return 0;
+    return p->direction <= STEAM_DIRECTION_MAX && p->moving <= 1u;
+}
+
+/* Caller in SEH. Writes velocity and the moving flag; a frozen copy stands still. */
+static void apply_motion(UnitPuppet* puppet, const UnitPuppetPose* p, int frozen)
+{
+    *(float*)(puppet->entity + STEAM_ENTITY_VELOCITY_OFFSET) = frozen ? 0 : p->velocity;
+
+    uint32_t* flags = (uint32_t*)(puppet->entity + STEAM_ENTITY_FLAGS_OFFSET);
+    *flags &= ~STEAM_ENTITY_MOVING_FLAG;
+    if (p->moving && !frozen)
+        *flags |= STEAM_ENTITY_MOVING_FLAG;
+}
+
+/* Caller in SEH. True when the root should switch to the run/idle animation for the
+   new pose: it is not frozen, not in a predicted pain or a replayed attack, and does
+   not already show it. */
+static int needs_pose_animation(const UnitPuppet* puppet, const UnitPuppetPose* p,
+                                unsigned int previous, int frozen)
+{
+    if (frozen)
+        return 0;
+    if (puppet->predictive && (previous == STEAM_ANIM_PAIN || previous == STEAM_ANIM_PAIN_ALT))
+        return 0;
+
+    unsigned int current = *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET);
+    if (puppet->combat && current == STEAM_ANIM_ATTACK)
+        return 0;
+    unsigned int wanted = p->moving && p->velocity != 0 ? STEAM_ANIM_RUN : STEAM_ANIM_IDLE;
+    return current != wanted;
+}
+
 /* Writes a replicated pose into a controlled entity after validating the numbers.
    A vanished entity marks the slot LOST. */
 enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* p)
 {
-    if (!puppet || puppet->watching || puppet->death.dying || puppet->state != UNIT_PUPPET_ACTIVE ||
-        !p || !_finite(p->x) || !_finite(p->y) || !_finite(p->z) || !_finite(p->velocity) ||
-        p->direction > 255u || p->moving > 1u)
+    if (!controlling_alive(puppet) || !pose_valid(p))
         return UNIT_REFUSED;
     __try
     {
@@ -1047,25 +1285,18 @@ enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const Unit
             puppet->state = UNIT_PUPPET_FAULT;
             return UNIT_FAULT;
         }
+        /* A predicted death or armor change plays natively; the pose must not move it. */
         unsigned int animation = *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET);
-        if (puppet->predictive && (animation == STEAM_ANIM_DEATH ||
-                                   animation == STEAM_ANIM_GIB_DEATH || puppet->form.transitioning))
+        if (puppet->predictive && (is_death_animation(animation) || puppet->form.transitioning))
             return UNIT_OK;
+
         puppet->pose = *p;
         shared.api.move((void*)puppet->entity, NULL, p->x, p->y, p->z);
         shared.api.rotate((void*)puppet->entity, NULL, p->direction);
+
         int frozen = puppet->predictive && mp_monster_frozen(puppet->form.current_vid);
-        *(float*)(puppet->entity + STEAM_ENTITY_VELOCITY_OFFSET) = frozen ? 0 : p->velocity;
-        uint32_t* flags = (uint32_t*)(puppet->entity + STEAM_ENTITY_FLAGS_OFFSET);
-        *flags = (*flags & ~STEAM_ENTITY_MOVING_FLAG) |
-                 (p->moving && !frozen ? STEAM_ENTITY_MOVING_FLAG : 0);
-        if (!frozen &&
-            !(puppet->predictive &&
-              (animation == STEAM_ANIM_PAIN || animation == STEAM_ANIM_PAIN_ALT)) &&
-            (!puppet->combat ||
-             *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET) != STEAM_ANIM_ATTACK) &&
-            *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET) !=
-                (p->moving && p->velocity != 0 ? STEAM_ANIM_RUN : STEAM_ANIM_IDLE))
+        apply_motion(puppet, p, frozen);
+        if (needs_pose_animation(puppet, p, animation, frozen))
             select_animation(puppet, (void*)puppet->entity);
         return UNIT_OK;
     }
@@ -1080,29 +1311,36 @@ enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const Unit
    is a private copy. */
 static int sanitized(uintptr_t vid)
 {
-    if (*(int*)(vid + STEAM_VID_DAMAGE_OFFSET) ||
-        *(int*)(vid + STEAM_VID_DELETE_SCRIPT_OFFSET) != -1 ||
-        *(int*)(vid + STEAM_VID_DAMAGE_SCRIPT_OFFSET) != -1 ||
-        *(int*)(vid + STEAM_VID_COLLISION_SCRIPT_OFFSET) != -1 ||
-        *(uintptr_t*)(vid + STEAM_VID_SERVICE_OFFSET))
+    if (*(int*)(vid + STEAM_VID_DAMAGE_OFFSET))
         return 0;
+    if (*(uintptr_t*)(vid + STEAM_VID_SERVICE_OFFSET))
+        return 0;
+    if (*(int*)(vid + STEAM_VID_DELETE_SCRIPT_OFFSET) != -1)
+        return 0;
+    if (*(int*)(vid + STEAM_VID_DAMAGE_SCRIPT_OFFSET) != -1)
+        return 0;
+    if (*(int*)(vid + STEAM_VID_COLLISION_SCRIPT_OFFSET) != -1)
+        return 0;
+
+    /* -1 means "no script" in every per-animation script entry. */
     for (unsigned int i = 0; i < STEAM_ANIMATION_COUNT; ++i)
-        if (*(int*)(vid + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + i * 4u) != -1 ||
-            *(uintptr_t*)(vid + STEAM_VID_CREATIONS_OFFSET + i * 4u))
+    {
+        if (*(int*)(vid + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + i * sizeof(int)) != -1)
             return 0;
+        if (*(uintptr_t*)(vid + STEAM_VID_CREATIONS_OFFSET + i * sizeof(uintptr_t)))
+            return 0;
+    }
     return 1;
 }
 
 /* Switches an attached private copy to local hit prediction. */
 enum UnitResult unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
 {
-    if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || puppet->death.dying)
+    if (!controlling_alive(puppet))
         return UNIT_REFUSED;
     __try
     {
-        if (!registered(puppet, game) || !child_registered(puppet) ||
-            !prediction_descriptor(puppet, puppet->vid, 1) ||
-            (puppet->child && !prediction_descriptor(puppet, puppet->child_vid, 0)))
+        if (!registered(puppet, game) || !prediction_intact(puppet))
             return UNIT_REFUSED;
         puppet->predictive = 1;
         return UNIT_OK;
@@ -1117,8 +1355,9 @@ enum UnitResult unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
 enum UnitResult unit_puppet_prediction_test_hit(UnitPuppet* puppet, uintptr_t game, int damage,
                                                 int freeze)
 {
-    if (!puppet || !puppet->predictive || puppet->state != UNIT_PUPPET_ACTIVE ||
-        puppet->death.dying || damage <= 0 || damage > 100000)
+    if (!controlling_alive(puppet) || !puppet->predictive)
+        return UNIT_REFUSED;
+    if (damage <= 0 || damage > PUPPET_HEALTH_LIMIT)
         return UNIT_REFUSED;
     __try
     {
@@ -1128,7 +1367,7 @@ enum UnitResult unit_puppet_prediction_test_hit(UnitPuppet* puppet, uintptr_t ga
         if (puppet->state != UNIT_PUPPET_ACTIVE || !registered(puppet, game))
             return UNIT_REFUSED;
         unsigned int animation = *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET);
-        if (freeze && (animation == STEAM_ANIM_DEATH || animation == STEAM_ANIM_GIB_DEATH))
+        if (freeze && is_death_animation(animation))
         {
             if (!mp_monster_origin(puppet->form.current_vid))
                 return UNIT_REFUSED;
@@ -1155,13 +1394,13 @@ enum UnitResult unit_puppet_prediction_test_hit(UnitPuppet* puppet, uintptr_t ga
 /* Sets the health of a private copy through native SET_HP; stock descriptors are refused. */
 enum UnitResult unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int health)
 {
-    if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || health <= 0 ||
-        health > 100000 || puppet->death.dying)
+    if (!controlling_alive(puppet))
+        return UNIT_REFUSED;
+    if (health <= 0 || health > PUPPET_HEALTH_LIMIT)
         return UNIT_REFUSED;
     __try
     {
-        if (!registered(puppet, game) || !child_registered(puppet) || !sanitized(puppet->vid) ||
-            (puppet->child && !sanitized(puppet->child_vid)))
+        if (!private_copy_intact(puppet, game))
             return UNIT_REFUSED;
         shared.api.action((void*)puppet->entity, NULL, STEAM_ACT_SET_HP, health, 0, 0);
         return UNIT_OK;
@@ -1178,22 +1417,28 @@ enum UnitResult unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int healt
 enum UnitResult unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
                                    unsigned int animation)
 {
-    if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || !sequence ||
-        (animation != STEAM_ANIM_ATTACK && animation != STEAM_ANIM_DEATH))
+    if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE)
+        return UNIT_REFUSED;
+    if (!sequence)
+        return UNIT_REFUSED;
+    if (animation != STEAM_ANIM_ATTACK && animation != STEAM_ANIM_DEATH)
         return UNIT_REFUSED;
     __try
     {
-        if (!registered(puppet, game) || !child_registered(puppet) || !sanitized(puppet->vid) ||
-            (puppet->child && !sanitized(puppet->child_vid)))
+        if (!private_copy_intact(puppet, game))
             return UNIT_REFUSED;
+
+        /* Sequences wrap: a delta of zero or in the upper half means old or repeated. */
         uint32_t delta = sequence - puppet->last_event;
-        if (puppet->last_event && (!delta || delta >= 0x80000000u))
+        int not_newer = !delta || delta >= PUPPET_SEQUENCE_HALF_RANGE;
+        if (puppet->last_event && not_newer)
         {
             ++puppet->stats.duplicates;
             return UNIT_REFUSED;
         }
         if (puppet->death.dying)
             return UNIT_REFUSED;
+
         puppet->combat = 1;
         if (animation == STEAM_ANIM_DEATH)
         {
@@ -1226,14 +1471,14 @@ enum UnitResult unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
         if (!registered(puppet, game) || !child_registered(puppet))
             return UNIT_REFUSED;
         int hp = *(int*)(puppet->entity + STEAM_ENTITY_HEALTH_OFFSET);
-        on_action((void*)puppet->entity, NULL, STEAM_ACT_DAMAGE, 100000, 0, 0);
+        on_action((void*)puppet->entity, NULL, STEAM_ACT_DAMAGE, PUPPET_HEALTH_LIMIT, 0, 0);
         on_action((void*)puppet->entity, NULL, STEAM_ACT_SET_HP, 0, 0, 0);
         if (*(int*)(puppet->entity + STEAM_ENTITY_HEALTH_OFFSET) != hp)
             return UNIT_REFUSED;
         if (puppet->child)
         {
             hp = *(int*)(puppet->child + STEAM_ENTITY_HEALTH_OFFSET);
-            on_part_action((void*)puppet->child, NULL, STEAM_ACT_DAMAGE, 100000, 0, 0);
+            on_part_action((void*)puppet->child, NULL, STEAM_ACT_DAMAGE, PUPPET_HEALTH_LIMIT, 0, 0);
             on_part_action((void*)puppet->child, NULL, STEAM_ACT_SET_HP, 0, 0, 0);
             if (*(int*)(puppet->child + STEAM_ENTITY_HEALTH_OFFSET) != hp)
                 return UNIT_REFUSED;
@@ -1251,20 +1496,22 @@ enum UnitResult unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
    the root's animation and counts its native frame progression. */
 static void sample_root_animation(UnitPuppet* puppet, uintptr_t e, UnitPuppetSample* s)
 {
-    if ((puppet->watching || puppet->predictive) && mp_monster_armored(puppet->form.current_vid) &&
+    int observed = puppet->watching || puppet->predictive;
+    if (observed && mp_monster_armored(puppet->form.current_vid) &&
         s->animation == STEAM_ANIM_DEATH)
         puppet->form.transitioning = 1;
-    if ((puppet->watching || puppet->predictive) && !puppet->death.dying &&
-        !puppet->form.transitioning &&
-        (s->animation == STEAM_ANIM_DEATH || s->animation == STEAM_ANIM_GIB_DEATH))
+    if (observed && !puppet->death.dying && !puppet->form.transitioning &&
+        is_death_animation(s->animation))
         capture_death(puppet, e);
+
     s->frame = *(unsigned int*)(e + STEAM_ENTITY_FRAME_CURRENT_OFFSET);
     s->frame_first = *(unsigned int*)(e + STEAM_ENTITY_FRAME_FIRST_OFFSET);
     s->frame_last = *(unsigned int*)(e + STEAM_ENTITY_FRAME_LAST_OFFSET);
     /* A direction change selects another range; that alone is not
        evidence of native frame progression. Single-frame art is valid. */
-    if (s->animation == puppet->frames.last_animation &&
-        s->frame_first == puppet->frames.last_first && s->frame != puppet->frames.last_frame)
+    int same_range = s->animation == puppet->frames.last_animation &&
+                     s->frame_first == puppet->frames.last_first;
+    if (same_range && s->frame != puppet->frames.last_frame)
     {
         ++puppet->stats.frame_changes;
         if (s->animation == STEAM_ANIM_ATTACK)
@@ -1311,9 +1558,9 @@ static void sample_part(UnitPuppet* puppet, UnitPuppetSample* s)
     s->child_frame_last = *(unsigned int*)(child + STEAM_ENTITY_FRAME_LAST_OFFSET);
     unsigned int child_animation = *(unsigned int*)(child + STEAM_ENTITY_ANIM_OFFSET);
     s->child_animation = child_animation;
-    if (child_animation == puppet->frames.child_last_animation &&
-        s->child_frame_first == puppet->frames.child_last_first &&
-        s->child_frame != puppet->frames.child_last_frame)
+    int same_range = child_animation == puppet->frames.child_last_animation &&
+                     s->child_frame_first == puppet->frames.child_last_first;
+    if (same_range && s->child_frame != puppet->frames.child_last_frame)
     {
         ++puppet->stats.child_frame_changes;
         if (child_animation == STEAM_ANIM_ATTACK)
@@ -1400,8 +1647,10 @@ enum UnitResult unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
         return UNIT_REFUSED;
     __try
     {
-        if (puppet->entity && registered(puppet, game) && !puppet->death.dying &&
-            !puppet->form.transitioning && !puppet->predictive && puppet->watching != PUPPET_WATCH)
+        /* Only a controlled or stationary copy that is still alive gets its AI back. */
+        int restorable = !puppet->death.dying && !puppet->form.transitioning &&
+                         !puppet->predictive && puppet->watching != PUPPET_WATCH;
+        if (puppet->entity && registered(puppet, game) && restorable)
         {
             shared.api.action((void*)puppet->entity, NULL, STEAM_ACT_STOP, 1, 0, 0);
             shared.api.action((void*)puppet->entity, NULL, STEAM_ACT_SET_BEHAVIOR, puppet->behavior,
