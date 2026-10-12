@@ -4,23 +4,27 @@
 #include "../../../../common/src/protocol.h"
 #include "../../../../common/src/monster_protocol.h"
 typedef struct StateClient StateClient;
-StateClient* state_client_create(const char* host, unsigned short port, const char* name, FILE* log);
+StateClient* state_client_create(const char* host, unsigned short port, const char* name,
+                                 FILE* log);
 void state_client_destroy(StateClient* client);
 /* All operations belong to the worker thread, never the game hook. */
 void state_client_publish(StateClient* client, const MpState* state, unsigned long now);
 void state_client_update(StateClient* client, unsigned long now);
 const char* state_client_map(const StateClient* client);
 int state_client_connected(const StateClient* client);
-int state_client_peer(const StateClient* client, unsigned int id, unsigned long now, MpState* state);
+int state_client_peer(const StateClient* client, unsigned int id, unsigned long now,
+                      MpState* state);
 void state_client_stats(const StateClient* client);
 #define MP_MAX_PEERS 16u
-typedef struct PeerState {
+typedef struct PeerState
+{
     MpState state;
     uint32_t session;
     int present;
     char name[16];
 } PeerState;
-typedef struct ShotEvent {
+typedef struct ShotEvent
+{
     MpShot shot;
     uint32_t id, session;
 } ShotEvent;
@@ -28,12 +32,14 @@ int state_client_peer_info(const StateClient*, unsigned int, unsigned long, Peer
 /* Reject captures from an inactive, expired or replaced local world. */
 int state_client_send_shot(StateClient*, const MpShot*, unsigned long now);
 int state_client_take_shot(StateClient*, ShotEvent*);
-typedef struct MonsterState {
+typedef struct MonsterState
+{
     MpMonsterState state;
     uint32_t authority_id, authority_session;
     int present;
 } MonsterState;
-typedef struct MonsterEvent {
+typedef struct MonsterEvent
+{
     MpMonsterEvent event;
     uint32_t authority_id, authority_session;
 } MonsterEvent;
@@ -42,7 +48,8 @@ typedef struct MonsterEvent {
 void state_client_monster_claim(StateClient*);
 int state_client_monster_authority(const StateClient*, uint32_t*, uint32_t*, int*);
 int state_client_publish_monster(StateClient*, const MpMonsterState*, unsigned long now);
-int state_client_monster_at(const StateClient*, unsigned int slot, unsigned long now, MonsterState*);
+int state_client_monster_at(const StateClient*, unsigned int slot, unsigned long now,
+                            MonsterState*);
 int state_client_monster(const StateClient*, unsigned long now, MonsterState*);
 int state_client_send_monster_event(StateClient*, const MpMonsterEvent*, unsigned long now);
 int state_client_take_monster_event(StateClient*, MonsterEvent*);

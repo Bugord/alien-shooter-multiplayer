@@ -2,18 +2,30 @@
 #define ASMP_MULTIPLAYER_H
 #include "../game/actor.h"
 #include "client/state_client.h"
-enum RemoteState { RS_IDLE, RS_WAITING, RS_SPAWNING, RS_SPAWNED, RS_BACKOFF, RS_ABANDONED };
-typedef struct RemoteResult {
+enum RemoteState
+{
+    RS_IDLE,
+    RS_WAITING,
+    RS_SPAWNING,
+    RS_SPAWNED,
+    RS_BACKOFF,
+    RS_ABANDONED
+};
+typedef struct RemoteResult
+{
     unsigned int id;
     ActorResult actor;
     enum RemoteState state;
     int cleanup_failed;
 } RemoteResult;
-typedef struct MultiplayerFrame {
+typedef struct MultiplayerFrame
+{
     uint32_t world_epoch;
     unsigned int count, shots_applied, shots_discarded;
     RemoteResult remote[MP_MAX_PEERS];
 } MultiplayerFrame;
+/* Return convention: functions returning int return 1 on success (or "yes")
+   and 0 otherwise. This module never reports -1. */
 /* Explicit engine binding keeps the coordinator independently testable. */
 int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api);
 int multiplayer_enable(uintptr_t image_base);

@@ -2,7 +2,8 @@
 #define ASMP_PROBE_H
 #include <stdint.h>
 #include "steam_profile.h"
-typedef struct Snapshot {
+typedef struct Snapshot
+{
     uintptr_t game, army, player;
     uint32_t army_index, animation;
     int32_t health, max_health, weapon_slot, weapon_vid, current_ammo, current_ammo_raw;
@@ -14,8 +15,28 @@ typedef struct Snapshot {
     uint32_t in_level, map_started, world_load;
     char map[128];
 } Snapshot;
-enum ProbeResult { PROBE_OK, PROBE_NO_GAME, PROBE_GAME_TYPE, PROBE_NO_ARMY,
-                   PROBE_NO_PLAYER, PROBE_PLAYER_TYPE, PROBE_BAD_COORDS, PROBE_READ_FAULT };
+enum ProbeResult
+{
+    PROBE_OK,
+    PROBE_NO_GAME,
+    PROBE_GAME_TYPE,
+    PROBE_NO_ARMY,
+    PROBE_NO_PLAYER,
+    PROBE_PLAYER_TYPE,
+    PROBE_BAD_COORDS,
+    PROBE_READ_FAULT
+};
 enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output);
 const char* probe_result_name(enum ProbeResult result);
+
+/* True when the probe found a level the local player is in. Death can
+   temporarily remove the
+ * player: the probe still validates GAME and parses
+   its map before returning NO_PLAYER or
+ * NO_ARMY, so those count as in level. */
+static inline int probe_in_level(const Snapshot* sample, enum ProbeResult result)
+{
+    return (result == PROBE_OK || result == PROBE_NO_PLAYER || result == PROBE_NO_ARMY) &&
+           sample->in_level;
+}
 #endif

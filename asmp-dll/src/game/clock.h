@@ -9,7 +9,9 @@
 static __inline DWORD clock_ms(void)
 {
     LARGE_INTEGER frequency, counter;
-    QueryPerformanceFrequency(&frequency); QueryPerformanceCounter(&counter);
-    return (DWORD)((unsigned long long)counter.QuadPart * 1000ull / (unsigned long long)frequency.QuadPart);
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (DWORD)((unsigned long long)counter.QuadPart * 1000ull /
+                   (unsigned long long)frequency.QuadPart);
 }
 #endif

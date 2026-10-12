@@ -6,8 +6,8 @@ diagnostic launcher; see [Build, test and review](../diagnostics/README.md).
 
 | Path | Contents |
 | --- | --- |
-| [src/game/](src/game) | Engine API: verified addresses and layouts ([steam_profile.h](src/game/steam_profile.h)), probe, actor factory and combat API, menu/text bindings, and the vtable hooks (tick, world load, action, display) |
-| [src/multiplayer/](src/multiplayer) | Production runtime ([runtime.c](src/multiplayer/runtime.c)), session state machine ([session.c](src/multiplayer/session.c)) and remote-player coordinator ([multiplayer.c](src/multiplayer/multiplayer.c)) with its position interpolation ([pose_buffer.c](src/multiplayer/pose_buffer.c)) |
+| [src/game/](src/game) | Engine API: verified addresses and layouts ([steam_profile.h](src/game/steam_profile.h)), probe, `world_list.h` (read-only native list access), `entity_class.h` (entity class to vtable), actor factory and combat API, menu/text bindings, and the vtable hooks (tick, world load, action, display) |
+| [src/multiplayer/](src/multiplayer) | Production runtime ([runtime.c](src/multiplayer/runtime.c)), session state machine ([session.c](src/multiplayer/session.c)) and remote-player coordinator ([multiplayer.c](src/multiplayer/multiplayer.c)) with its position interpolation ([pose_buffer.c](src/multiplayer/pose_buffer.c)); retry timing shared by the coordinators is in [retry_policy.h](src/multiplayer/retry_policy.h) |
 | [src/multiplayer/client/](src/multiplayer/client) | Connection, packet validation and peer state; no native game entities |
 
 `game/` does not include `multiplayer/` headers; it receives callbacks instead.
@@ -16,8 +16,8 @@ Layers, threading and replica lifecycle are described in
 
 `game/unit_puppet.*` provides the bounded ground/flying UNIT experiments (optionally
 one linked class-9 weapon part):
-validated Steam bindings, a single borrowed-entity registry and selective
-action/movement/destructor hooks.
+validated Steam bindings, 64 fixed `UnitPuppet` slots (each borrows one entity) and
+selective action/movement/destructor hooks that find the owning slot by entity.
 `diagnostics/src/monster_probe.*` feeds its
 offline test poses; the opt-in network coordinator uses the same native API. See
 [Monster checkpoints](../docs/monster-sync-stages.md) for ownership and limits.
@@ -28,6 +28,18 @@ Animation scripts, object creations, damage/death scripts and shared counters
 are isolated before the factory runs. Art/resource pointers remain borrowed;
 the pinned DLL retains the copies through native destruction. This is a
 visual attack/death API; authoritative damage replay remains outside this checkpoint.
+
+`game/unit_puppet.*`, `game/unit_combat.*` and `game/unit_death.*` share one
+return convention, `enum UnitResult` in `game/unit_result.h`: `UNIT_OK`,
+`UNIT_REFUSED` (not done) and `UNIT_FAULT` (native fault).
+
+Slots are handles: `unit_puppet_slot(i)`, `unit_combat_slot(i)` and
+`unit_death_slot(i)` return opaque `UnitPuppet*`, `UnitCombat*` and `UnitDeath*`,
+and every function takes its slot as the first argument. There is no "current
+slot" global or macro. `MonsterSlot` (monster_sync.c), `UnitPuppet`, `UnitCombat`
+and `Remote` (multiplayer.c) group their fields into nested structs such as
+`world`, `retry`, `form`, `prediction` and `stats`. Every `.c` file starts with a
+comment naming its module and layer.
 
 `multiplayer/monster_sync.*` owns the opt-in single-monster network lifecycle,
 world/session guards, bounded worker handoffs and game-thread application.

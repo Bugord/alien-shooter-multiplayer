@@ -1,8 +1,8 @@
 /**
  * @file server.h
  * @brief Top level server-side multiplayer logic.
- * 
-*/
+ *
+ */
 #ifndef MULTIPLAYER_SERVER_H
 #define MULTIPLAYER_SERVER_H
 

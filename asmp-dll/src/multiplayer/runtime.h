@@ -7,8 +7,15 @@
 #include "../game/tick_hook.h"
 #include "../game/action_hook.h"
 #include "../game/display_hook.h"
-enum RuntimeState { RT_OFF, RT_STARTING, RT_RUNNING, RT_STOPPING };
-typedef struct RuntimeFrame {
+enum RuntimeState
+{
+    RT_OFF,
+    RT_STARTING,
+    RT_RUNNING,
+    RT_STOPPING
+};
+typedef struct RuntimeFrame
+{
     DWORD milliseconds;
     LONG tick;
     int session_result;
@@ -20,18 +27,20 @@ typedef struct RuntimeFrame {
     MonsterSyncFrame monster;
 } RuntimeFrame;
 typedef void (*FrameObserver)(const RuntimeFrame*);
-typedef struct RuntimeConfig {
+typedef struct RuntimeConfig
+{
     int direct;
     enum MonsterRole monster_role;
     int monster_gallery;
     char host[16], name[16];
     unsigned short port;
-    FILE* log; /* Worker only; remains open through stop. */
+    FILE* log;              /* Worker only; remains open through stop. */
     FrameObserver observer; /* Game thread, must not block or perform I/O. */
 } RuntimeConfig;
 /* Bindings let lifecycle tests inject engine/hook failures without native calls.
    Production start always uses the validated Steam bindings. */
-typedef struct RuntimeBindings {
+typedef struct RuntimeBindings
+{
     int (*actor_bind)(uintptr_t, ActorEngine*);
     int (*session_enable)(uintptr_t);
     int (*action_install)(uintptr_t, ReplicaFilter, ShotCallback);

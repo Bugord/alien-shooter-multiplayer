@@ -7,7 +7,8 @@
 #include "../../asmp-dll/src/multiplayer/runtime.h"
 
 #define FRAME_QUEUE_CAPACITY 1024u
-typedef struct FrameSample {
+typedef struct FrameSample
+{
     DWORD milliseconds;
     LONG tick;
     int session_result;
@@ -20,11 +21,20 @@ typedef struct FrameSample {
     enum SessionState session;
     enum DisplayResult display;
 } FrameSample;
-typedef struct TickStats {
+typedef struct TickStats
+{
     LONG calls, captured, dropped, installed;
 } TickStats;
-enum DiagTickResult { DIAG_TICK_OK, DIAG_TICK_ALREADY_USED, DIAG_TICK_INVALID_SLOT,
-    DIAG_TICK_PROTECT_FAILED, DIAG_TICK_SLOT_CHANGED, DIAG_TICK_PROTECTION_RESTORE_FAILED, DIAG_TICK_BUSY };
+enum DiagTickResult
+{
+    DIAG_TICK_OK,
+    DIAG_TICK_ALREADY_USED,
+    DIAG_TICK_INVALID_SLOT,
+    DIAG_TICK_PROTECT_FAILED,
+    DIAG_TICK_SLOT_CHANGED,
+    DIAG_TICK_PROTECTION_RESTORE_FAILED,
+    DIAG_TICK_BUSY
+};
 
 /* One active installation. The DLL must stay loaded even after stopping:
    another thread may already have fetched the old hook pointer from the vtable. */

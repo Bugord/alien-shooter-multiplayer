@@ -3,12 +3,34 @@
 #include "../../asmp-dll/src/game/unit_puppet.h"
 #include "../../asmp-dll/src/game/unit_combat.h"
 #include "../../asmp-dll/src/game/unit_death.h"
-enum MonsterProbeState { MONSTER_PROBE_OFF, MONSTER_PROBE_MENU, MONSTER_PROBE_SEARCH,
-    MONSTER_PROBE_RUNNING, MONSTER_PROBE_DONE, MONSTER_PROBE_FAILED };
-enum MonsterProbeKind { MONSTER_PROBE_GROUND, MONSTER_PROBE_FLYING, MONSTER_PROBE_FLYING_RELOAD, MONSTER_PROBE_COMBAT, MONSTER_PROBE_DEATH };
-enum MonsterCombatPhase { MONSTER_COMBAT_IDLE, MONSTER_COMBAT_DAMAGE, MONSTER_COMBAT_ATTACK,
-    MONSTER_COMBAT_RECOVER, MONSTER_COMBAT_DEATH, MONSTER_COMBAT_DISPOSED };
-typedef struct MonsterProbeFrame {
+enum MonsterProbeState
+{
+    MONSTER_PROBE_OFF,
+    MONSTER_PROBE_MENU,
+    MONSTER_PROBE_SEARCH,
+    MONSTER_PROBE_RUNNING,
+    MONSTER_PROBE_DONE,
+    MONSTER_PROBE_FAILED
+};
+enum MonsterProbeKind
+{
+    MONSTER_PROBE_GROUND,
+    MONSTER_PROBE_FLYING,
+    MONSTER_PROBE_FLYING_RELOAD,
+    MONSTER_PROBE_COMBAT,
+    MONSTER_PROBE_DEATH
+};
+enum MonsterCombatPhase
+{
+    MONSTER_COMBAT_IDLE,
+    MONSTER_COMBAT_DAMAGE,
+    MONSTER_COMBAT_ATTACK,
+    MONSTER_COMBAT_RECOVER,
+    MONSTER_COMBAT_DEATH,
+    MONSTER_COMBAT_DISPOSED
+};
+typedef struct MonsterProbeFrame
+{
     enum MonsterProbeState state;
     unsigned int phase, violations;
     int event, cleanup, reloaded;
