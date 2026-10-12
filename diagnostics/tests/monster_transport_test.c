@@ -15,6 +15,26 @@
         }                                                                                          \
     } while (0)
 
+/* Windows reserves blocks of about 100 UDP ports (see `netsh int ipv4 show
+   excludedportrange protocol=udp`), so a PID-derived port can be refused.
+   Steps past such a block until the server binds; *port receives the port. */
+#define TEST_PORT_ATTEMPTS 16
+#define TEST_PORT_STEP 101
+#define DEATH_WAIT_STEP_MS 10u
+#define DEATH_WAIT_LIMIT_MS 1000u
+#define LATE_JOIN_WAIT_LIMIT_MS 2000u
+static MpServer* create_test_server(unsigned short first_port, unsigned short* port)
+{
+    for (unsigned int attempt = 0; attempt < TEST_PORT_ATTEMPTS; ++attempt)
+    {
+        *port = (unsigned short)(first_port + attempt * TEST_PORT_STEP);
+        MpServer* server = mp_server_create(*port, 4);
+        if (server)
+            return server;
+    }
+    return NULL;
+}
+
 static MpState player;
 static uint32_t raw_session;
 static int raw_publish_player;
@@ -445,9 +465,10 @@ int main(void)
     CHECK(!mp_monster_event_decode(event_packet, sizeof(event_packet), &event_decoded));
     codec_forms(&monster, &event);
 
-    unsigned short port = (unsigned short)(51000 + GetCurrentProcessId() % 3000);
+    unsigned short port;
     CHECK(!_putenv_s("ASMP_MAP", "maps\\survive_01.map"));
-    MpServer* server = mp_server_create(port, 4);
+    MpServer* server =
+        create_test_server((unsigned short)(51000 + GetCurrentProcessId() % 3000), &port);
     CHECK(server);
     CHECK(!_putenv_s("ASMP_MAP", ""));
     StateClient* host = state_client_create("127.0.0.1", port, "Host", NULL);
@@ -612,7 +633,24 @@ int main(void)
     CHECK(!state_client_take_monster_event(client, &received));
     StateClient* rows_late = state_client_create("127.0.0.1", port, "RowsLate", NULL);
     CHECK(rows_late);
-    pump(server, host, client, rows_late, NULL, 300);
+
+    /* Wait until the late client has all four rows instead of a fixed 300 ms. */
+    for (unsigned int waited = 0; waited < LATE_JOIN_WAIT_LIMIT_MS; waited += DEATH_WAIT_STEP_MS)
+    {
+        pump(server, host, client, rows_late, NULL, DEATH_WAIT_STEP_MS);
+        if (waited < 300u)
+            continue;
+
+        unsigned int seen = 0;
+        for (unsigned int i = 0; i < 4u; ++i)
+        {
+            if (state_client_monster_at(rows_late, row_ids[i] - 1u, GetTickCount(), &observed))
+                ++seen;
+        }
+        if (seen == 4u)
+            break;
+    }
+
     for (unsigned int i = 0; i < 4u; ++i)
     {
         CHECK(state_client_monster_at(rows_late, row_ids[i] - 1u, GetTickCount(), &observed));
@@ -624,7 +662,14 @@ int main(void)
     rows[0].death_animation = 15;
     ++rows[0].sequence;
     CHECK(state_client_publish_monster(host, &rows[0], GetTickCount()));
-    pump(server, host, client, late, NULL, 50);
+    /* Wait for the death over localhost UDP instead of a fixed 50 ms. */
+    for (unsigned int waited = 0; waited < DEATH_WAIT_LIMIT_MS; waited += DEATH_WAIT_STEP_MS)
+    {
+        pump(server, host, client, late, NULL, DEATH_WAIT_STEP_MS);
+        if (state_client_monster_at(client, row_ids[0] - 1u, GetTickCount(), &observed) &&
+            !observed.state.alive)
+            break;
+    }
     CHECK(state_client_monster_at(client, row_ids[0] - 1u, GetTickCount(), &observed) &&
           !observed.state.alive);
     CHECK(state_client_monster_at(client, row_ids[1] - 1u, GetTickCount(), &observed) &&
