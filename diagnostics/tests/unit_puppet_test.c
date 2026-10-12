@@ -149,9 +149,9 @@ static int __fastcall foreign(void* e, void* unused, unsigned int k, intptr_t a,
     (void)c;
     return 66;
 }
-static int form_observer(uintptr_t world, uintptr_t entity, uintptr_t* descriptor,
-                         unsigned int* index, unsigned int* revision, int* pending,
-                         unsigned int requested)
+static enum UnitResult form_observer(uintptr_t world, uintptr_t entity, uintptr_t* descriptor,
+                                     unsigned int* index, unsigned int* revision, int* pending,
+                                     unsigned int requested)
 {
     if (world != (uintptr_t)game || entity != (uintptr_t)unit)
         return 0;

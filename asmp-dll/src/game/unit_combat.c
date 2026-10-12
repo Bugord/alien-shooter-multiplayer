@@ -108,7 +108,7 @@ static int private_form(const UnitCombat* fixture, uintptr_t vid)
     return -1;
 }
 
-int unit_combat_bind(uintptr_t base, ActorCreate* out)
+enum UnitResult unit_combat_bind(uintptr_t base, ActorCreate* out)
 {
     static const unsigned char signature[] = {0x55, 0x8B, 0xEC, 0x6A, 0xFF};
     static const unsigned char cannon[] = {0x55, 0x8B, 0xEC, 0x56, 0x8B, 0xF1, 0xE8, 0x55};
@@ -123,20 +123,20 @@ int unit_combat_bind(uintptr_t base, ActorCreate* out)
             memcmp((void*)(base + STEAM_TERRAIN_DESTROY_RVA), terrain, sizeof(terrain)) ||
             *(uintptr_t*)(base + STEAM_CANNON_VTABLE_RVA) != base + STEAM_CANNON_DESTROY_RVA ||
             *(uintptr_t*)(base + STEAM_TERRAIN_VTABLE_RVA) != base + STEAM_TERRAIN_DESTROY_RVA)
-            return 0;
+            return UNIT_REFUSED;
         *out = (ActorCreate)(base + STEAM_ACTOR_CREATE_RVA);
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return 0;
+        return UNIT_REFUSED;
     }
 }
-int unit_combat_init(uintptr_t base, ActorCreate create, ActorDestroy destroy,
-                     UnitAnimation animation)
+enum UnitResult unit_combat_init(uintptr_t base, ActorCreate create, ActorDestroy destroy,
+                                 UnitAnimation animation)
 {
     if (shared.initialized || !base || !create || !destroy || !animation)
-        return 0;
+        return UNIT_REFUSED;
     memset(fixtures, 0, sizeof(fixtures));
     shared.base = base;
     shared.create = create;
@@ -145,7 +145,7 @@ int unit_combat_init(uintptr_t base, ActorCreate create, ActorDestroy destroy,
     shared.initialized = 1;
     for (unsigned int i = 0; i < UNIT_COMBAT_CAPACITY; ++i)
         fixtures[i].state = COMBAT_FIXTURE_READY;
-    return 1;
+    return UNIT_OK;
 }
 static int supported(uintptr_t vid, unsigned int index, unsigned int class_id)
 {
@@ -443,7 +443,8 @@ static int created_entities_valid(const UnitCombatSample* s)
 
 /* Caller in SEH, fixture already owned. Records the map baseline, creates
    the entity through the native factory and verifies it. Returns 1 or -1. */
-static int create_fixture_entity(UnitCombat* fixture, uintptr_t game, const UnitPuppetPose* pose)
+static enum UnitResult create_fixture_entity(UnitCombat* fixture, uintptr_t game,
+                                             const UnitPuppetPose* pose)
 {
     uintptr_t child = fixture->sources.part;
     fixture->baseline.count = 0;
@@ -453,7 +454,7 @@ static int create_fixture_entity(UnitCombat* fixture, uintptr_t game, const Unit
     if (before.fault || before.private_entities)
     {
         fixture->state = COMBAT_FIXTURE_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
 
     uintptr_t created = (uintptr_t)shared.create((void*)game, NULL, fixture->root_vid, pose->x,
@@ -466,31 +467,31 @@ static int create_fixture_entity(UnitCombat* fixture, uintptr_t game, const Unit
         s.private_entities != (child ? 2u : 1u) || !s.sources_unchanged || s.fault)
     {
         fixture->state = COMBAT_FIXTURE_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
     fixture->child = s.child;
     if (!created_entities_valid(&s))
     {
         fixture->state = COMBAT_FIXTURE_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
     shared.animation((void*)s.root, NULL, STEAM_ANIM_IDLE);
     if (s.child)
         shared.animation((void*)s.child, NULL, STEAM_ANIM_IDLE);
-    return 1;
+    return UNIT_OK;
 }
 
-static int spawn_type(UnitCombat* fixture, const Snapshot* local, unsigned int index,
-                      const UnitPuppetPose* pose, enum SpawnMode mode)
+static enum UnitResult spawn_type(UnitCombat* fixture, const Snapshot* local, unsigned int index,
+                                  const UnitPuppetPose* pose, enum SpawnMode mode)
 {
     if (!spawn_request_valid(fixture, local, index, pose))
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (*(uintptr_t*)local->game != shared.base + STEAM_GAME_VTABLE_RVA)
-            return 0;
+            return UNIT_REFUSED;
         if (!prepare_spawn(fixture, local->game, index, mode))
-            return 0;
+            return UNIT_REFUSED;
         fixture->game = local->game;
         fixture->state = COMBAT_FIXTURE_OWNED;
         return create_fixture_entity(fixture, local->game, pose);
@@ -498,34 +499,34 @@ static int spawn_type(UnitCombat* fixture, const Snapshot* local, unsigned int i
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         fixture->state = fixture->game ? COMBAT_FIXTURE_FAULT : COMBAT_FIXTURE_READY;
-        return -1;
+        return UNIT_FAULT;
     }
 }
-int unit_combat_spawn_type(UnitCombat* fixture, const Snapshot* local, unsigned int index,
-                           const UnitPuppetPose* pose, int host)
+enum UnitResult unit_combat_spawn_type(UnitCombat* fixture, const Snapshot* local,
+                                       unsigned int index, const UnitPuppetPose* pose, int host)
 {
     return spawn_type(fixture, local, index, pose, host ? SPAWN_HOST : SPAWN_FIXTURE);
 }
-int unit_combat_spawn_predictive(UnitCombat* fixture, const Snapshot* local, unsigned int index,
-                                 const UnitPuppetPose* pose)
+enum UnitResult unit_combat_spawn_predictive(UnitCombat* fixture, const Snapshot* local,
+                                             unsigned int index, const UnitPuppetPose* pose)
 {
     return spawn_type(fixture, local, index, pose, SPAWN_PREDICTIVE);
 }
-int unit_combat_spawn(UnitCombat* fixture, const Snapshot* local)
+enum UnitResult unit_combat_spawn(UnitCombat* fixture, const Snapshot* local)
 {
     if (!local)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         uintptr_t source =
             *(uintptr_t*)(local->game + STEAM_GAME_VID_TABLE_OFFSET + MONSTER_VID_MONSTER1 * 4u);
         uintptr_t child = source ? *(uintptr_t*)(source + STEAM_VID_LINKED_OFFSET) : 0;
         if (!supported(child, MONSTER_VID_MONSTER1_PART, STEAM_PUPPET_PART_CLASS))
-            return 0;
+            return UNIT_REFUSED;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return 0;
+        return UNIT_REFUSED;
     }
     UnitPuppetPose pose = {0};
     pose.x = local->x + 80.0f;
@@ -742,27 +743,27 @@ static UnitCombat* find_live_fixture(uintptr_t game, uintptr_t entity)
 
 /* Caller in SEH, just before native CHANGE_VID to the frozen form. Clones the
    frozen form of the current origin. Returns 1 prepared, 0 not ours, -1 fault. */
-static int prepare_frozen_form(UnitCombat* fixture, uintptr_t game, unsigned int requested_vid,
-                               uintptr_t* private_vid)
+static enum UnitResult prepare_frozen_form(UnitCombat* fixture, uintptr_t game,
+                                           unsigned int requested_vid, uintptr_t* private_vid)
 {
     if (!mp_monster_origin(fixture->form.current_vid) ||
         requested_vid != fixture->form.current_vid + MONSTER_VID_FROZEN_DELTA)
-        return 0;
+        return UNIT_REFUSED;
     uintptr_t source = *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + requested_vid * 4u);
     if (!supported(source, requested_vid, STEAM_UNIT_CLASS) ||
         !clone_form(fixture, game, source, requested_vid, private_vid))
-        return -1;
-    return 1;
+        return UNIT_FAULT;
+    return UNIT_OK;
 }
 
 /* Caller in SEH. Reports the settled form of entity. Returns 1 or -1 fault. */
-static int describe_settled_form(UnitCombat* fixture, uintptr_t game, uintptr_t entity,
-                                 uintptr_t* private_vid, unsigned int* current_vid,
-                                 unsigned int* revision, int* transitioning)
+static enum UnitResult describe_settled_form(UnitCombat* fixture, uintptr_t game, uintptr_t entity,
+                                             uintptr_t* private_vid, unsigned int* current_vid,
+                                             unsigned int* revision, int* transitioning)
 {
     UnitCombatSample sample = unit_combat_sample(fixture, game, 0);
     if (sample.fault)
-        return -1;
+        return UNIT_FAULT;
     /* A destructor can run after a successor has already entered
        the map; retain the previous armor transition for that call. */
     uintptr_t descriptor = *(uintptr_t*)(entity + STEAM_ENTITY_VID_OFFSET);
@@ -772,19 +773,19 @@ static int describe_settled_form(UnitCombat* fixture, uintptr_t game, uintptr_t 
     *revision = sample.form_revision;
     *transitioning = mp_monster_armored(index) &&
                      *(unsigned int*)(entity + STEAM_ENTITY_ANIM_OFFSET) == STEAM_ANIM_DEATH;
-    return 1;
+    return UNIT_OK;
 }
 
-int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* private_vid,
-                               unsigned int* current_vid, unsigned int* revision,
-                               int* transitioning, unsigned int requested_vid)
+enum UnitResult unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* private_vid,
+                                           unsigned int* current_vid, unsigned int* revision,
+                                           int* transitioning, unsigned int requested_vid)
 {
-    int result = 0;
+    enum UnitResult result = UNIT_REFUSED;
     __try
     {
         UnitCombat* fixture = find_live_fixture(game, entity);
         if (!fixture)
-            result = 0;
+            result = UNIT_REFUSED;
         else if (requested_vid)
             result = prepare_frozen_form(fixture, game, requested_vid, private_vid);
         else
@@ -793,7 +794,7 @@ int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* priv
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        result = -1;
+        result = UNIT_FAULT;
     }
     return result;
 }
@@ -932,53 +933,53 @@ static int destroy_spawned_entities(const UnitCombatSample* s)
     return 1;
 }
 
-int unit_combat_remove(UnitCombat* fixture, uintptr_t game)
+enum UnitResult unit_combat_remove(UnitCombat* fixture, uintptr_t game)
 {
     if (!fixture)
-        return 0;
+        return UNIT_REFUSED;
     if (fixture->state == COMBAT_FIXTURE_OFF || !fixture->game)
-        return 1;
+        return UNIT_OK;
     UnitCombatSample s = unit_combat_sample(fixture, game, 0);
     if (s.fault)
-        return 0;
+        return UNIT_REFUSED;
     if (!s.root && !s.child && !s.private_entities && !s.fault)
     {
         mark_fixture_ready(fixture);
-        return 1;
+        return UNIT_OK;
     }
     /* A native fault is never retried in this world. */
     if (fixture->state == COMBAT_FIXTURE_ABANDONED)
-        return 0;
+        return UNIT_REFUSED;
     fixture->state = COMBAT_FIXTURE_ABANDONED;
     __try
     {
         if (fixture->graph.count)
         {
             if (!remove_forms(fixture, game))
-                return 0;
+                return UNIT_REFUSED;
             mark_fixture_ready(fixture);
-            return 1;
+            return UNIT_OK;
         }
         if (!destroy_spawned_entities(&s))
-            return 0;
+            return UNIT_REFUSED;
         s = unit_combat_sample(fixture, game, 0);
         if (s.fault || s.root || s.child || s.private_entities)
-            return 0;
+            return UNIT_REFUSED;
         mark_fixture_ready(fixture);
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return 0;
+        return UNIT_REFUSED;
     }
 }
-int unit_combat_stop(void)
+enum UnitResult unit_combat_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_COMBAT_CAPACITY; ++i)
         if (fixtures[i].game)
-            return 0;
+            return UNIT_REFUSED;
     for (unsigned int i = 0; i < UNIT_COMBAT_CAPACITY; ++i)
         fixtures[i].state = COMBAT_FIXTURE_OFF;
     shared.initialized = 0;
-    return 1;
+    return UNIT_OK;
 }

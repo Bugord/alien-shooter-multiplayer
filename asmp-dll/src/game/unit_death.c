@@ -56,34 +56,34 @@ static uintptr_t vtable(const UnitDeath* death, unsigned int i)
 {
     return death->base + entity_class_vtable_rva(death->classes[i]);
 }
-int unit_death_init(uintptr_t base, ActorCreate create)
+enum UnitResult unit_death_init(uintptr_t base, ActorCreate create)
 {
     static const unsigned char cannon[] = {0x55, 0x8B, 0xEC, 0x56, 0x8B, 0xF1, 0xE8, 0x55};
     static const unsigned char terrain[] = {0x55, 0x8B, 0xEC, 0x56, 0x8B, 0xF1, 0xE8, 0x15};
     if (initialized || !base || !create)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (memcmp((void*)(base + STEAM_CANNON_DESTROY_RVA), cannon, sizeof(cannon)) ||
             memcmp((void*)(base + STEAM_TERRAIN_DESTROY_RVA), terrain, sizeof(terrain)) ||
             *(uintptr_t*)(base + STEAM_CANNON_VTABLE_RVA) != base + STEAM_CANNON_DESTROY_RVA ||
             *(uintptr_t*)(base + STEAM_TERRAIN_VTABLE_RVA) != base + STEAM_TERRAIN_DESTROY_RVA)
-            return 0;
+            return UNIT_REFUSED;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return 0;
+        return UNIT_REFUSED;
     }
     UnitDeathEngine api = {create, (ActorDestroy)(base + STEAM_CANNON_DESTROY_RVA),
                            (ActorDestroy)(base + STEAM_TERRAIN_DESTROY_RVA),
                            (ActorDestroy)(base + STEAM_SPRITE_DESTROY_RVA)};
     return unit_death_initialize(base, &api);
 }
-int unit_death_initialize(uintptr_t base, const UnitDeathEngine* api)
+enum UnitResult unit_death_initialize(uintptr_t base, const UnitDeathEngine* api)
 {
     if (initialized || !base || !api || !api->create || !api->cannon_destroy ||
         !api->terrain_destroy || !api->part_destroy)
-        return 0;
+        return UNIT_REFUSED;
     memset(slots, 0, sizeof(slots));
     for (unsigned int i = 0; i < UNIT_DEATH_SLOT_COUNT; ++i)
     {
@@ -95,7 +95,7 @@ int unit_death_initialize(uintptr_t base, const UnitDeathEngine* api)
         slots[i].state = DEATH_READY;
     }
     initialized = 1;
-    return 1;
+    return UNIT_OK;
 }
 #define DEATH_EDGE_COUNT (sizeof(edges) / sizeof(edges[0]))
 
@@ -481,16 +481,16 @@ static int play_request_valid(const UnitDeath* death, const UnitPuppetPose* p,
            isfinite(p->y) && isfinite(p->z) && p->direction <= 255u;
 }
 
-int unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
-                    unsigned int animation)
+enum UnitResult unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
+                                unsigned int animation)
 {
     if (!play_request_valid(death, p, animation))
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!game || *(uintptr_t*)game != death->base + STEAM_GAME_VTABLE_RVA ||
             !prepare(death, game))
-            return 0;
+            return UNIT_REFUSED;
         death->game = game;
         death->state = DEATH_OWNED;
         void* e =
@@ -501,29 +501,29 @@ int unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
         if (!e || s.fault || !s.entities || !find_private(death, game, (uintptr_t)e, root_index))
         {
             death->state = DEATH_FAULT;
-            return -1;
+            return UNIT_FAULT;
         }
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         death->state = death->game ? DEATH_FAULT : DEATH_READY;
-        return -1;
+        return UNIT_FAULT;
     }
 }
-static int play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
-                     unsigned int animation, unsigned int source_vid, int armor)
+static enum UnitResult play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
+                                 unsigned int animation, unsigned int source_vid, int armor)
 {
     if (!play_request_valid(death, p, animation))
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         unsigned int multiplicity;
         if (!game || *(uintptr_t*)game != death->base + STEAM_GAME_VTABLE_RVA ||
             !prepare_type(death, game, source_vid, animation, armor, &multiplicity))
-            return 0;
+            return UNIT_REFUSED;
         if (!death->count)
-            return 1;
+            return UNIT_OK;
         death->game = game;
         death->state = DEATH_OWNED;
         void* e = NULL;
@@ -534,33 +534,33 @@ static int play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
             if (!e || !find_private(death, game, (uintptr_t)e, 0u))
             {
                 death->state = DEATH_FAULT;
-                return -1;
+                return UNIT_FAULT;
             }
         }
         UnitDeathSample s = unit_death_sample(death, game);
         if (!e || s.fault || !s.entities || !find_private(death, game, (uintptr_t)e, 0u))
         {
             death->state = DEATH_FAULT;
-            return -1;
+            return UNIT_FAULT;
         }
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         death->state = death->game ? DEATH_FAULT : DEATH_READY;
-        return -1;
+        return UNIT_FAULT;
     }
 }
-int unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
-                         unsigned int animation, unsigned int source_vid)
+enum UnitResult unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
+                                     unsigned int animation, unsigned int source_vid)
 {
     return play_type(death, game, p, animation, source_vid, 0);
 }
-int unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
-                          unsigned int source_vid)
+enum UnitResult unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
+                                      unsigned int source_vid)
 {
     if (!mp_monster_armored(source_vid))
-        return 0;
+        return UNIT_REFUSED;
     return play_type(death, game, p, STEAM_ANIM_DEATH, source_vid, 1);
 }
 /* Caller in SEH. Finds one of our entities without a parent (a part goes with
@@ -603,23 +603,23 @@ static void destroy_private_entity(const UnitDeath* death, uintptr_t entity, uns
     destroy((void*)entity, NULL, 1);
 }
 
-int unit_death_remove(UnitDeath* death, uintptr_t game)
+enum UnitResult unit_death_remove(UnitDeath* death, uintptr_t game)
 {
     if (!death)
-        return 0;
+        return UNIT_REFUSED;
     if (death->state == DEATH_OFF || !death->game)
-        return 1;
+        return UNIT_OK;
     UnitDeathSample s = unit_death_sample(death, game);
     if (s.fault)
-        return 0;
+        return UNIT_REFUSED;
     if (!s.entities)
     {
         death->game = 0;
         death->state = DEATH_READY;
-        return 1;
+        return UNIT_OK;
     }
     if (death->state == DEATH_ABANDONED)
-        return 0;
+        return UNIT_REFUSED;
     death->state = DEATH_ABANDONED;
     __try
     {
@@ -631,30 +631,30 @@ int unit_death_remove(UnitDeath* death, uintptr_t game)
             uintptr_t found = 0;
             int index = -1;
             if (!find_private_root(death, game, &found, &index))
-                return 0;
+                return UNIT_REFUSED;
             if (!found)
                 break;
             destroy_private_entity(death, found, (unsigned int)index);
         }
         s = unit_death_sample(death, game);
         if (s.fault || s.entities)
-            return 0;
+            return UNIT_REFUSED;
         death->game = 0;
         death->state = DEATH_READY;
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return 0;
+        return UNIT_REFUSED;
     }
 }
-int unit_death_stop(void)
+enum UnitResult unit_death_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_DEATH_SLOT_COUNT; ++i)
         if (slots[i].game)
-            return 0;
+            return UNIT_REFUSED;
     for (unsigned int i = 0; i < UNIT_DEATH_SLOT_COUNT; ++i)
         slots[i].state = DEATH_OFF;
     initialized = 0;
-    return 1;
+    return UNIT_OK;
 }

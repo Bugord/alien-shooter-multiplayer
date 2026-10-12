@@ -8,6 +8,7 @@
    visual graph and the native effects created from them. The struct is
    private to unit_death.c. Every per-slot function below takes the slot as
    its first argument. */
+/* Functions returning enum UnitResult follow unit_result.h. */
 typedef struct UnitDeath UnitDeath;
 
 typedef struct UnitDeathSample
@@ -27,22 +28,22 @@ typedef struct UnitDeathEngine
    map visuals and remain until map reload. No scripts, damage or unit collision.
    All operations except init/stop execute on the game thread. Init/stop are global;
    stop refuses while any slot still owns effects. */
-int unit_death_init(uintptr_t base, ActorCreate);
-int unit_death_initialize(uintptr_t base, const UnitDeathEngine*);
+enum UnitResult unit_death_init(uintptr_t base, ActorCreate);
+enum UnitResult unit_death_initialize(uintptr_t base, const UnitDeathEngine*);
 /* Returns slot `index`, or NULL when index >= UNIT_DEATH_SLOT_COUNT. Slots are
    static and live as long as the DLL; every function rejects a NULL slot. */
 UnitDeath* unit_death_slot(unsigned int index);
 /* Strict VID50 compatibility fixture; play_type follows the given source UNIT CRE. */
-int unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose*,
-                         unsigned int animation, unsigned int source_vid);
+enum UnitResult unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose*,
+                                     unsigned int animation, unsigned int source_vid);
 /* Armor break visuals only. A native class-2 successor is deliberately omitted;
    the authoritative live form is created/replicated separately. Large90 uses
    the medium70 shell fragments as an intentional custom effect on both peers. */
-int unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose*,
-                          unsigned int source_vid);
-int unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose*,
-                    unsigned int animation);
+enum UnitResult unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose*,
+                                      unsigned int source_vid);
+enum UnitResult unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose*,
+                                unsigned int animation);
 UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game);
-int unit_death_remove(UnitDeath* death, uintptr_t game);
-int unit_death_stop(void);
+enum UnitResult unit_death_remove(UnitDeath* death, uintptr_t game);
+enum UnitResult unit_death_stop(void);
 #endif

@@ -24,6 +24,9 @@ typedef struct MultiplayerFrame
     unsigned int count, shots_applied, shots_discarded;
     RemoteResult remote[MP_MAX_PEERS];
 } MultiplayerFrame;
+/* Return convention: functions returning int return 1 on success (or "yes")
+   and 0 otherwise;
+ * this module never reports -1. */
 /* Explicit engine binding keeps the coordinator independently testable. */
 int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api);
 int multiplayer_enable(uintptr_t image_base);

@@ -48,6 +48,9 @@ typedef struct MonsterSyncFrame
     unsigned int gallery_count, gallery_active, gallery_dead, gallery_faults;
     MonsterGallerySample gallery[MP_MONSTER_CAPACITY];
 } MonsterSyncFrame;
+/* Return convention: functions returning int return 1 on success and 0 when
+   refused or not done;
+ * this module never reports -1. */
 int monster_sync_enable(uintptr_t base, enum MonsterRole);
 int monster_sync_initialize(uintptr_t base, enum MonsterRole, const UnitPuppetEngine*, ActorCreate);
 /* Worker only; all handoffs are bounded. No engine work in these operations. */

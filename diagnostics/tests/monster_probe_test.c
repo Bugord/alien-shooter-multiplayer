@@ -33,19 +33,19 @@ static void expect_probe_slot(const UnitPuppet* puppet)
     if (puppet != &probe_puppet)
         ++wrong_slot_calls;
 }
-int unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
+enum UnitResult unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
 {
     (void)base;
     memset(out, 0, sizeof(*out));
     return bind_ok;
 }
-int unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
+enum UnitResult unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
 {
     (void)base;
     (void)api;
     return 1;
 }
-int unit_puppet_attach_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
+enum UnitResult unit_puppet_attach_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
     expect_probe_slot(puppet);
     (void)game;
@@ -58,7 +58,7 @@ UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
     (void)game;
     return sample;
 }
-int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* p)
+enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* p)
 {
     expect_probe_slot(puppet);
     (void)game;
@@ -72,20 +72,20 @@ int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* 
     sample.animation = p->moving ? 2u : 0u;
     return 1;
 }
-int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
+enum UnitResult unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
 {
     expect_probe_slot(puppet);
     (void)game;
     ++released;
     return release_ok;
 }
-int unit_puppet_stop(void)
+enum UnitResult unit_puppet_stop(void)
 {
     ++stopped;
     return stop_ok;
 }
-int unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
-                       unsigned int animation)
+enum UnitResult unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
+                                   unsigned int animation)
 {
     expect_probe_slot(puppet);
     (void)game;
@@ -93,7 +93,7 @@ int unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
     (void)animation;
     return 0;
 }
-int unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
+enum UnitResult unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
 {
     expect_probe_slot(puppet);
     (void)game;
@@ -113,13 +113,13 @@ static void expect_probe_fixture(const UnitCombat* fixture)
     if (fixture != &probe_fixture)
         ++wrong_slot_calls;
 }
-int unit_combat_bind(uintptr_t base, ActorCreate* out)
+enum UnitResult unit_combat_bind(uintptr_t base, ActorCreate* out)
 {
     (void)base;
     (void)out;
     return 0;
 }
-int unit_combat_init(uintptr_t base, ActorCreate c, ActorDestroy d, UnitAnimation a)
+enum UnitResult unit_combat_init(uintptr_t base, ActorCreate c, ActorDestroy d, UnitAnimation a)
 {
     (void)base;
     (void)c;
@@ -127,7 +127,7 @@ int unit_combat_init(uintptr_t base, ActorCreate c, ActorDestroy d, UnitAnimatio
     (void)a;
     return 0;
 }
-int unit_combat_spawn(UnitCombat* fixture, const Snapshot* local_sample)
+enum UnitResult unit_combat_spawn(UnitCombat* fixture, const Snapshot* local_sample)
 {
     expect_probe_fixture(fixture);
     (void)local_sample;
@@ -141,13 +141,13 @@ UnitCombatSample unit_combat_sample(UnitCombat* fixture, uintptr_t game, int com
     (void)compare_sources;
     return s;
 }
-int unit_combat_remove(UnitCombat* fixture, uintptr_t game)
+enum UnitResult unit_combat_remove(UnitCombat* fixture, uintptr_t game)
 {
     expect_probe_fixture(fixture);
     (void)game;
     return 1;
 }
-int unit_combat_stop(void)
+enum UnitResult unit_combat_stop(void)
 {
     return 1;
 }

@@ -29,6 +29,10 @@ are isolated before the factory runs. Art/resource pointers remain borrowed;
 the pinned DLL retains the copies through native destruction. This is a
 visual attack/death API; authoritative damage replay remains outside this checkpoint.
 
+`game/unit_puppet.*`, `game/unit_combat.*` and `game/unit_death.*` share one
+return convention, `enum UnitResult` in `game/unit_result.h`: `UNIT_OK`,
+`UNIT_REFUSED` (not done) and `UNIT_FAULT` (native fault).
+
 `multiplayer/monster_sync.*` owns the opt-in single-monster network lifecycle,
 world/session guards, bounded worker handoffs and game-thread application.
 Host observation leaves native AI, commands, movement and damage untouched;

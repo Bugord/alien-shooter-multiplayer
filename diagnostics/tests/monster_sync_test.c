@@ -137,7 +137,7 @@ static uintptr_t mock_root(const MockSlot* m)
 {
     return 100u + (uintptr_t)(m - mock_slots) * 2u;
 }
-int unit_death_init(uintptr_t base, ActorCreate create)
+enum UnitResult unit_death_init(uintptr_t base, ActorCreate create)
 {
     CHECK(base == 1u && create);
     return 1;
@@ -146,9 +146,9 @@ void unit_puppet_set_form_observer(UnitFormObserver observer)
 {
     CHECK(observer);
 }
-int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* private_vid,
-                               unsigned int* vid, unsigned int* revision, int* transitioning,
-                               unsigned int requested_vid)
+enum UnitResult unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* private_vid,
+                                           unsigned int* vid, unsigned int* revision,
+                                           int* transitioning, unsigned int requested_vid)
 {
     (void)game;
     (void)entity;
@@ -159,8 +159,8 @@ int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* priv
     (void)requested_vid;
     return 0;
 }
-int unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
-                    unsigned int animation)
+enum UnitResult unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
+                                unsigned int animation)
 {
     MockSlot* v = death_mock(death);
     MockSlot* m = death_owner(death);
@@ -180,7 +180,7 @@ UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
     s.entities = v->f_visual_owned ? 2u : 0u;
     return s;
 }
-int unit_death_remove(UnitDeath* death, uintptr_t game)
+enum UnitResult unit_death_remove(UnitDeath* death, uintptr_t game)
 {
     MockSlot* v = death_mock(death);
     CHECK(game == local.game);
@@ -190,14 +190,14 @@ int unit_death_remove(UnitDeath* death, uintptr_t game)
     v->f_visual_owned = 0;
     return 1;
 }
-int unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
-                         unsigned int animation, unsigned int vid)
+enum UnitResult unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
+                                     unsigned int animation, unsigned int vid)
 {
     death_mock(death)->f_visual_vid = vid;
     return unit_death_play(death, game, pose, animation);
 }
-int unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
-                          unsigned int vid)
+enum UnitResult unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
+                                      unsigned int vid)
 {
     MockSlot* m = death_owner(death);
     CHECK(death_is_armor(death));
@@ -205,7 +205,7 @@ int unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose
     CHECK((!m->f_owned && !m->f_selected) || (m->f_owned && m->f_selected == 1 && vid == 90u));
     return unit_death_play_type(death, game, pose, 15u, vid);
 }
-int unit_death_stop(void)
+enum UnitResult unit_death_stop(void)
 {
     for (unsigned int i = 0; i < MP_MONSTER_CAPACITY; ++i)
         CHECK(!mock_slots[i].f_visual_owned && !armor_slots[i].f_visual_owned);
@@ -243,19 +243,19 @@ static UnitPuppetEngine api(void)
     out.animation = dummy_animation;
     return out;
 }
-int unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
+enum UnitResult unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
 {
     CHECK(base == 1u);
     *out = api();
     return 1;
 }
-int unit_combat_bind(uintptr_t base, ActorCreate* out)
+enum UnitResult unit_combat_bind(uintptr_t base, ActorCreate* out)
 {
     CHECK(base == 1u);
     *out = dummy_create;
     return 1;
 }
-int unit_puppet_install(uintptr_t base, const UnitPuppetEngine* engine)
+enum UnitResult unit_puppet_install(uintptr_t base, const UnitPuppetEngine* engine)
 {
     CHECK(base == 1u && engine && !installed);
     if (fail_install)
@@ -263,13 +263,13 @@ int unit_puppet_install(uintptr_t base, const UnitPuppetEngine* engine)
     installed = 1;
     return 1;
 }
-int unit_combat_init(uintptr_t base, ActorCreate create, ActorDestroy destroy,
-                     UnitAnimation animation)
+enum UnitResult unit_combat_init(uintptr_t base, ActorCreate create, ActorDestroy destroy,
+                                 UnitAnimation animation)
 {
     CHECK(base == 1u && create && destroy && animation);
     return !fail_init;
 }
-int unit_puppet_watch_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
+enum UnitResult unit_puppet_watch_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
     MockSlot* m = puppet_mock(puppet);
     CHECK(game == local.game && player == local.player && installed && !m->f_selected);
@@ -281,8 +281,8 @@ int unit_puppet_watch_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player
     m->unit.captured_deaths = 0;
     return 1;
 }
-int unit_puppet_attach_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
-                              uintptr_t entity)
+enum UnitResult unit_puppet_attach_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
+                                          uintptr_t entity)
 {
     MockSlot* m = puppet_mock(puppet);
     CHECK(game == local.game && player == local.player && entity == m->f_root && m->f_owned &&
@@ -301,14 +301,14 @@ int unit_puppet_attach_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t play
     m->unit.entity = entity;
     return 1;
 }
-int unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
+enum UnitResult unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
 {
     MockSlot* m = puppet_mock(puppet);
     CHECK(game == local.game && m->f_selected == 2 && m->f_owned);
     m->unit.predictive = 1;
     return 1;
 }
-int unit_combat_spawn(UnitCombat* fixture, const Snapshot* spawn)
+enum UnitResult unit_combat_spawn(UnitCombat* fixture, const Snapshot* spawn)
 {
     MockSlot* m = fixture_mock(fixture);
     CHECK(spawn && spawn->game == local.game && !m->f_owned);
@@ -318,8 +318,8 @@ int unit_combat_spawn(UnitCombat* fixture, const Snapshot* spawn)
     m->f_spawn_health = spawn->health;
     return fail_spawn ? -1 : 1;
 }
-int unit_combat_spawn_type(UnitCombat* fixture, const Snapshot* spawn, unsigned int vid,
-                           const UnitPuppetPose* pose, int host)
+enum UnitResult unit_combat_spawn_type(UnitCombat* fixture, const Snapshot* spawn, unsigned int vid,
+                                       const UnitPuppetPose* pose, int host)
 {
     MockSlot* m = fixture_mock(fixture);
     CHECK(pose);
@@ -338,13 +338,13 @@ int unit_combat_spawn_type(UnitCombat* fixture, const Snapshot* spawn, unsigned 
     m->unit.moving = pose->moving;
     return result;
 }
-int unit_combat_spawn_predictive(UnitCombat* fixture, const Snapshot* spawn, unsigned int vid,
-                                 const UnitPuppetPose* pose)
+enum UnitResult unit_combat_spawn_predictive(UnitCombat* fixture, const Snapshot* spawn,
+                                             unsigned int vid, const UnitPuppetPose* pose)
 {
     return unit_combat_spawn_type(fixture, spawn, vid, pose, 0);
 }
-int unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
-                                 uintptr_t entity)
+enum UnitResult unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
+                                             uintptr_t entity)
 {
     MockSlot* m = puppet_mock(puppet);
     CHECK(m->f_owned && entity == m->f_root && m->f_spawn_host);
@@ -368,7 +368,7 @@ UnitCombatSample unit_combat_sample(UnitCombat* fixture, uintptr_t game, int com
     s.transitioning = m->unit.transitioning;
     return s;
 }
-int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* pose)
+enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* pose)
 {
     MockSlot* m = puppet_mock(puppet);
     CHECK(game == local.game && m->f_selected == 2 && pose);
@@ -384,7 +384,7 @@ int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* 
     m->unit.moving = pose->moving;
     return 1;
 }
-int unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int value)
+enum UnitResult unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int value)
 {
     MockSlot* m = puppet_mock(puppet);
     CHECK(game == local.game && m->f_selected == 2);
@@ -393,8 +393,8 @@ int unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int value)
     m->unit.health = value;
     return 1;
 }
-int unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
-                       unsigned int animation)
+enum UnitResult unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
+                                   unsigned int animation)
 {
     MockSlot* m = puppet_mock(puppet);
     CHECK(game == local.game && m->f_selected == 2 && animation == STEAM_ANIM_ATTACK);
@@ -409,7 +409,7 @@ UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
     CHECK(game == local.game);
     return m->unit;
 }
-int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
+enum UnitResult unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
 {
     MockSlot* m = puppet_mock(puppet);
     CHECK(game == local.game);
@@ -422,7 +422,7 @@ int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
     m->replay_sequence = 0;
     return 1;
 }
-int unit_combat_remove(UnitCombat* fixture, uintptr_t game)
+enum UnitResult unit_combat_remove(UnitCombat* fixture, uintptr_t game)
 {
     MockSlot* m = fixture_mock(fixture);
     CHECK(game == local.game);
@@ -444,14 +444,14 @@ int unit_combat_remove(UnitCombat* fixture, uintptr_t game)
     m->f_owned = 0;
     return 1;
 }
-int unit_combat_stop(void)
+enum UnitResult unit_combat_stop(void)
 {
     ++fixture_stops;
     for (unsigned int i = 0; i < MP_MONSTER_CAPACITY; ++i)
         CHECK(!mock_slots[i].f_owned);
     return 1;
 }
-int unit_puppet_stop(void)
+enum UnitResult unit_puppet_stop(void)
 {
     ++unhooks;
     for (unsigned int i = 0; i < MP_MONSTER_CAPACITY; ++i)

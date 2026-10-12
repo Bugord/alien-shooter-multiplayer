@@ -105,7 +105,7 @@ static UnitPuppet* route(void* entity, int part)
     return NULL;
 }
 
-int unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
+enum UnitResult unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
 {
     static const struct
     {
@@ -125,21 +125,21 @@ int unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
     {
         for (unsigned int i = 0; i < sizeof(signatures) / sizeof(signatures[0]); ++i)
             if (memcmp((void*)(base + signatures[i].rva), signatures[i].bytes, 8))
-                return 0;
+                return UNIT_REFUSED;
         const unsigned int rvas[] = {STEAM_UNIT_DESTROY_RVA, STEAM_UNIT_ACTION_RVA,
                                      STEAM_UNIT_UPDATE_RVA, STEAM_UNIT_MOVEMENT_RVA};
         for (unsigned int i = 0; i < 4; ++i)
             if (*(uintptr_t*)(base + STEAM_UNIT_VTABLE_RVA + i * sizeof(uintptr_t)) !=
                 base + rvas[i])
-                return 0;
+                return UNIT_REFUSED;
         if (*(uintptr_t*)(base + STEAM_SPRITE_VTABLE_RVA) != base + STEAM_SPRITE_DESTROY_RVA ||
             *(uintptr_t*)(base + STEAM_SPRITE_VTABLE_RVA + 4u) != base + STEAM_SPRITE_ACTION_RVA ||
             *(uintptr_t*)(base + STEAM_SPRITE_VTABLE_RVA + 8u) != base + STEAM_UNIT_UPDATE_RVA)
-            return 0;
+            return UNIT_REFUSED;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return 0;
+        return UNIT_REFUSED;
     }
     out->action = (ActorAction)(base + STEAM_UNIT_ACTION_RVA);
     out->destroy = (ActorDestroy)(base + STEAM_UNIT_DESTROY_RVA);
@@ -149,7 +149,7 @@ int unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
     out->rotate = (ActorRotate)(base + STEAM_ACTOR_ROTATE_RVA);
     out->part_action = (ActorAction)(base + STEAM_SPRITE_ACTION_RVA);
     out->part_destroy = (ActorDestroy)(base + STEAM_SPRITE_DESTROY_RVA);
-    return 1;
+    return UNIT_OK;
 }
 /* Caller is inside SEH. Never dereference a cached entity before finding it
    in the current map list. Destructor hook invalidates before native deletion,
@@ -663,13 +663,13 @@ static void* __fastcall on_part_destroy(void* e, void* unused, int release)
     return scoped_part_destroy(puppet, e, release);
 }
 
-int unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
+enum UnitResult unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
 {
     if (shared.action.slot || shared.movement.slot || shared.destroy.slot ||
         shared.part_action.slot || shared.part_destroy.slot || !base || !api || !api->action ||
         !api->destroy || !api->movement || !api->animation || !api->move || !api->rotate ||
         !api->part_action || !api->part_destroy)
-        return 0;
+        return UNIT_REFUSED;
     memset(puppets, 0, sizeof(puppets));
     memset(&shared, 0, sizeof(shared));
     shared.base = base;
@@ -686,11 +686,11 @@ int unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
         slot_install(&shared.action, vt + 1, (void*)api->action, (void*)on_action) != SLOT_OK)
     {
         unit_puppet_stop();
-        return 0;
+        return UNIT_REFUSED;
     }
     for (unsigned int i = 0; i < UNIT_PUPPET_CAPACITY; ++i)
         puppets[i].state = UNIT_PUPPET_READY;
-    return 1;
+    return UNIT_OK;
 }
 /* What attach looks for: any suitable UNIT except the player, or exactly
    `required` when it is nonzero, in the given mode. */
@@ -854,131 +854,133 @@ static int try_attach_entity(UnitPuppet* puppet, const AttachRequest* request, u
     return 1;
 }
 
-static int attach(UnitPuppet* puppet, uintptr_t game, uintptr_t player, uintptr_t required,
-                  enum PuppetMode watching)
+static enum UnitResult attach(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
+                              uintptr_t required, enum PuppetMode watching)
 {
     if (!puppet || puppet->state != UNIT_PUPPET_READY)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!game || *(uintptr_t*)game != shared.base + STEAM_GAME_VTABLE_RVA)
-            return 0;
+            return UNIT_REFUSED;
         for (unsigned int cat = 0; cat < STEAM_TICK_ENTITY_LIST_COUNT; ++cat)
         {
             uintptr_t* entries;
             unsigned int count;
             if (!world_list_read(game, cat, &entries, &count))
-                return 0;
+                return UNIT_REFUSED;
             for (unsigned int i = 0; i < count; ++i)
             {
                 AttachRequest request = {game, player, required, watching};
                 if (try_attach_entity(puppet, &request, entries[i], cat))
-                    return 1;
+                    return UNIT_OK;
             }
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
-    return 0;
+    return UNIT_REFUSED;
 }
-int unit_puppet_attach_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
+enum UnitResult unit_puppet_attach_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
     return attach(puppet, game, player, 0, PUPPET_CONTROLLED);
 }
-int unit_puppet_watch_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
+enum UnitResult unit_puppet_watch_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
     return attach(puppet, game, player, 0, PUPPET_WATCH);
 }
-int unit_puppet_attach_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
-                              uintptr_t entity)
+enum UnitResult unit_puppet_attach_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
+                                          uintptr_t entity)
 {
-    return entity ? attach(puppet, game, player, entity, PUPPET_CONTROLLED) : 0;
+    return entity ? attach(puppet, game, player, entity, PUPPET_CONTROLLED) : UNIT_REFUSED;
 }
-int unit_puppet_watch_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player, uintptr_t entity)
+enum UnitResult unit_puppet_watch_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
+                                         uintptr_t entity)
 {
-    return entity ? attach(puppet, game, player, entity, PUPPET_WATCH) : 0;
+    return entity ? attach(puppet, game, player, entity, PUPPET_WATCH) : UNIT_REFUSED;
 }
-int unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
-                                 uintptr_t entity)
+enum UnitResult unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
+                                             uintptr_t entity)
 {
-    return entity ? attach(puppet, game, player, entity, PUPPET_STATIONARY) : 0;
+    return entity ? attach(puppet, game, player, entity, PUPPET_STATIONARY) : UNIT_REFUSED;
 }
-int unit_puppet_host_kill(UnitPuppet* puppet, uintptr_t game)
+enum UnitResult unit_puppet_host_kill(UnitPuppet* puppet, uintptr_t game)
 {
     return unit_puppet_host_kill_variant(puppet, game, STEAM_ANIM_DEATH);
 }
-int unit_puppet_host_freeze(UnitPuppet* puppet, uintptr_t game)
+enum UnitResult unit_puppet_host_freeze(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet || !puppet->watching || puppet->death.dying ||
         puppet->state != UNIT_PUPPET_ACTIVE || !mp_monster_origin(puppet->form.current_vid))
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!registered(puppet, game))
-            return 0;
+            return UNIT_REFUSED;
         unsigned int frozen = puppet->form.current_vid + MONSTER_VID_FROZEN_DELTA;
         on_action((void*)puppet->entity, NULL, STEAM_ACT_CHANGE_VID, frozen, STEAM_ANIM_IDLE, 0);
         if (puppet->form.current_vid != frozen || !registered(puppet, game))
-            return 0;
+            return UNIT_REFUSED;
         shared.api.animation((void*)puppet->entity, NULL, STEAM_ANIM_IDLE);
         shared.api.action((void*)puppet->entity, NULL, STEAM_ACT_SET_BEHAVIOR, 0, 0, 0);
         shared.api.action((void*)puppet->entity, NULL, STEAM_ACT_CLEAR_COMMAND, 0, 0, 0);
         shared.api.action((void*)puppet->entity, NULL, STEAM_ACT_CLEAR_STACK, 0, 0, 0);
         shared.api.action((void*)puppet->entity, NULL, STEAM_ACT_STOP, 1, 0, 0);
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
 }
-int unit_puppet_host_kill_variant(UnitPuppet* puppet, uintptr_t game, unsigned int animation)
+enum UnitResult unit_puppet_host_kill_variant(UnitPuppet* puppet, uintptr_t game,
+                                              unsigned int animation)
 {
     if (!puppet || !puppet->watching || puppet->death.dying || puppet->state != UNIT_PUPPET_ACTIVE)
-        return 0;
+        return UNIT_REFUSED;
     if (animation != STEAM_ANIM_DEATH && animation != STEAM_ANIM_GIB_DEATH)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!registered(puppet, game))
-            return 0;
+            return UNIT_REFUSED;
         on_action((void*)puppet->entity, NULL, STEAM_ACT_SET_HP,
                   animation == STEAM_ANIM_GIB_DEATH ? -100000 : 0, 0, 0);
         (void)unit_puppet_sample(puppet, game);
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
 }
-int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* p)
+enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* p)
 {
     if (!puppet || puppet->watching || puppet->death.dying || puppet->state != UNIT_PUPPET_ACTIVE ||
         !p || !_finite(p->x) || !_finite(p->y) || !_finite(p->z) || !_finite(p->velocity) ||
         p->direction > 255u || p->moving > 1u)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!registered(puppet, game))
         {
             mark_entity_lost(puppet);
-            return 0;
+            return UNIT_REFUSED;
         }
         if (!child_registered(puppet))
         {
             puppet->state = UNIT_PUPPET_FAULT;
-            return -1;
+            return UNIT_FAULT;
         }
         unsigned int animation = *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET);
         if (puppet->predictive && (animation == STEAM_ANIM_DEATH ||
                                    animation == STEAM_ANIM_GIB_DEATH || puppet->form.transitioning))
-            return 1;
+            return UNIT_OK;
         puppet->pose = *p;
         shared.api.move((void*)puppet->entity, NULL, p->x, p->y, p->z);
         shared.api.rotate((void*)puppet->entity, NULL, p->direction);
@@ -995,12 +997,12 @@ int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* 
             *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET) !=
                 (p->moving && p->velocity != 0 ? STEAM_ANIM_RUN : STEAM_ANIM_IDLE))
             select_animation(puppet, (void*)puppet->entity);
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
 }
 static int sanitized(uintptr_t vid)
@@ -1017,99 +1019,100 @@ static int sanitized(uintptr_t vid)
             return 0;
     return 1;
 }
-int unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
+enum UnitResult unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || puppet->death.dying)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!registered(puppet, game) || !child_registered(puppet) ||
             !prediction_descriptor(puppet, puppet->vid, 1) ||
             (puppet->child && !prediction_descriptor(puppet, puppet->child_vid, 0)))
-            return 0;
+            return UNIT_REFUSED;
         puppet->predictive = 1;
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
 }
-int unit_puppet_prediction_test_hit(UnitPuppet* puppet, uintptr_t game, int damage, int freeze)
+enum UnitResult unit_puppet_prediction_test_hit(UnitPuppet* puppet, uintptr_t game, int damage,
+                                                int freeze)
 {
     if (!puppet || !puppet->predictive || puppet->state != UNIT_PUPPET_ACTIVE ||
         puppet->death.dying || damage <= 0 || damage > 100000)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!registered(puppet, game))
-            return 0;
+            return UNIT_REFUSED;
         on_action((void*)puppet->entity, NULL, STEAM_ACT_DAMAGE, damage, 0, 0);
         if (puppet->state != UNIT_PUPPET_ACTIVE || !registered(puppet, game))
-            return 0;
+            return UNIT_REFUSED;
         unsigned int animation = *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET);
         if (freeze && (animation == STEAM_ANIM_DEATH || animation == STEAM_ANIM_GIB_DEATH))
         {
             if (!mp_monster_origin(puppet->form.current_vid))
-                return 0;
+                return UNIT_REFUSED;
             unsigned int frozen = puppet->form.current_vid + MONSTER_VID_FROZEN_DELTA;
             on_action((void*)puppet->entity, NULL, STEAM_ACT_CHANGE_VID, frozen, STEAM_ANIM_IDLE,
                       0);
             if (puppet->form.current_vid != frozen || !registered(puppet, game))
-                return 0;
+                return UNIT_REFUSED;
             on_action((void*)puppet->entity, NULL, STEAM_ACT_SET_ANIMATION, STEAM_ANIM_IDLE, 0, 0);
             on_action((void*)puppet->entity, NULL, STEAM_ACT_SET_BEHAVIOR, 0, 0, 0);
             on_action((void*)puppet->entity, NULL, STEAM_ACT_CLEAR_COMMAND, 0, 0, 0);
             on_action((void*)puppet->entity, NULL, STEAM_ACT_CLEAR_STACK, 0, 0, 0);
             on_action((void*)puppet->entity, NULL, STEAM_ACT_STOP, 1, 0, 0);
         }
-        return puppet->state == UNIT_PUPPET_ACTIVE ? 1 : 0;
+        return puppet->state == UNIT_PUPPET_ACTIVE ? UNIT_OK : UNIT_REFUSED;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
 }
-int unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int health)
+enum UnitResult unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int health)
 {
     if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || health <= 0 ||
         health > 100000 || puppet->death.dying)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!registered(puppet, game) || !child_registered(puppet) || !sanitized(puppet->vid) ||
             (puppet->child && !sanitized(puppet->child_vid)))
-            return 0;
+            return UNIT_REFUSED;
         shared.api.action((void*)puppet->entity, NULL, STEAM_ACT_SET_HP, health, 0, 0);
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
 }
-int unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
-                       unsigned int animation)
+enum UnitResult unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
+                                   unsigned int animation)
 {
     if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || !sequence ||
         (animation != STEAM_ANIM_ATTACK && animation != STEAM_ANIM_DEATH))
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!registered(puppet, game) || !child_registered(puppet) || !sanitized(puppet->vid) ||
             (puppet->child && !sanitized(puppet->child_vid)))
-            return 0;
+            return UNIT_REFUSED;
         uint32_t delta = sequence - puppet->last_event;
         if (puppet->last_event && (!delta || delta >= 0x80000000u))
         {
             ++puppet->stats.duplicates;
-            return 0;
+            return UNIT_REFUSED;
         }
         if (puppet->death.dying)
-            return 0;
+            return UNIT_REFUSED;
         puppet->combat = 1;
         if (animation == STEAM_ANIM_DEATH)
         {
@@ -1124,41 +1127,41 @@ int unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
         }
         puppet->last_event = sequence;
         ++puppet->stats.replayed;
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
 }
-int unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
+enum UnitResult unit_puppet_test_damage(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet || puppet->state != UNIT_PUPPET_ACTIVE)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (!registered(puppet, game) || !child_registered(puppet))
-            return 0;
+            return UNIT_REFUSED;
         int hp = *(int*)(puppet->entity + STEAM_ENTITY_HEALTH_OFFSET);
         on_action((void*)puppet->entity, NULL, STEAM_ACT_DAMAGE, 100000, 0, 0);
         on_action((void*)puppet->entity, NULL, STEAM_ACT_SET_HP, 0, 0, 0);
         if (*(int*)(puppet->entity + STEAM_ENTITY_HEALTH_OFFSET) != hp)
-            return 0;
+            return UNIT_REFUSED;
         if (puppet->child)
         {
             hp = *(int*)(puppet->child + STEAM_ENTITY_HEALTH_OFFSET);
             on_part_action((void*)puppet->child, NULL, STEAM_ACT_DAMAGE, 100000, 0, 0);
             on_part_action((void*)puppet->child, NULL, STEAM_ACT_SET_HP, 0, 0, 0);
             if (*(int*)(puppet->child + STEAM_ENTITY_HEALTH_OFFSET) != hp)
-                return 0;
+                return UNIT_REFUSED;
         }
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return -1;
+        return UNIT_FAULT;
     }
 }
 /* Caller in SEH, root registered. Notices an armor transition or a death in
@@ -1303,10 +1306,10 @@ UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
     copy_tracked_state(puppet, &s);
     return s;
 }
-int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
+enum UnitResult unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet)
-        return 0;
+        return UNIT_REFUSED;
     __try
     {
         if (puppet->entity && registered(puppet, game) && !puppet->death.dying &&
@@ -1321,19 +1324,19 @@ int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
         puppet->child = 0;
         if (puppet->state != UNIT_PUPPET_OFF)
             puppet->state = UNIT_PUPPET_READY;
-        return 1;
+        return UNIT_OK;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         puppet->state = UNIT_PUPPET_FAULT;
-        return 0;
+        return UNIT_REFUSED;
     }
 }
-int unit_puppet_stop(void)
+enum UnitResult unit_puppet_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_PUPPET_CAPACITY; ++i)
         if (puppets[i].entity)
-            return 0;
+            return UNIT_REFUSED;
     int a = slot_stop(&shared.action) == SLOT_OK;
     int m = slot_stop(&shared.movement) == SLOT_OK;
     int d = slot_stop(&shared.destroy) == SLOT_OK;
