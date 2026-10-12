@@ -16,8 +16,8 @@ Layers, threading and replica lifecycle are described in
 
 `game/unit_puppet.*` provides the bounded ground/flying UNIT experiments (optionally
 one linked class-9 weapon part):
-validated Steam bindings, a single borrowed-entity registry and selective
-action/movement/destructor hooks.
+validated Steam bindings, 64 fixed `UnitPuppet` slots (each borrows one entity) and
+selective action/movement/destructor hooks that find the owning slot by entity.
 `diagnostics/src/monster_probe.*` feeds its
 offline test poses; the opt-in network coordinator uses the same native API. See
 [Monster checkpoints](../docs/monster-sync-stages.md) for ownership and limits.
@@ -32,6 +32,14 @@ visual attack/death API; authoritative damage replay remains outside this checkp
 `game/unit_puppet.*`, `game/unit_combat.*` and `game/unit_death.*` share one
 return convention, `enum UnitResult` in `game/unit_result.h`: `UNIT_OK`,
 `UNIT_REFUSED` (not done) and `UNIT_FAULT` (native fault).
+
+Slots are handles: `unit_puppet_slot(i)`, `unit_combat_slot(i)` and
+`unit_death_slot(i)` return opaque `UnitPuppet*`, `UnitCombat*` and `UnitDeath*`,
+and every function takes its slot as the first argument. There is no "current
+slot" global or macro. `MonsterSlot` (monster_sync.c), `UnitPuppet`, `UnitCombat`
+and `Remote` (multiplayer.c) group their fields into nested structs such as
+`world`, `retry`, `form`, `prediction` and `stats`. Every `.c` file starts with a
+comment naming its module and layer.
 
 `multiplayer/monster_sync.*` owns the opt-in single-monster network lifecycle,
 world/session guards, bounded worker handoffs and game-thread application.
