@@ -1,3 +1,7 @@
+/* Menu and overlay helpers: finds menu entities, loads maps, draws health bars and
+   names through the game's own render calls. Layer: game/ (engine API). Game thread only,
+   except the draw calls which run on the render thread from the EndScene hook. */
+
 #include <string.h>
 #include "ui.h"
 #include "world_list.h"
@@ -7,6 +11,9 @@ typedef void(__fastcall* LoadMap)(void*, void*, char*);
 typedef void(__fastcall* SetAnimation)(void*, void*, unsigned int);
 typedef void(__fastcall* DrawRect)(void*, void*, float, float, float, float, uint32_t);
 typedef void(__fastcall* DrawLabel)(void*, void*, float, float, const char*, uint32_t);
+
+/* Validates the native signatures used by this module. Returns 1 on success; later
+   calls fail while unbound. */
 int ui_bind(uintptr_t image)
 {
     if (base)
@@ -44,10 +51,14 @@ int ui_bind(uintptr_t image)
     base = image;
     return 1;
 }
+
+/* Unbinds the module; later calls become no-ops. */
 void ui_stop(void)
 {
     base = 0;
 }
+
+/* Finds the menu entity with this VID index and direction, or 0. */
 uintptr_t ui_menu_item(uintptr_t game, unsigned int vid, unsigned int direction)
 {
     __try
@@ -74,6 +85,8 @@ uintptr_t ui_menu_item(uintptr_t game, unsigned int vid, unsigned int direction)
     }
     return 0;
 }
+
+/* Copies the text of a menu text entity into `out`. Returns 1 only when it fit entirely. */
 int ui_text(uintptr_t entity, char* out, unsigned int capacity)
 {
     __try
@@ -94,6 +107,8 @@ int ui_text(uintptr_t entity, char* out, unsigned int capacity)
         return 0;
     }
 }
+
+/* Scripts read the status code from the entity's health field. */
 void ui_menu_status(uintptr_t entity, int status)
 {
     __try
@@ -114,6 +129,9 @@ void ui_button(uintptr_t entity, int disabled)
     {
     }
 }
+
+/* Loads `map` through the MAP load slot. The native string is created here and owned
+   by the load function. */
 int ui_load_map(uintptr_t game, const char* map)
 {
     __try
@@ -132,6 +150,9 @@ int ui_load_map(uintptr_t game, const char* map)
         return 0;
     }
 }
+
+/* Makes the weapon icons and ammo gauges of the state bar visible. Returns how many were
+   shown, or -1 on fault. */
 int ui_show_weapon_icons(uintptr_t game)
 {
     typedef int(__fastcall * EntityAction)(void*, void*, unsigned int, intptr_t, intptr_t,
@@ -168,6 +189,8 @@ int ui_show_weapon_icons(uintptr_t game)
     }
     return shown;
 }
+
+/* Draws a health bar above `entity` in screen space; the draw call borrows nothing. */
 void ui_health_bar(uintptr_t game, uintptr_t entity, int health, int max_health)
 {
     __try
@@ -192,6 +215,8 @@ void ui_health_bar(uintptr_t game, uintptr_t entity, int health, int max_health)
     {
     }
 }
+
+/* Draws an ASCII name above `entity`. */
 void ui_name_label(uintptr_t game, uintptr_t entity, const char* name)
 {
     __try

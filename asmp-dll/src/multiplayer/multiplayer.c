@@ -1,3 +1,9 @@
+/* Remote player coordinator: per peer it runs the explicit state machine (idle,
+   waiting, spawning, spawned, backoff, abandoned), spawns and removes replica entities,
+   applies interpolated poses and replays shots. Layer: multiplayer/ (applies received
+   data through the game/ engine API). Native work only on the game thread; the worker
+   hands data over through the incoming and outgoing locks. */
+
 #include <string.h>
 #include "multiplayer.h"
 #include "pose_buffer.h"
@@ -84,6 +90,8 @@ static MpShot outgoing[SHOT_QUEUE_CAPACITY];
 static unsigned int outgoing_head, outgoing_count;
 static volatile LONG event_drops;
 
+/* Binds the engine functions and resets all peers. Returns 0 if already enabled or an
+   engine function is missing. */
 int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
 {
     if (enabled || !image_base || !api || !api->create || !api->destroy || !api->move ||
@@ -113,12 +121,14 @@ int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
     return 1;
 }
 
+/* Binds the real engine and initializes. */
 int multiplayer_enable(uintptr_t image_base)
 {
     ActorEngine api;
     return actor_engine_bind(image_base, &api) && multiplayer_initialize(image_base, &api);
 }
 
+/* Worker: replaces the peer states the game thread will read next tick. */
 void multiplayer_publish(const PeerState peers[MP_MAX_PEERS], DWORD now)
 {
     if (!enabled)
@@ -129,6 +139,7 @@ void multiplayer_publish(const PeerState peers[MP_MAX_PEERS], DWORD now)
     ReleaseSRWLockExclusive(&incoming_lock);
 }
 
+/* Worker: queues a received shot for replay; a full queue is counted as dropped. */
 void multiplayer_receive_shot(const ShotEvent* event, DWORD now)
 {
     if (!enabled || !event || event->id >= MP_MAX_PEERS)
@@ -144,6 +155,8 @@ void multiplayer_receive_shot(const ShotEvent* event, DWORD now)
     ReleaseSRWLockExclusive(&incoming_lock);
 }
 
+/* Game thread, from the action hook: stages a local shot. Never takes the outgoing lock;
+   flush_local_shots moves it later. Ignored outside the current world. */
 void multiplayer_capture_shot(int x, int y, unsigned int weapon)
 {
     if (GetCurrentThreadId() != (DWORD)InterlockedCompareExchange(&game_thread, 0, 0))
@@ -171,6 +184,7 @@ void multiplayer_capture_shot(int x, int y, unsigned int weapon)
         InterlockedIncrement(&event_drops);
 }
 
+/* Worker: pops the next staged local shot. */
 int multiplayer_take_local_shot(MpShot* out)
 {
     int available = 0;
@@ -186,6 +200,7 @@ int multiplayer_take_local_shot(MpShot* out)
     return available;
 }
 
+/* Converts a received MpState into the Snapshot that Actor applies. */
 static void target_snapshot(Snapshot* out, const MpState* in)
 {
     memset(out, 0, sizeof(*out));
@@ -202,6 +217,8 @@ static void target_snapshot(Snapshot* out, const MpState* in)
     out->current_ammo = in->current_ammo;
 }
 
+/* Decision D1: one guarded removal after a native fault, then the peer stays abandoned
+   until the world changes. */
 static void abandon(Remote* r, uintptr_t game, ActorResult* update, int* cleanup_failed)
 {
     /* D1: exactly one guarded cleanup attempt after a native fault. */
@@ -223,6 +240,7 @@ static void interpolate_pose(Remote* r, const MpState* state, Snapshot* target, 
     pose_sample(&r->pose, now, &target->x, &target->y, &target->z);
 }
 
+/* Clears the cached weapon so the next pose arms the replica again. */
 static void forget_weapon(Remote* r)
 {
     r->weapon.last = -1;
@@ -230,6 +248,7 @@ static void forget_weapon(Remote* r)
     r->weapon.retry_at = 0;
 }
 
+/* Records this tick's result for peer `id`; a later event in the same tick replaces it. */
 static void report(MultiplayerFrame* frame, unsigned int id, const Remote* r,
                    const ActorResult* update, int cleanup_failed)
 {
@@ -245,6 +264,7 @@ static void report(MultiplayerFrame* frame, unsigned int id, const Remote* r,
     frame->remote[i].cleanup_failed = cleanup_failed;
 }
 
+/* Moves the peer to BACKOFF; the delay doubles from 2 s up to 30 s per failure. */
 static void schedule_retry(Remote* r, DWORD now)
 {
     DWORD delay = mp_retry_delay(r->retry.failures);
@@ -668,6 +688,9 @@ static void replay_pending_shots(const LocalTick* tick, MultiplayerFrame* result
     pending_count = keep;
 }
 
+/* One game-thread tick: updates the local world, flushes local shots, takes the peer
+   handoff, drives every peer's replica and replays pending shots. While stopping it removes
+   the replicas and sets `stopped` once none is left. */
 MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state, DWORD now)
 {
     MultiplayerFrame result = {0};
@@ -699,6 +722,7 @@ MultiplayerFrame multiplayer_tick(const Snapshot* local, enum ProbeResult state,
     return result;
 }
 
+/* Action hook filter: true if `entity` is one of our live replicas (game thread only). */
 int multiplayer_is_replica(uintptr_t entity)
 {
     if (GetCurrentThreadId() != (DWORD)InterlockedCompareExchange(&game_thread, 0, 0))
@@ -711,6 +735,7 @@ int multiplayer_is_replica(uintptr_t entity)
     return 0;
 }
 
+/* EndScene hook: draws health bars and names of spawned replicas (render thread, ASCII). */
 void multiplayer_draw(void)
 {
     if (GetCurrentThreadId() != (DWORD)InterlockedCompareExchange(&game_thread, 0, 0))
@@ -737,6 +762,7 @@ void multiplayer_draw(void)
     }
 }
 
+/* Asks the next game tick to remove all replicas; before the first tick it stops at once. */
 void multiplayer_request_stop(void)
 {
     InterlockedExchange(&stop_requested, 1);
@@ -745,11 +771,13 @@ void multiplayer_request_stop(void)
         InterlockedExchange(&stopped, 1);
 }
 
+/* True once every replica is gone and the game thread acknowledged. */
 int multiplayer_stopped(void)
 {
     return InterlockedCompareExchange(&stopped, 0, 0) != 0;
 }
 
+/* Clears the module state; refuses until multiplayer_stopped. */
 int multiplayer_stop(void)
 {
     if (!multiplayer_stopped())
@@ -770,6 +798,7 @@ int multiplayer_stop(void)
     return 1;
 }
 
+/* State of peer `id`, for logs and tests. */
 enum RemoteState multiplayer_remote_state(unsigned int id)
 {
     return id < MP_MAX_PEERS ? remote[id].state : RS_IDLE;

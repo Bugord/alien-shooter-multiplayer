@@ -1,8 +1,14 @@
+/* Lifecycle of one replica player entity (the Actor): create it with the native
+   factory, apply poses, arm and shoot through native actions, remove it. Layer: game/
+   (engine API). Every function runs on the game thread and wraps native access in SEH.
+   Return convention for the int functions: 1 success, 0 not ready, -1 native fault. */
+
 #include <windows.h>
 #include <string.h>
 #include "actor.h"
 #include "world_list.h"
 
+/* Clears the Actor and stores the bound engine functions. Call before any other function. */
 void actor_init(Actor* a, const ActorEngine* engine)
 {
     memset(a, 0, sizeof(*a));
@@ -10,6 +16,9 @@ void actor_init(Actor* a, const ActorEngine* engine)
     a->armed_weapon = -1;
 }
 /* Saved pointers are inspected only after the current map list owns them. */
+
+/* Checks that the saved entity is still in the current map's list with our private VID.
+   Must run inside SEH. */
 static int registered(const Actor* a, uintptr_t game)
 {
     if (!game || !a->entity || a->game != game || a->category >= STEAM_WORLD_LIST_COUNT)
@@ -18,6 +27,8 @@ static int registered(const Actor* a, uintptr_t game)
         return 0;
     return *(uintptr_t*)(a->entity + STEAM_ENTITY_VID_OFFSET) == (uintptr_t)a->vid;
 }
+
+/* SEH-safe registered(): 1 when the entity is still in the world, 0 otherwise. */
 int actor_live(const Actor* a, uintptr_t game)
 {
     __try
@@ -29,6 +40,8 @@ int actor_live(const Actor* a, uintptr_t game)
         return 0;
     }
 }
+
+/* Builds a result record from the actor's current state. */
 static ActorResult diagnostic(const Actor* a, enum ActorEvent event, enum ActorReason reason)
 {
     ActorResult r = {0};
@@ -39,6 +52,10 @@ static ActorResult diagnostic(const Actor* a, enum ActorEvent event, enum ActorR
     r.updates = a->updates;
     return r;
 }
+
+/* Creates the entity at `target`. The Actor owns a copy of the local player's VID (class 7)
+   with counters and scripts cleared, and the world owns the entity afterwards. Any failed
+   check after creation leaves the entity set so the caller must call actor_remove. */
 ActorResult actor_spawn(Actor* a, uintptr_t base, const Snapshot* local, const Snapshot* target)
 {
     ActorResult r = {0};
@@ -84,6 +101,9 @@ ActorResult actor_spawn(Actor* a, uintptr_t base, const Snapshot* local, const S
         return diagnostic(a, ACTOR_FAULT, ACTOR_REASON_EXCEPTION);
     }
 }
+
+/* Destroys the entity if it is still registered. If the world already dropped it, only
+   forgets the pointer and reports ACTOR_LOST. Never frees an unregistered pointer. */
 ActorResult actor_remove(Actor* a, uintptr_t game)
 {
     ActorResult r = diagnostic(a, ACTOR_NONE, ACTOR_REASON_NONE);
@@ -108,6 +128,8 @@ ActorResult actor_remove(Actor* a, uintptr_t game)
         return diagnostic(a, ACTOR_FAULT, ACTOR_REASON_EXCEPTION);
     }
 }
+
+/* 1 once the native child (torso) entity has been created with the linked VID. */
 int actor_torso_ready(const Actor* a)
 {
     __try
@@ -123,6 +145,8 @@ int actor_torso_ready(const Actor* a)
         return -1;
     }
 }
+
+/* Native action 0x61: puts the replica into army 0..3 (the local player's army). */
 int actor_set_army(Actor* a, unsigned int army)
 {
     __try
@@ -137,6 +161,9 @@ int actor_set_army(Actor* a, unsigned int army)
         return -1;
     }
 }
+
+/* Gives and selects weapon `slot` through native actions; the choice is cached in
+   armed_weapon so repeated calls are cheap. */
 int actor_arm(Actor* a, int slot)
 {
     __try
@@ -157,6 +184,9 @@ int actor_arm(Actor* a, int slot)
         return -1;
     }
 }
+
+/* Grants every weapon slot and tops up stored ammo for `entity` (used for the local
+   player). Does not own the entity. */
 int actor_grant_all_weapons(const ActorEngine* engine, uintptr_t entity)
 {
     __try
@@ -180,6 +210,9 @@ int actor_grant_all_weapons(const ActorEngine* engine, uintptr_t entity)
         return -1;
     }
 }
+
+/* Writes position, direction, velocity, moving flag, torso direction, health and ammo from
+   `target`. If the entity vanished, clears it and reports ACTOR_LOST. */
 ActorResult actor_apply(Actor* a, const Snapshot* target)
 {
     __try
@@ -229,6 +262,9 @@ ActorResult actor_apply(Actor* a, const Snapshot* target)
         return diagnostic(a, ACTOR_FAULT, ACTOR_REASON_EXCEPTION);
     }
 }
+
+/* Replays a remote shot through native action 0x25 once the torso is idle. Returns 0 to
+   ask the caller to retry later without consuming the shot. */
 int actor_shoot(Actor* a, uintptr_t game, int x, int y, int weapon)
 {
     __try

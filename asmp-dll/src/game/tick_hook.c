@@ -1,3 +1,6 @@
+/* Hook on the MAP tick (vtable slot 3): calls the original tick, then notifies one
+   callback on the game thread. Layer: game/ (engine API). */
+
 #include "tick_hook.h"
 #include "clock.h"
 typedef int(__fastcall* TickFn)(void*, void*);
@@ -8,6 +11,9 @@ static struct
     TickCallback notify;
     volatile LONG enabled, calls, active;
 } tick;
+
+/* Runs the original tick first; the callback only fires when it returned 0 (a normal
+   tick). `active` lets tick_hook_stop know a callback is still running. */
 static int __fastcall on_tick(void* game, void* unused)
 {
     (void)unused;
@@ -22,6 +28,8 @@ static int __fastcall on_tick(void* game, void* unused)
     }
     return result;
 }
+
+/* Installs the hook on `slot`. `original` must be the pointer currently in the slot. */
 enum SlotResult tick_hook_install(void* volatile* slot, void* original, TickCallback callback)
 {
     if (tick.hook.slot)
@@ -43,6 +51,9 @@ enum SlotResult tick_hook_install(void* volatile* slot, void* original, TickCall
         InterlockedExchange(&tick.enabled, 0);
     return result;
 }
+
+/* Returns SLOT_BUSY when the unhook worked but a callback is still running, so the
+   caller must not unload the DLL yet. */
 enum SlotResult tick_hook_stop(void)
 {
     InterlockedExchange(&tick.enabled, 0);

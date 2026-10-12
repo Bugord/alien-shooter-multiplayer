@@ -1,3 +1,6 @@
+/* Millisecond clock (relative to the first call) and sleep for Windows. Layer: common/
+   (shared utilities, no game or network knowledge). */
+
 #include "time.h"
 #include <windows.h>
 

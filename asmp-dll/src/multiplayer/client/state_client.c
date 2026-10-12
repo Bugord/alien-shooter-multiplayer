@@ -1,3 +1,9 @@
+/* Network client for one relay-server connection: sends the local state, shots and
+   monster data, and keeps the latest validated peer, shot and monster data. Layer:
+   multiplayer/client/ (connection and packet handling). It touches no native game entity and
+   no rendering. Used from the worker thread only; the game thread gets data through
+   multiplayer.c and monster_sync.c handoffs. */
+
 #include <stdlib.h>
 #include <string.h>
 #include "state_client.h"
@@ -40,6 +46,7 @@ struct StateClient
     unsigned int monster_head, monster_count, monster_dropped;
 };
 
+/* Forgets all received monster states and queued monster events. */
 static void clear_monster_(StateClient* c)
 {
     memset(c->monster_seen, 0, sizeof(c->monster_seen));
@@ -47,6 +54,8 @@ static void clear_monster_(StateClient* c)
     c->monster_head = c->monster_count = 0;
     memset(&c->monster, 0, sizeof(c->monster));
 }
+
+/* True when this client published a fresh (under 250 ms) state in exactly this world. */
 static int monster_local_world_(const StateClient* c, uint32_t low, uint32_t high, uint32_t epoch,
                                 unsigned long now)
 {
@@ -55,6 +64,8 @@ static int monster_local_world_(const StateClient* c, uint32_t low, uint32_t hig
            c->latest.world_low == low && c->latest.world_high == high &&
            c->latest.world_epoch == epoch;
 }
+
+/* True when the monster authority (this client or a peer) is currently in exactly this world. */
 static int monster_remote_world_(const StateClient* c, uint32_t low, uint32_t high, uint32_t epoch,
                                  unsigned long now)
 {
@@ -72,6 +83,8 @@ static int monster_remote_world_(const StateClient* c, uint32_t low, uint32_t hi
            p->state.world_epoch == epoch;
 }
 
+/* Connects to the relay. Returns NULL on a bad argument or transport failure; the caller
+   owns the client and frees it with state_client_destroy. */
 StateClient* state_client_create(const char* host, unsigned short port, const char* name, FILE* log)
 {
     if (!host || !port || !mp_is_player_name(name) || epnet_init())
@@ -95,6 +108,8 @@ StateClient* state_client_create(const char* host, unsigned short port, const ch
     epnet_shutdown();
     return NULL;
 }
+
+/* Disconnects and frees the client (NULL is accepted). */
 void state_client_destroy(StateClient* c)
 {
     if (!c)
@@ -104,6 +119,8 @@ void state_client_destroy(StateClient* c)
     epnet_shutdown();
     free(c);
 }
+
+/* Remembers the newest local state; state_client_update sends it at the send interval. */
 void state_client_publish(StateClient* c, const MpState* state, unsigned long now)
 {
     if (!c || !state)
@@ -112,6 +129,9 @@ void state_client_publish(StateClient* c, const MpState* state, unsigned long no
     c->published_at = now;
     c->published = 1;
 }
+
+/* Pumps the transport: sends hello and state, then validates each received packet
+   (version, session, sequence) and updates peers, roster, shots and monsters. */
 void state_client_update(StateClient* c, unsigned long now)
 {
     if (!c)
@@ -383,6 +403,8 @@ void state_client_update(StateClient* c, unsigned long now)
         }
     }
 }
+
+/* Map path from the server's welcome, or NULL until connected. */
 const char* state_client_map(const StateClient* c)
 {
     return c && c->ready ? c->map : NULL;
@@ -391,6 +413,8 @@ int state_client_connected(const StateClient* c)
 {
     return c && c->ready;
 }
+
+/* Copies a peer's latest state; 0 when absent or older than one second. */
 int state_client_peer(const StateClient* c, unsigned int id, unsigned long now, MpState* state)
 {
     if (!c || !state || id >= EPNET_MAX_CLIENTS || !c->peers[id].present ||
@@ -407,6 +431,8 @@ void state_client_stats(const StateClient* c)
                 "monster_dropped=%u\n",
                 c->ready, c->sent, c->received, c->rejected, c->shot_dropped, c->monster_dropped);
 }
+
+/* Like state_client_peer, plus the session id and the name from the roster. */
 int state_client_peer_info(const StateClient* c, unsigned int id, unsigned long now, PeerState* out)
 {
     memset(out, 0, sizeof(*out));
@@ -418,6 +444,9 @@ int state_client_peer_info(const StateClient* c, unsigned int id, unsigned long 
         memcpy(out->name, c->roster_name[id], sizeof(out->name));
     return 1;
 }
+
+/* Sends one local shot if the published state is fresh, alive and in the same world.
+   Returns 0 when it was not sent (the caller drops it). */
 int state_client_send_shot(StateClient* c, const MpShot* source, unsigned long now)
 {
     if (!c || !c->ready || !source || !c->published || now - c->published_at > 250u ||
@@ -435,6 +464,8 @@ int state_client_send_shot(StateClient* c, const MpShot* source, unsigned long n
     epnet_client_send(c->transport, MPT_C_SHOT, packet, sizeof(packet));
     return 1;
 }
+
+/* Pops the oldest received shot from the 64-entry queue. */
 int state_client_take_shot(StateClient* c, ShotEvent* out)
 {
     if (!c || !out || !c->shot_count)
@@ -444,11 +475,15 @@ int state_client_take_shot(StateClient* c, ShotEvent* out)
     --c->shot_count;
     return 1;
 }
+
+/* Asks the server to make this client the monster authority. */
 void state_client_monster_claim(StateClient* c)
 {
     if (c)
         c->monster_claim_requested = 1;
 }
+
+/* Reports the known monster authority; *is_local says whether it is this client. */
 int state_client_monster_authority(const StateClient* c, uint32_t* id, uint32_t* session,
                                    int* is_local)
 {
@@ -463,6 +498,8 @@ int state_client_monster_authority(const StateClient* c, uint32_t* id, uint32_t*
                     c->roster_session[c->monster_authority_id] == c->monster_authority_session;
     return 1;
 }
+
+/* Sends one monster state; only the authority may, and only for its published world. */
 int state_client_publish_monster(StateClient* c, const MpMonsterState* state, unsigned long now)
 {
     int local = 0;
@@ -478,6 +515,8 @@ int state_client_publish_monster(StateClient* c, const MpMonsterState* state, un
     epnet_client_send(c->transport, MPT_C_MONSTER_STATE, packet, sizeof(packet));
     return 1;
 }
+
+/* Copies the received state of monster `slot` unless it is expired or from another world. */
 int state_client_monster_at(const StateClient* c, unsigned int slot, unsigned long now,
                             MonsterState* out)
 {
@@ -497,6 +536,8 @@ int state_client_monster(const StateClient* c, unsigned long now, MonsterState* 
 {
     return state_client_monster_at(c, 0u, now, out);
 }
+
+/* Sends one monster event; only the authority may, and only for its published world. */
 int state_client_send_monster_event(StateClient* c, const MpMonsterEvent* event, unsigned long now)
 {
     int local = 0;
@@ -512,6 +553,8 @@ int state_client_send_monster_event(StateClient* c, const MpMonsterEvent* event,
     epnet_client_send(c->transport, MPT_C_MONSTER_EVENT, packet, sizeof(packet));
     return 1;
 }
+
+/* Pops the next received event that still matches its monster's current state. */
 int state_client_take_monster_event(StateClient* c, MonsterEvent* out)
 {
     if (!c || !out)

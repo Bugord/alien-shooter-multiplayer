@@ -1,3 +1,6 @@
+/* Hooks the game window procedure (keeps the game running without focus) and D3D9
+   EndScene (calls the overlay draw callback). Layer: game/ (engine API). */
+
 #include <windows.h>
 #include <string.h>
 #include "display_hook.h"
@@ -14,6 +17,8 @@ static struct
     void* pointer_window;
     void* pointer_end;
 } display;
+
+/* Forces WM_ACTIVATEAPP to "active" so the game keeps simulating in the background. */
 static int __fastcall window_proc(void* game, void* unused, HWND window, unsigned int message,
                                   uintptr_t wparam, intptr_t lparam)
 {
@@ -23,6 +28,8 @@ static int __fastcall window_proc(void* game, void* unused, HWND window, unsigne
         wparam = 1;
     return display.wnd_original(game, NULL, window, message, wparam, lparam);
 }
+
+/* Runs the draw callback on the render thread, then the original EndScene. */
 static HRESULT __stdcall end_scene(void* device)
 {
     if (InterlockedCompareExchange(&display.enabled, 0, 0))
@@ -32,6 +39,9 @@ static HRESULT __stdcall end_scene(void* device)
     }
     return display.end_original(device);
 }
+
+/* DISPLAY_PENDING until the D3D device exists, so the caller retries from the game tick.
+   Both hooks are installed or neither; faults inside SEH roll back through display_hook_stop. */
 enum DisplayResult display_hook_install(uintptr_t base, DrawCallback draw)
 {
     if (display_hook_ready())
@@ -96,6 +106,9 @@ long display_hook_frames(void)
 {
     return InterlockedCompareExchange(&display.frames, 0, 0);
 }
+
+/* Disables drawing, then restores both slots. Returns 0 if either was replaced by a
+   foreign hook. */
 int display_hook_stop(void)
 {
     InterlockedExchange(&display.enabled, 0);

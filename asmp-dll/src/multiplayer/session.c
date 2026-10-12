@@ -1,3 +1,8 @@
+/* Session state machine for the multiplayer menu: reads the menu entities, turns a
+   connect request into a map load, and returns to the menu on a lost connection. Layer:
+   multiplayer/ (session/map state machine). The game thread owns the state; the worker
+   sees requests and results only through the lock. */
+
 #include <stdlib.h>
 #include <string.h>
 #include "session.h"
@@ -16,6 +21,8 @@ static struct
     char server_map[128];
 } session;
 static SRWLOCK lock = SRWLOCK_INIT;
+
+/* Stores the menu/load functions (injected by tests). Returns 0 if one is missing. */
 int session_initialize(const SessionEngine* api)
 {
     if (session.enabled || !api || !api->menu_item || !api->text || !api->status || !api->button ||
@@ -26,6 +33,8 @@ int session_initialize(const SessionEngine* api)
     InterlockedExchange(&session.enabled, 1);
     return 1;
 }
+
+/* Binds the production menu functions from game/ui.c. */
 int session_enable(uintptr_t base)
 {
     if (!ui_bind(base))
@@ -36,6 +45,9 @@ int session_enable(uintptr_t base)
     ui_stop();
     return 0;
 }
+
+/* Queues a connect or disconnect command for the worker with a new generation.
+   Skips (returns 0) when the lock is busy so the game thread never waits. */
 static int request(const char* host, unsigned short port, const char* name, int connect)
 {
     if (!TryAcquireSRWLockExclusive(&lock))
@@ -61,6 +73,8 @@ static int request(const char* host, unsigned short port, const char* name, int 
     ReleaseSRWLockExclusive(&lock);
     return 1;
 }
+
+/* Starts a connection from the command line instead of the menu. */
 int session_direct(const char* host, unsigned short port, const char* name)
 {
     if (!session.enabled || session.state != SS_OFFLINE || !host || strlen(host) >= 16 || !name ||
@@ -71,6 +85,8 @@ int session_direct(const char* host, unsigned short port, const char* name)
     session.state = SS_REQUESTED;
     return 1;
 }
+
+/* Worker: takes the pending command, if any. */
 int session_take_request(ConnectionRequest* out)
 {
     AcquireSRWLockExclusive(&lock);
@@ -83,6 +99,9 @@ int session_take_request(ConnectionRequest* out)
     ReleaseSRWLockExclusive(&lock);
     return ready;
 }
+
+/* Worker: reports whether the connection of `generation` succeeded and its map.
+   Results for old generations are ignored. */
 void session_result(unsigned int generation, int connected, const char* map)
 {
     AcquireSRWLockExclusive(&lock);
@@ -102,6 +121,8 @@ void session_result(unsigned int generation, int connected, const char* map)
     }
     ReleaseSRWLockExclusive(&lock);
 }
+
+/* Splits "host:port" in place; returns 0 for a bad port or an over-long host. */
 static int parse_address(char* address, unsigned short* port)
 {
     char* colon = strrchr(address, ':');
@@ -117,11 +138,16 @@ static int parse_address(char* address, unsigned short* port)
     *port = (unsigned short)value;
     return 1;
 }
+
+/* Asks for a disconnect and remembers the state to enter afterwards. */
 static void disconnect(enum SessionState next)
 {
     session.after_disconnect = next;
     session.state = SS_DISCONNECTING;
 }
+
+/* One game-thread step of the state machine. Returns 1 while the player is in the session
+   level. After a native fault it makes no more native calls. */
 int session_tick(const Snapshot* sample, enum ProbeResult result, DWORD now)
 {
     if (!InterlockedCompareExchange(&session.enabled, 0, 0))
@@ -281,10 +307,14 @@ int session_tick(const Snapshot* sample, enum ProbeResult result, DWORD now)
     }
     return 0;
 }
+
+/* Current state (SS_OFFLINE when disabled). */
 enum SessionState session_state(void)
 {
     return InterlockedCompareExchange(&session.enabled, 0, 0) ? session.state : SS_OFFLINE;
 }
+
+/* Disables the session and drops pending commands. */
 void session_stop(void)
 {
     InterlockedExchange(&session.enabled, 0);

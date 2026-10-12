@@ -1,3 +1,7 @@
+/* Remote pose interpolation: keeps recent pose samples of a peer and returns a
+   smoothed position on the sender's tick timeline. Layer: multiplayer/ (pure math, no
+   native calls or I/O). */
+
 #include <math.h>
 #include <string.h>
 #include "pose_buffer.h"

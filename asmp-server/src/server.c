@@ -2,6 +2,10 @@
  * @file server.c
  * @brief Top level server-side multiplayer logic.
  *
+ * Layer: asmp-server (relay). Accepts clients over epnet, validates their
+ * state, shot and monster packets, and relays them with the sender ID and
+ * session. Single-threaded: mp_server_tick does all the work.
+ *
  */
 #include <stdbool.h>
 #include <string.h>
@@ -49,6 +53,8 @@ typedef struct MpServer
 
 static void process_received_packets_(MpServer* server);
 static void send_roster_(MpServer* server);
+
+/* Tells one client who the monster authority is (id UINT32_MAX when nobody). */
 static void send_monster_authority_(MpServer* server, unsigned int recipient)
 {
     uint8_t packet[12];
@@ -58,12 +64,16 @@ static void send_monster_authority_(MpServer* server, unsigned int recipient)
     epnet_server_send(server->ns, (uint8_t)recipient, MPT_S_MONSTER_AUTHORITY, packet,
                       sizeof(packet));
 }
+
+/* True when the packet comes from the current authority and carries its session. */
 static int monster_owner_(MpServer* server, unsigned int sender, const uint8_t* data, int length)
 {
     return length >= 4 && server->monster_claimed && sender == server->monster_host &&
            server->players[sender].session == server->monster_session &&
            mp_get_u32(data) == server->monster_session;
 }
+
+/* True when the sender's last state is fresh and in exactly this world. */
 static int monster_world_(MpServer* server, unsigned int sender, uint32_t low, uint32_t high,
                           uint32_t epoch)
 {
@@ -74,6 +84,9 @@ static int monster_world_(MpServer* server, unsigned int sender, uint32_t low, u
            p->latest.world_low == low && p->latest.world_high == high &&
            p->latest.world_epoch == epoch;
 }
+
+/* Relays one monster state to a client, only while the authority is connected, in the
+   same session and its world matches. */
 static void send_monster_state_(MpServer* server, unsigned int recipient, unsigned int slot)
 {
     if (!server->monster_received[slot] ||
@@ -90,12 +103,14 @@ static void send_monster_state_(MpServer* server, unsigned int recipient, unsign
     epnet_server_send(server->ns, (uint8_t)recipient, MPT_S_MONSTER_STATE, packet, sizeof(packet));
 }
 
+/* Relays every monster slot to a client. */
 static void send_all_monsters_(MpServer* server, unsigned int recipient)
 {
     for (unsigned int slot = 0; slot < MP_MONSTER_CAPACITY; ++slot)
         send_monster_state_(server, recipient, slot);
 }
 
+/* Registers the client's name and answers with welcome, authority and monster states. */
 static void process_hello_(MpServer* server, uint8_t sender, const char* name)
 {
     Player* p = &server->players[sender];
@@ -113,6 +128,8 @@ static void process_hello_(MpServer* server, uint8_t sender, const char* name)
     printf("Client %d is %s\n", sender, p->name);
 }
 
+/* Validates every packet (length, session, sequence) and relays state, shots and monsters.
+   Invalid packets are dropped. */
 static void process_received_packets_(MpServer* server)
 {
     epnet_srv_event_t ev;
@@ -313,6 +330,7 @@ static void process_received_packets_(MpServer* server)
     }
 }
 
+/* Sends the list of connected players (id, session, name) to every client. */
 static void send_roster_(MpServer* server)
 {
     MpRosterEntry entries[MP_ROSTER_MAX_ENTRIES];
@@ -335,6 +353,8 @@ static void send_roster_(MpServer* server)
             epnet_server_send(server->ns, i, MPT_S_ROSTER, packet, (size_t)length);
 }
 
+/* Creates the server on `port`. The map comes from ASMP_MAP when valid. Returns NULL on
+   failure; the caller frees it with mp_server_destroy. */
 MpServer* mp_server_create(unsigned short port, int max_clients)
 {
     if (max_clients < 1 || max_clients > EPNET_MAX_CLIENTS)
@@ -371,6 +391,7 @@ MpServer* mp_server_create(unsigned short port, int max_clients)
     return 0;
 }
 
+/* Frees the server (NULL is accepted). */
 void mp_server_destroy(MpServer* server)
 {
     if (server)
@@ -388,6 +409,8 @@ void mp_server_destroy(MpServer* server)
     }
 }
 
+/* One server step: transport update, packet processing, 250 ms monster relay and the
+   periodic roster. */
 void mp_server_tick(MpServer* server)
 {
     if (!server)

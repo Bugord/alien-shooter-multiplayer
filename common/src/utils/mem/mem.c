@@ -1,3 +1,6 @@
+/* Thin allocation wrappers with optional debug counters (DEBUG_). Layer: common/
+   (shared utilities, no game or network knowledge). */
+
 #include "mem.h"
 #include <stdlib.h>
 #include <string.h>

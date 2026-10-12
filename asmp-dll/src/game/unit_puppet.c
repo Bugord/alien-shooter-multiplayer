@@ -1,3 +1,9 @@
+/* Puppet slots: borrow existing native UNIT monsters (and their class-9 part) so a
+   peer's replicated pose can drive them, or so the host can watch them. Layer: game/
+   (engine API). Hooks the UNIT/SPRITE vtable slots; each native callback finds its slot by
+   entity identity and passes unowned entities straight to the engine. A slot never owns
+   the native entity. Everything runs on the game thread, native access inside SEH. */
+
 #include <string.h>
 #include <math.h>
 #include <float.h>
@@ -84,11 +90,13 @@ static struct
     UnitFormObserver forms;
 } shared;
 
+/* Registers the callback that supplies private form descriptors (unit_combat's observer). */
 void unit_puppet_set_form_observer(UnitFormObserver observer)
 {
     shared.forms = observer;
 }
 
+/* Returns slot `index`, or NULL when out of range. */
 UnitPuppet* unit_puppet_slot(unsigned int index)
 {
     if (index >= UNIT_PUPPET_CAPACITY)
@@ -110,6 +118,7 @@ static UnitPuppet* route(void* entity, int part)
     return NULL;
 }
 
+/* Verifies the native function bytes and fills `out`; hooks nothing. */
 enum UnitResult unit_puppet_bind(uintptr_t base, UnitPuppetEngine* out)
 {
     static const struct
@@ -171,6 +180,7 @@ static int registered(UnitPuppet* puppet, uintptr_t game)
            *(uintptr_t*)(puppet->entity + STEAM_ENTITY_VID_OFFSET) == puppet->vid;
 }
 
+/* Forgets the borrowed pointers after the world dropped the entity; the slot goes to LOST. */
 static void mark_entity_lost(UnitPuppet* puppet)
 {
     puppet->entity = 0;
@@ -178,12 +188,14 @@ static void mark_entity_lost(UnitPuppet* puppet)
     puppet->state = UNIT_PUPPET_LOST;
 }
 
+/* True while this slot controls `e` (ACTIVE, or FAULT so the hooks keep blocking it). */
 static int owns_entity(const UnitPuppet* puppet, void* e)
 {
     return puppet->entity == (uintptr_t)e &&
            (puppet->state == UNIT_PUPPET_ACTIVE || puppet->state == UNIT_PUPPET_FAULT);
 }
 
+/* Same as owns_entity for the slot's class-9 part. */
 static int owns_part(const UnitPuppet* puppet, void* e)
 {
     return puppet->child && puppet->child == (uintptr_t)e &&
@@ -209,6 +221,7 @@ static int child_registered(UnitPuppet* puppet)
            *(uintptr_t*)(puppet->child + STEAM_ENTITY_PARENT_OFFSET) == puppet->entity;
 }
 
+/* Chooses run or idle from the last pose, because the native AI decision is skipped. */
 static void select_animation(UnitPuppet* puppet, void* entity)
 {
     unsigned int animation =
@@ -216,6 +229,7 @@ static void select_animation(UnitPuppet* puppet, void* entity)
     shared.api.animation(entity, NULL, animation);
 }
 
+/* Records the death animation and pose so the host can send them as an event. */
 static void capture_death(UnitPuppet* puppet, uintptr_t e)
 {
     puppet->death.dying = 1;
@@ -370,6 +384,8 @@ static int change_vid_to_prepared(UnitPuppet* puppet, void* e, unsigned int kind
     return result;
 }
 
+/* Watch mode: runs the original action, then counts attacks and observes the form.
+   Only CHANGE_VID is altered (a prepared private form replaces the stock index). */
 static int observed_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_t a, intptr_t b,
                            intptr_t c, ActorAction original)
 {
@@ -475,6 +491,8 @@ static int prediction_action(UnitPuppet* puppet, void* e, unsigned int kind, int
     }
 }
 
+/* Action hook body for the root: routes to prediction, watch or controlled handling.
+   A controlled slot lets only the movement-related actions through and counts the rest. */
 static int scoped_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_t a, intptr_t b,
                          intptr_t c)
 {
@@ -526,6 +544,7 @@ static int scoped_action(UnitPuppet* puppet, void* e, unsigned int kind, intptr_
     return shared.api.action(e, NULL, kind, a, b, c);
 }
 
+/* Movement hook body: a controlled entity skips native movement; watch mode runs it. */
 static void scoped_movement(UnitPuppet* puppet, void* e)
 {
     if (puppet->watching == PUPPET_WATCH && owns_entity(puppet, e))
@@ -555,6 +574,8 @@ static void scoped_movement(UnitPuppet* puppet, void* e)
     shared.api.movement(e, NULL);
 }
 
+/* Destructor hook body: before native deletion a watched or predicted entity records its
+   death or armor transition, then the slot is invalidated so no stale pointer is used. */
 static void* scoped_destroy(UnitPuppet* puppet, void* e, int release)
 {
     if ((puppet->watching || puppet->predictive) && puppet->entity == (uintptr_t)e &&
@@ -625,6 +646,7 @@ static int scoped_part_action(UnitPuppet* puppet, void* e, unsigned int kind, in
     return shared.api.part_action(e, NULL, kind, a, b, c);
 }
 
+/* Destructor hook body for the part: forgets it, and faults a controlled slot. */
 static void* scoped_part_destroy(UnitPuppet* puppet, void* e, int release)
 {
     if (puppet->child == (uintptr_t)e)
@@ -689,6 +711,7 @@ static void* __fastcall on_part_destroy(void* e, void* unused, int release)
     return scoped_part_destroy(puppet, e, release);
 }
 
+/* Hooks the five vtable slots. Call unit_puppet_stop to roll back. */
 enum UnitResult unit_puppet_install(uintptr_t base, const UnitPuppetEngine* api)
 {
     if (shared.action.slot || shared.movement.slot || shared.destroy.slot ||
@@ -881,6 +904,8 @@ static int try_attach_entity(UnitPuppet* puppet, const AttachRequest* request, u
     return 1;
 }
 
+/* Scans the tick entity lists for the first entity that qualifies and attaches the slot.
+   Only a READY slot may attach. */
 static enum UnitResult attach(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                               uintptr_t required, enum PuppetMode watching)
 {
@@ -912,39 +937,46 @@ static enum UnitResult attach(UnitPuppet* puppet, uintptr_t game, uintptr_t play
     return UNIT_REFUSED;
 }
 
+/* Attaches to the first suitable monster (controlled mode). */
 enum UnitResult unit_puppet_attach_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
     return attach(puppet, game, player, 0, PUPPET_CONTROLLED);
 }
 
+/* Attaches in watch mode: native behavior stays, attacks and deaths are captured. */
 enum UnitResult unit_puppet_watch_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
     return attach(puppet, game, player, 0, PUPPET_WATCH);
 }
 
+/* Controlled attach to a specific entity. */
 enum UnitResult unit_puppet_attach_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                                           uintptr_t entity)
 {
     return entity ? attach(puppet, game, player, entity, PUPPET_CONTROLLED) : UNIT_REFUSED;
 }
 
+/* Watch-mode attach to a specific entity. */
 enum UnitResult unit_puppet_watch_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                                          uintptr_t entity)
 {
     return entity ? attach(puppet, game, player, entity, PUPPET_WATCH) : UNIT_REFUSED;
 }
 
+/* Watch mode with AI and movement frozen; damage and death stay native. */
 enum UnitResult unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                                              uintptr_t entity)
 {
     return entity ? attach(puppet, game, player, entity, PUPPET_STATIONARY) : UNIT_REFUSED;
 }
 
+/* Diagnostic: kills the watched monster through native SET_HP. */
 enum UnitResult unit_puppet_host_kill(UnitPuppet* puppet, uintptr_t game)
 {
     return unit_puppet_host_kill_variant(puppet, game, STEAM_ANIM_DEATH);
 }
 
+/* Diagnostic: plays the frozen form stage through native CHANGE_VID. */
 enum UnitResult unit_puppet_host_freeze(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet || !puppet->watching || puppet->death.dying ||
@@ -995,6 +1027,8 @@ enum UnitResult unit_puppet_host_kill_variant(UnitPuppet* puppet, uintptr_t game
     }
 }
 
+/* Writes a replicated pose into a controlled entity after validating the numbers.
+   A vanished entity marks the slot LOST. */
 enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* p)
 {
     if (!puppet || puppet->watching || puppet->death.dying || puppet->state != UNIT_PUPPET_ACTIVE ||
@@ -1042,6 +1076,8 @@ enum UnitResult unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const Unit
     }
 }
 
+/* True when the descriptor has no scripts, creations, damage or service object, i.e. it
+   is a private copy. */
 static int sanitized(uintptr_t vid)
 {
     if (*(int*)(vid + STEAM_VID_DAMAGE_OFFSET) ||
@@ -1057,6 +1093,7 @@ static int sanitized(uintptr_t vid)
     return 1;
 }
 
+/* Switches an attached private copy to local hit prediction. */
 enum UnitResult unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || puppet->death.dying)
@@ -1115,6 +1152,7 @@ enum UnitResult unit_puppet_prediction_test_hit(UnitPuppet* puppet, uintptr_t ga
     }
 }
 
+/* Sets the health of a private copy through native SET_HP; stock descriptors are refused. */
 enum UnitResult unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int health)
 {
     if (!puppet || puppet->watching || puppet->state != UNIT_PUPPET_ACTIVE || health <= 0 ||
@@ -1135,6 +1173,8 @@ enum UnitResult unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int healt
     }
 }
 
+/* Plays an attack, or kills through SET_HP 0, on a private copy. Old or repeated
+   `sequence` values are counted as duplicates and refused. */
 enum UnitResult unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
                                    unsigned int animation)
 {
@@ -1302,6 +1342,8 @@ static void copy_tracked_state(const UnitPuppet* puppet, UnitPuppetSample* s)
     s->attack_frame_changes = puppet->stats.attack_frame_changes;
 }
 
+/* Reads the slot's state for the tick. Observes the form only after finding the entity
+   in the current world list. */
 UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
 {
     UnitPuppetSample s = {0};
@@ -1350,6 +1392,8 @@ UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
     return s;
 }
 
+/* Detaches the slot and, when safe, restores the native behavior and idle pose.
+   The native entity is never deleted here. */
 enum UnitResult unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
 {
     if (!puppet)
@@ -1377,6 +1421,7 @@ enum UnitResult unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
     }
 }
 
+/* Unhooks only when no slot holds an entity. Returns UNIT_REFUSED otherwise. */
 enum UnitResult unit_puppet_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_PUPPET_CAPACITY; ++i)

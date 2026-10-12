@@ -1,3 +1,6 @@
+/* Read-only probe of the running game: finds the game object, map, local army
+   and player and copies their state into a Snapshot. Layer: game/ (engine API). */
+
 #include <windows.h>
 #include <float.h>
 #include <string.h>
@@ -5,6 +8,9 @@
 #include "probe.h"
 #include "../../../common/src/protocol.h"
 
+/* Fills `output` and returns PROBE_OK or the reason it is not ready. Never calls the game
+   or writes to it; SEH contains stale pointers. Safe only on the game thread, because the
+   game mutates these structures. */
 enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output)
 {
     Snapshot s = {0};
@@ -100,6 +106,7 @@ enum ProbeResult probe_read(uintptr_t image_base, Snapshot* output)
     return result;
 }
 
+/* Short text for logs. */
 const char* probe_result_name(enum ProbeResult result)
 {
     static const char* names[] = {

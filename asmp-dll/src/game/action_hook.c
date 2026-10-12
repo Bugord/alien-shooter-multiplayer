@@ -1,3 +1,7 @@
+/* Hook on the MAN entity action function (vtable slot 1). Layer: game/ (engine API).
+   Captures the local player's aim and ammo-consuming attacks as shot events, and
+   blocks damage to replica entities. Native callbacks only call out to a ShotCallback. */
+
 #include "action_hook.h"
 #include "slot_hook.h"
 static struct
@@ -10,6 +14,10 @@ static struct
     ReplicaFilter replica;
     volatile LONG enabled;
 } action_state;
+
+/* Replacement for the MAN action slot. Runs on the game thread for every entity action.
+   Determines inside SEH whether `entity` is the local player; ignores damage (0x55) on
+   replicas, and reports the shot after the original action ran. Owns nothing. */
 static int __fastcall action(void* entity, void* unused, unsigned int kind, intptr_t a, intptr_t b,
                              intptr_t c)
 {
@@ -64,6 +72,8 @@ static int __fastcall action(void* entity, void* unused, unsigned int kind, intp
         action_state.notify(action_state.aim_x, action_state.aim_y, weapon);
     return result;
 }
+
+/* Converts the function pointer to void* without a cast the compiler rejects. */
 static void* hook_address(void)
 {
     union {
@@ -73,6 +83,9 @@ static void* hook_address(void)
     p.call = action;
     return p.address;
 }
+
+/* Binds the engine functions, then swaps the MAN vtable slot. Returns 1 on success, 0 on
+   failure (nothing stays installed). `filter` says whether an entity is a replica. */
 int action_hook_install(uintptr_t base, ReplicaFilter filter, ShotCallback callback)
 {
     if (action_state.hook.slot || !filter || !callback)
@@ -97,6 +110,8 @@ int action_hook_install(uintptr_t base, ReplicaFilter filter, ShotCallback callb
     }
     return 1;
 }
+
+/* Disables the callbacks and restores the slot. Returns 0 if a foreign hook sits on top. */
 int action_hook_stop(void)
 {
     InterlockedExchange(&action_state.enabled, 0);

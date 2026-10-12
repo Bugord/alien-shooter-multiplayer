@@ -1,5 +1,11 @@
+/* Generic vtable-slot hook: swaps one aligned pointer with a compare-exchange and
+   restores it only if the slot still holds our pointer. Layer: game/ (engine API). */
+
 #include "slot_hook.h"
 #include <string.h>
+
+/* Pins this DLL in memory so a hook pointer never outlives the code it points at.
+   The pin is permanent for the process (no unpin); returns 1 on success. */
 int module_pin(void)
 {
     static const unsigned char anchor = 0;
@@ -8,6 +14,9 @@ int module_pin(void)
                                   GET_MODULE_HANDLE_EX_FLAG_PIN,
                               (LPCWSTR)&anchor, &module) != 0;
 }
+
+/* Atomically replaces `before` with `after` in the slot after checking that it is committed,
+   aligned and writable. Temporarily changes page protection; restores it afterwards. */
 static enum SlotResult exchange(SlotHook* h, void* before, void* after)
 {
     MEMORY_BASIC_INFORMATION info;
@@ -29,6 +38,9 @@ static enum SlotResult exchange(SlotHook* h, void* before, void* after)
         return SLOT_RESTORE_FAILED;
     return previous == before ? SLOT_OK : SLOT_CHANGED;
 }
+
+/* Hooks `slot` (holding `original`) with `callback`. On failure the hook is cleared so it
+   can be installed again. The caller keeps ownership of the SlotHook. */
 enum SlotResult slot_install(SlotHook* h, void* volatile* slot, void* original, void* callback)
 {
     if (h->slot)
@@ -48,6 +60,9 @@ enum SlotResult slot_install(SlotHook* h, void* volatile* slot, void* original, 
     }
     return result;
 }
+
+/* Puts the original pointer back. SLOT_CHANGED means a foreign pointer replaced ours; the
+   hook then stays registered so the caller can report it. */
 enum SlotResult slot_stop(SlotHook* h)
 {
     if (!h->slot)

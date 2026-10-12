@@ -1,7 +1,13 @@
+/* Binds the native entity functions used by Actor (create, destroy, move, rotate,
+   action, weapon, health). Layer: game/ (engine API). */
+
 #include <windows.h>
 #include <string.h>
 #include "actor.h"
 
+/* Verifies each function's first bytes and the vtable/switch-table entries against the
+   Steam EXE, then fills `output`. Returns 1 on success; on 0 `output` is all zero.
+   Nothing is hooked here. */
 int actor_engine_bind(uintptr_t base, ActorEngine* output)
 {
     static const unsigned char create[] = {0x55, 0x8B, 0xEC, 0x6A, 0xFF};

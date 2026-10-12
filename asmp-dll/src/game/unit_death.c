@@ -1,3 +1,8 @@
+/* Death and armor-debris presentation: builds private visual copies of a monster's
+   death graph and creates them through the native factory, without scripts or damage.
+   Layer: game/ (engine API). Game thread only, native access inside SEH. The module owns
+   the private VID copies; the map owns the created entities. */
+
 #include <string.h>
 #include <math.h>
 #include "unit_death.h"
@@ -42,6 +47,7 @@ struct UnitDeath
 static UnitDeath slots[UNIT_DEATH_SLOT_COUNT];
 static int initialized;
 
+/* Returns slot `index`, or NULL when out of range. */
 UnitDeath* unit_death_slot(unsigned int index)
 {
     if (index >= UNIT_DEATH_SLOT_COUNT)
@@ -49,6 +55,7 @@ UnitDeath* unit_death_slot(unsigned int index)
     return &slots[index];
 }
 
+/* Position of `vid` among the slot's private copies, or -1. */
 static int private_index(const UnitDeath* death, uintptr_t vid)
 {
     for (unsigned int i = 0; i < death->count; ++i)
@@ -57,11 +64,13 @@ static int private_index(const UnitDeath* death, uintptr_t vid)
     return -1;
 }
 
+/* Native vtable address for the class of private copy `i`. */
 static uintptr_t vtable(const UnitDeath* death, unsigned int i)
 {
     return death->base + entity_class_vtable_rva(death->classes[i]);
 }
 
+/* Verifies the cannon and terrain destructors, then initializes with the real engine. */
 enum UnitResult unit_death_init(uintptr_t base, ActorCreate create)
 {
     static const unsigned char cannon[] = {0x55, 0x8B, 0xEC, 0x56, 0x8B, 0xF1, 0xE8, 0x55};
@@ -86,6 +95,8 @@ enum UnitResult unit_death_init(uintptr_t base, ActorCreate create)
     return unit_death_initialize(base, &api);
 }
 
+/* Stores the factory and destructors in every slot (once, before any play). Tests pass
+   mock functions here. */
 enum UnitResult unit_death_initialize(uintptr_t base, const UnitDeathEngine* api)
 {
     if (initialized || !base || !api || !api->create || !api->cannon_destroy ||
@@ -242,6 +253,7 @@ static int visual_node_admissible(uintptr_t game, uintptr_t source)
     return *(uintptr_t*)(source + STEAM_VID_BEHAVIOR_OFFSET) && plain_factory_vid(source);
 }
 
+/* Removes one animation's creation link from a private copy. */
 static void clear_creation(unsigned char* d, unsigned int animation)
 {
     *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + animation * 4u) = 0;
@@ -350,6 +362,8 @@ static int graph_visit(UnitDeath* death, uintptr_t game, uintptr_t source, Death
     return 1;
 }
 
+/* Checks that stock UNIT `source_vid` has an admitted death (or armor) graph and copies it
+   into private VIDs. Returns 0 when the graph is not the admitted shape. */
 static int prepare_type(UnitDeath* death, uintptr_t game, unsigned int source_vid,
                         unsigned int animation, int armor, unsigned int* multiplicity)
 {
@@ -448,6 +462,7 @@ static int count_private_entity(const UnitDeath* death, uintptr_t game, uintptr_
     return 1;
 }
 
+/* Counts the slot's entities in the map; `fault` is set on a bad vtable or link. */
 UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
 {
     UnitDeathSample s = {0};
@@ -495,6 +510,7 @@ static int play_request_valid(const UnitDeath* death, const UnitPuppetPose* p,
            isfinite(p->y) && isfinite(p->z) && p->direction <= 255u;
 }
 
+/* Plays the stock VID50 death or gib animation at pose `p`. */
 enum UnitResult unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
                                 unsigned int animation)
 {
@@ -567,12 +583,14 @@ static enum UnitResult play_type(UnitDeath* death, uintptr_t game, const UnitPup
     }
 }
 
+/* Plays the death of stock monster `source_vid`. */
 enum UnitResult unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
                                      unsigned int animation, unsigned int source_vid)
 {
     return play_type(death, game, p, animation, source_vid, 0);
 }
 
+/* Plays the armor-break visuals only (no living successor). */
 enum UnitResult unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
                                       unsigned int source_vid)
 {
@@ -621,6 +639,8 @@ static void destroy_private_entity(const UnitDeath* death, uintptr_t entity, uns
     destroy((void*)entity, NULL, 1);
 }
 
+/* Deletes the slot's entities in `game`. A failure keeps ownership (state ABANDONED)
+   so the slot is not reused while entities may remain. */
 enum UnitResult unit_death_remove(UnitDeath* death, uintptr_t game)
 {
     if (!death)
@@ -667,6 +687,7 @@ enum UnitResult unit_death_remove(UnitDeath* death, uintptr_t game)
     }
 }
 
+/* Releases the module; refuses while any slot still owns entities. */
 enum UnitResult unit_death_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_DEATH_SLOT_COUNT; ++i)

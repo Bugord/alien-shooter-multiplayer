@@ -1,3 +1,9 @@
+/* Monster synchronization coordinator: the host watches its native monsters and
+   publishes their state and events; a client shows private copies that follow the host,
+   with local hit prediction. Layer: multiplayer/ (uses game/unit_*). Per-slot lifecycle is
+   the MonsterSlot state machine; engine calls happen only on the game thread, the worker
+   exchanges data through the handoff lock. */
+
 #include <string.h>
 #include "monster_sync.h"
 #include "retry_policy.h"
@@ -155,6 +161,8 @@ static struct
 static SRWLOCK lock = SRWLOCK_INIT;
 static volatile LONG incoming_dropped;
 
+/* Installs the unit hooks and prepares all slots in the WAITING state. Returns 0 on any
+   failure; the caller then runs monster_sync_stop. */
 int monster_sync_initialize(uintptr_t base, enum MonsterRole role, const UnitPuppetEngine* api,
                             ActorCreate create)
 {
@@ -193,6 +201,7 @@ int monster_sync_initialize(uintptr_t base, enum MonsterRole role, const UnitPup
     return 1;
 }
 
+/* Binds the real engine functions and initializes. */
 int monster_sync_enable(uintptr_t base, enum MonsterRole role)
 {
     UnitPuppetEngine api;
@@ -202,6 +211,7 @@ int monster_sync_enable(uintptr_t base, enum MonsterRole role)
     return monster_sync_initialize(base, role, &api, create);
 }
 
+/* Test mode: shows 48 monsters (6 types by 8) instead of one. Only before the first world. */
 int monster_sync_gallery(int enabled)
 {
     if (slots[0].state != MS_WAITING || slots[0].world.entered)
@@ -211,6 +221,7 @@ int monster_sync_gallery(int enabled)
     return 1;
 }
 
+/* The monster type this slot is expected to show. */
 static unsigned int expected_vid(unsigned int index)
 {
     static const unsigned int types[] = {
@@ -219,6 +230,7 @@ static unsigned int expected_vid(unsigned int index)
     return gallery ? types[index / 8u] : MONSTER_VID_MONSTER1;
 }
 
+/* Worker: stores the received state of monster `slot` for the next game tick. */
 void monster_sync_publish_at(unsigned int slot, const MonsterState* source, int local_authority,
                              DWORD now)
 {
@@ -234,11 +246,13 @@ void monster_sync_publish_at(unsigned int slot, const MonsterState* source, int 
     ReleaseSRWLockExclusive(&lock);
 }
 
+/* Same as monster_sync_publish_at for slot 0. */
 void monster_sync_publish(const MonsterState* source, int local_authority, DWORD now)
 {
     monster_sync_publish_at(0u, source, local_authority, now);
 }
 
+/* Worker: queues a received event; a full queue counts as dropped. */
 void monster_sync_receive(const MonsterEvent* event, DWORD now)
 {
     AcquireSRWLockExclusive(&lock);
@@ -253,6 +267,7 @@ void monster_sync_receive(const MonsterEvent* event, DWORD now)
     ReleaseSRWLockExclusive(&lock);
 }
 
+/* Worker: takes the next state the host published, round-robin over slots. */
 int monster_sync_take_state(MpMonsterState* out)
 {
     int available = 0;
@@ -272,6 +287,7 @@ int monster_sync_take_state(MpMonsterState* out)
     return available;
 }
 
+/* Worker: takes the next host event to send. */
 int monster_sync_take_event(MpMonsterEvent* out)
 {
     int available;
@@ -287,6 +303,8 @@ int monster_sync_take_event(MpMonsterEvent* out)
     return available;
 }
 
+/* Builds an event for the slot and stages it. The game thread sends staged events when it
+   can take the lock; a full staging array counts as dropped. */
 static void stage_event(MonsterSlot* slot, unsigned int kind, uint32_t tick,
                         const UnitPuppetPose* pose)
 {
@@ -318,6 +336,8 @@ static void stage_event(MonsterSlot* slot, unsigned int kind, uint32_t tick,
         ++slot->stats.dropped;
 }
 
+/* Removes everything the slot shows or watches. Returns 0 when something could not be
+   removed, so the caller abandons the slot. */
 static int cleanup(MonsterSlot* slot, uintptr_t game)
 {
     if (!unit_puppet_release(slot->puppet, game))
@@ -335,6 +355,8 @@ static int cleanup(MonsterSlot* slot, uintptr_t game)
     return 1;
 }
 
+/* After a failure: cleans up and waits in BACKOFF (delay doubles); abandons the slot if the
+   cleanup fails. */
 static void schedule_retry(MonsterSlot* slot, uintptr_t game, DWORD now)
 {
     if (!cleanup(slot, game))
@@ -351,6 +373,7 @@ static void schedule_retry(MonsterSlot* slot, uintptr_t game, DWORD now)
     slot->retry.delay = mp_retry_next_delay(slot->retry.delay);
 }
 
+/* True when a received state matches this slot's world, monster and form. */
 static int same_world(const MonsterSlot* slot, const MpMonsterState* s)
 {
     return s->world_low == slot->world.low && s->world_high == slot->world.high && s->world_epoch &&
@@ -358,6 +381,8 @@ static int same_world(const MonsterSlot* slot, const MpMonsterState* s)
            mp_monster_form_valid(s->vid, s->origin_vid, s->form_revision, s->form_phase);
 }
 
+/* Releases the puppet and removes the client fixture but keeps death and armor visuals.
+   Abandons the slot and returns 0 when removal fails. */
 static int cleanup_live(MonsterSlot* slot, uintptr_t game)
 {
     int removed =
@@ -372,6 +397,8 @@ static int cleanup_live(MonsterSlot* slot, uintptr_t game)
     return removed;
 }
 
+/* Plays the armor-break visuals once per form revision. Returns 1 when shown (or already
+   shown), 0 after a retry was scheduled or the slot was abandoned. */
 static int present_armor(MonsterSlot* slot, uintptr_t game, const UnitPuppetPose* pose,
                          unsigned int source_vid, uint32_t revision, DWORD now)
 {
@@ -397,6 +424,8 @@ static int present_armor(MonsterSlot* slot, uintptr_t game, const UnitPuppetPose
     return 1;
 }
 
+/* Replaces the live copy with the death presentation at `pose`, once. Ends in DEAD, or in
+   retry/abandoned when a removal or the presentation fails. */
 static void present_death(MonsterSlot* slot, uintptr_t game, const UnitPuppetPose* pose,
                           unsigned int animation, DWORD now)
 {
@@ -427,6 +456,8 @@ static void present_death(MonsterSlot* slot, uintptr_t game, const UnitPuppetPos
     slot->state = MS_DEAD;
 }
 
+/* Creates a private predictive copy when the form changed, attaches the puppet, then applies
+   pose and health. Returns 1 when shown; 0 after a retry was scheduled or the slot abandoned. */
 static int client_copy(MonsterSlot* slot, const Snapshot* local, unsigned int vid,
                        const UnitPuppetPose* pose, int health, DWORD now)
 {
@@ -469,12 +500,15 @@ static int client_copy(MonsterSlot* slot, const Snapshot* local, unsigned int vi
     return 1;
 }
 
+/* Clears the prediction state and its expected form. */
 static void forget_prediction(MonsterSlot* slot)
 {
     slot->prediction.state = PREDICTION_NONE;
     slot->prediction.vid = 0;
 }
 
+/* Discards a prediction the host contradicted: cleans up and returns the slot to WAITING.
+   Abandons the slot and returns 0 when the cleanup fails. */
 static int correct_prediction(MonsterSlot* slot, uintptr_t game)
 {
     if (!cleanup(slot, game))
@@ -1467,6 +1501,8 @@ static void add_gallery_totals(GalleryTotals* totals, const MonsterSlot* slot,
     totals->corrections += frame->corrections;
 }
 
+/* One game-thread tick over all monster slots. If the handoff lock is busy it returns slot 0's
+   state without ticking, because the game thread never waits for the worker. */
 MonsterSyncFrame monster_sync_tick(const Snapshot* local, enum ProbeResult result, uint32_t epoch,
                                    uint32_t tick, DWORD now)
 {
@@ -1514,12 +1550,14 @@ MonsterSyncFrame monster_sync_tick(const Snapshot* local, enum ProbeResult resul
     return output;
 }
 
+/* Asks every slot to remove its monsters on the next tick. */
 void monster_sync_request_stop(void)
 {
     for (unsigned int i = 0; i < slot_count; ++i)
         InterlockedExchange(&slots[i].stopping, 1);
 }
 
+/* True once every slot has acknowledged the stop. */
 int monster_sync_stopped(void)
 {
     for (unsigned int i = 0; i < slot_count; ++i)
@@ -1528,6 +1566,7 @@ int monster_sync_stopped(void)
     return 1;
 }
 
+/* Uninstalls the unit hooks; refuses while a slot still owns entities. */
 int monster_sync_stop(void)
 {
     if (slots[0].state == MS_OFF)

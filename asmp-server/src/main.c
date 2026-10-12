@@ -1,3 +1,6 @@
+/* Entry point of the relay server: `asmp-server <port>` runs mp_server_tick every
+   millisecond until the process is killed. Layer: asmp-server (transport and relay). */
+
 #include "server.h"
 #include <stdio.h>
 #include <stdlib.h>

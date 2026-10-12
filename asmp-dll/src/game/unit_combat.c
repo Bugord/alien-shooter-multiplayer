@@ -1,3 +1,9 @@
+/* Combat fixtures: private copies of a stock monster form (and its part) created
+   through the native factory, used as the host's or a client's visible monster.
+   Layer: game/ (engine API). Game thread only, native access inside SEH. The module owns
+   the private VID copies; the factory-created entities belong to the map and the stock
+   descriptors are only borrowed. */
+
 #include <string.h>
 #include <float.h>
 #include "unit_combat.h"
@@ -85,6 +91,7 @@ static struct
     int initialized;
 } shared;
 
+/* Returns fixture `index`, or NULL when out of range. */
 UnitCombat* unit_combat_slot(unsigned int index)
 {
     if (index >= UNIT_COMBAT_CAPACITY)
@@ -92,6 +99,7 @@ UnitCombat* unit_combat_slot(unsigned int index)
     return &fixtures[index];
 }
 
+/* True when `vid` is a private buffer of any fixture. */
 static int owned_descriptor(uintptr_t vid)
 {
     for (unsigned int i = 0; i < UNIT_COMBAT_CAPACITY; ++i)
@@ -105,6 +113,7 @@ static int owned_descriptor(uintptr_t vid)
     return 0;
 }
 
+/* Index of `vid` among the fixture's private forms, or -1. */
 static int private_form(const UnitCombat* fixture, uintptr_t vid)
 {
     for (unsigned int i = 0; i < fixture->graph.count; ++i)
@@ -113,6 +122,7 @@ static int private_form(const UnitCombat* fixture, uintptr_t vid)
     return -1;
 }
 
+/* Verifies the native factory and returns it in `out`; hooks nothing. */
 enum UnitResult unit_combat_bind(uintptr_t base, ActorCreate* out)
 {
     static const unsigned char signature[] = {0x55, 0x8B, 0xEC, 0x6A, 0xFF};
@@ -138,6 +148,7 @@ enum UnitResult unit_combat_bind(uintptr_t base, ActorCreate* out)
     }
 }
 
+/* Stores the factory and destructors used by every fixture (once, before spawning). */
 enum UnitResult unit_combat_init(uintptr_t base, ActorCreate create, ActorDestroy destroy,
                                  UnitAnimation animation)
 {
@@ -154,6 +165,8 @@ enum UnitResult unit_combat_init(uintptr_t base, ActorCreate create, ActorDestro
     return UNIT_OK;
 }
 
+/* True when `vid` is the loaded stock descriptor `index` of class `class_id`, with a valid
+   category, no service object and no special factory flag. */
 static int supported(uintptr_t vid, unsigned int index, unsigned int class_id)
 {
     return vid && *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET) == index &&
@@ -164,6 +177,8 @@ static int supported(uintptr_t vid, unsigned int index, unsigned int class_id)
              STEAM_VID_SPECIAL_FACTORY_FLAG);
 }
 
+/* Copies a stock descriptor into `destination` with counters, creations, scripts and
+   damage cleared, so the copy is purely visual. */
 static void sanitize(unsigned char* destination, uintptr_t source)
 {
     memcpy(destination, (void*)source, STEAM_VID_SIZE);
@@ -178,6 +193,7 @@ static void sanitize(unsigned char* destination, uintptr_t source)
     *(int*)(destination + STEAM_VID_CREATE_SCRIPT_OFFSET) = -1;
 }
 
+/* Copies the stock death creation links into a private copy (host mode only). */
 static void preserve_death(unsigned char* destination, uintptr_t source)
 {
     for (unsigned int a = STEAM_ANIM_DEATH; a <= STEAM_ANIM_GIB_DEATH; ++a)
@@ -326,6 +342,7 @@ static int clone_form(UnitCombat* fixture, uintptr_t game, uintptr_t source, uns
     return 1;
 }
 
+/* Clones the armor shell form of `index` and links it as the private root's death creation. */
 static int armor_graph(UnitCombat* fixture, uintptr_t game, unsigned int index, uintptr_t source)
 {
     if (!mp_monster_armored(index))
@@ -493,6 +510,8 @@ static enum UnitResult create_fixture_entity(UnitCombat* fixture, uintptr_t game
     return UNIT_OK;
 }
 
+/* Common spawn body: validates the request, prepares the private forms, creates the
+   entity and verifies it. */
 static enum UnitResult spawn_type(UnitCombat* fixture, const Snapshot* local, unsigned int index,
                                   const UnitPuppetPose* pose, enum SpawnMode mode)
 {
@@ -515,18 +534,21 @@ static enum UnitResult spawn_type(UnitCombat* fixture, const Snapshot* local, un
     }
 }
 
+/* Spawns stock monster `index` at `pose` as a private copy; `host` keeps native death links. */
 enum UnitResult unit_combat_spawn_type(UnitCombat* fixture, const Snapshot* local,
                                        unsigned int index, const UnitPuppetPose* pose, int host)
 {
     return spawn_type(fixture, local, index, pose, host ? SPAWN_HOST : SPAWN_FIXTURE);
 }
 
+/* Spawns a copy that predicts local hits cosmetically and is otherwise inert. */
 enum UnitResult unit_combat_spawn_predictive(UnitCombat* fixture, const Snapshot* local,
                                              unsigned int index, const UnitPuppetPose* pose)
 {
     return spawn_type(fixture, local, index, pose, SPAWN_PREDICTIVE);
 }
 
+/* Spawns the default test monster (VID50) 80 units from the local player. */
 enum UnitResult unit_combat_spawn(UnitCombat* fixture, const Snapshot* local)
 {
     if (!local)
@@ -705,6 +727,8 @@ static int count_map_entities(UnitCombat* fixture, uintptr_t game, UnitCombatSam
     return 1;
 }
 
+/* Counts the fixture's entities in the map; `compare_sources` also checks that the
+   borrowed stock descriptors are unchanged. */
 UnitCombatSample unit_combat_sample(UnitCombat* fixture, uintptr_t game, int compare_sources)
 {
     UnitCombatSample s = {0};
@@ -793,6 +817,8 @@ static enum UnitResult describe_settled_form(UnitCombat* fixture, uintptr_t game
     return UNIT_OK;
 }
 
+/* Form observer for the puppet hooks: prepares a private descriptor before CHANGE_VID,
+   or describes the settled form. UNIT_REFUSED means the entity is not ours. */
 enum UnitResult unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* private_vid,
                                            unsigned int* current_vid, unsigned int* revision,
                                            int* transitioning, unsigned int requested_vid)
@@ -816,6 +842,7 @@ enum UnitResult unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uin
     return result;
 }
 
+/* Native class of one of the fixture's private descriptors, 0 if unknown. */
 static unsigned int private_class(const UnitCombat* fixture, uintptr_t vid)
 {
     if (vid == (uintptr_t)fixture->root_vid)
@@ -889,6 +916,8 @@ static int find_form_root(const UnitCombat* fixture, uintptr_t game, uintptr_t* 
     return 1;
 }
 
+/* Switches off creation links, then deletes the fixture's root entities one by one. Returns 1
+   only when the map holds no private entity afterwards. */
 static int remove_forms(UnitCombat* fixture, uintptr_t game)
 {
     /* Disable creation before the first deleting destructor. Linked children
@@ -954,6 +983,7 @@ static int destroy_spawned_entities(const UnitCombatSample* s)
     return 1;
 }
 
+/* One guarded removal attempt. A fault keeps ownership, so stop stays refused. */
 enum UnitResult unit_combat_remove(UnitCombat* fixture, uintptr_t game)
 {
     if (!fixture)
@@ -995,6 +1025,7 @@ enum UnitResult unit_combat_remove(UnitCombat* fixture, uintptr_t game)
     }
 }
 
+/* Releases the module; refuses while any fixture still owns a world. */
 enum UnitResult unit_combat_stop(void)
 {
     for (unsigned int i = 0; i < UNIT_COMBAT_CAPACITY; ++i)

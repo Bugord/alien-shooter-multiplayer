@@ -1,3 +1,8 @@
+/* Production runtime: validates the EXE profile, installs the hooks in a fixed order,
+   runs the worker loop (network, session requests) and dispatches the game tick, then
+   shuts everything down in reverse order. Layer: multiplayer/ (orchestration). Start,
+   worker_step and stop run on the worker thread; runtime_game_tick on the game thread. */
+
 #include <string.h>
 #include "runtime.h"
 #include "../game/world_hook.h"
@@ -36,6 +41,8 @@ static struct
     enum SessionState logged_session;
 } runtime;
 static SRWLOCK frame_lock = SRWLOCK_INIT;
+
+/* Tick hook callback on the game thread: builds a frame and runs runtime_game_tick. */
 static void on_tick(void* game, LONG tick, DWORD now)
 {
     RuntimeFrame frame = {0};
@@ -43,10 +50,15 @@ static void on_tick(void* game, LONG tick, DWORD now)
     frame.milliseconds = now;
     runtime_game_tick(game, &frame);
 }
+
+/* Current lifecycle state; thread-safe. */
 enum RuntimeState runtime_state(void)
 {
     return (enum RuntimeState)InterlockedCompareExchange(&runtime.state, 0, 0);
 }
+
+/* Checks the player accessor, the game tick function and its vtable slot against the
+   supported Steam EXE before anything is hooked. */
 static int validate_profile(uintptr_t base)
 {
     static const unsigned char accessor[] = {0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x08, 0x83, 0xE0,
@@ -66,6 +78,9 @@ static int validate_profile(uintptr_t base)
         return 0;
     }
 }
+
+/* Starts with the real engine bindings. Returns 1 on success; on 0 everything that was
+   installed has been rolled back. */
 int runtime_start(uintptr_t base, const RuntimeConfig* config)
 {
     if (!validate_profile(base))
@@ -76,6 +91,9 @@ int runtime_start(uintptr_t base, const RuntimeConfig* config)
                                 display_hook_install,  display_hook_stop};
     return runtime_start_with_bindings(base, config, &bindings);
 }
+
+/* Same as runtime_start with injectable bindings (tests). Starts the stages in the order of
+   RuntimeStage; on failure it rolls back through runtime_stop. */
 int runtime_start_with_bindings(uintptr_t base, const RuntimeConfig* config,
                                 const RuntimeBindings* bindings)
 {
@@ -141,6 +159,9 @@ fail:
     runtime_stop(3000u);
     return 0;
 }
+
+/* One game-thread tick: probes the game and advances the session, the remote players
+   and the monsters. The first caller becomes the game thread; other threads are ignored. */
 void runtime_game_tick(void* game, RuntimeFrame* out)
 {
     enum RuntimeState state = runtime_state();
@@ -182,6 +203,8 @@ void runtime_game_tick(void* game, RuntimeFrame* out)
     if (runtime.config.observer)
         runtime.config.observer(out);
 }
+
+/* Converts the frame into the local MpState and hands it to the network client. */
 static void publish_frame(const RuntimeFrame* frame)
 {
     const Snapshot* sample = &frame->snapshot;
@@ -210,6 +233,8 @@ static void publish_frame(const RuntimeFrame* frame)
     }
     state_client_publish(runtime.client, &state, frame->milliseconds);
 }
+
+/* One worker-thread step: serves session connect requests and pumps the network client. */
 void runtime_worker_step(DWORD now)
 {
     if (runtime_state() != RT_RUNNING || GetCurrentThreadId() != runtime.worker_thread)
@@ -309,6 +334,9 @@ void runtime_worker_step(DWORD now)
         runtime.stats_at = now;
     }
 }
+
+/* Stops the coordinators on the game thread first, then unhooks in reverse order. A timeout
+   or a foreign hook returns 0 and keeps STOPPING, so a later call can finish. */
 int runtime_stop(DWORD timeout_ms)
 {
     if (runtime_state() == RT_OFF)

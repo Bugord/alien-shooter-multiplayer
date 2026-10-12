@@ -1,3 +1,6 @@
+/* Hook on the MAP load slot: counts completed map loads so a reload of the same map
+   is told apart from an unchanged world. Layer: game/ (engine API). */
+
 #include <string.h>
 #include "world_hook.h"
 #include "steam_profile.h"
@@ -8,12 +11,16 @@ static struct
     LoadMapFn original;
     volatile LONG generation;
 } world;
+
+/* Increments the generation after the original load finished (game thread). */
 static void __fastcall on_load(void* game, void* unused, char* map)
 {
     (void)unused;
     world.original(game, NULL, map);
     InterlockedIncrement(&world.generation);
 }
+
+/* Checks the function prologue and installs the hook. Returns 1 on success, 0 otherwise. */
 int world_hook_install(uintptr_t base)
 {
     if (world.hook.slot)
@@ -45,6 +52,8 @@ int world_hook_stop(void)
 {
     return slot_stop(&world.hook) == SLOT_OK;
 }
+
+/* Number of map loads seen since install; thread-safe. */
 uint32_t world_hook_generation(void)
 {
     return (uint32_t)InterlockedCompareExchange(&world.generation, 0, 0);
