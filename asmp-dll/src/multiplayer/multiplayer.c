@@ -11,14 +11,34 @@
 typedef struct Remote
 {
     Actor actor;
-    uint32_t session, epoch;
-    uint32_t world_low, world_high, local_epoch;
     enum RemoteState state;
-    DWORD entered_at, retry_at, last_pose;
-    DWORD weapon_retry_at;
-    unsigned int failures;
+    uint32_t session; /* Peer session the replica was spawned for. */
+    uint32_t epoch;   /* Peer world epoch the replica was spawned for. */
+    DWORD entered_at;
+    DWORD last_pose;
+
+    /* Local world the replica was spawned in. */
+    struct
+    {
+        uint32_t low;
+        uint32_t high;
+        uint32_t local_epoch;
+    } world;
+
+    struct
+    {
+        DWORD at;
+        unsigned int failures;
+    } retry;
+
     /* Last slot armed natively and last slot reported as rejected. */
-    int last_weapon, rejected_weapon;
+    struct
+    {
+        int last;
+        int rejected;
+        DWORD retry_at;
+    } weapon;
+
     /* Received positions, played back a fixed delay behind the newest. */
     PoseBuffer pose;
 } Remote;
@@ -59,7 +79,8 @@ int multiplayer_initialize(uintptr_t image_base, const ActorEngine* api)
     for (unsigned int i = 0; i < MP_MAX_PEERS; ++i)
     {
         actor_init(&remote[i].actor, &engine);
-        remote[i].last_weapon = remote[i].rejected_weapon = -1;
+        remote[i].weapon.last = -1;
+        remote[i].weapon.rejected = -1;
     }
     local_game = local_player = armory_player = 0;
     armory_epoch = 0;
@@ -179,8 +200,9 @@ static void interpolate_pose(Remote* r, const MpState* state, Snapshot* target, 
 }
 static void forget_weapon(Remote* r)
 {
-    r->last_weapon = r->rejected_weapon = -1;
-    r->weapon_retry_at = 0;
+    r->weapon.last = -1;
+    r->weapon.rejected = -1;
+    r->weapon.retry_at = 0;
 }
 static void report(MultiplayerFrame* frame, unsigned int id, const Remote* r,
                    const ActorResult* update, int cleanup_failed)
@@ -198,11 +220,11 @@ static void report(MultiplayerFrame* frame, unsigned int id, const Remote* r,
 }
 static void schedule_retry(Remote* r, DWORD now)
 {
-    DWORD delay = mp_retry_delay(r->failures);
+    DWORD delay = mp_retry_delay(r->retry.failures);
     /* Stop counting once the delay is capped, so the counter cannot overflow. */
     if (delay < MP_RETRY_MAX_MS)
-        ++r->failures;
-    r->retry_at = now + delay;
+        ++r->retry.failures;
+    r->retry.at = now + delay;
     r->state = RS_BACKOFF;
 }
 /* What one tick knows about the local game, shared by every tick step. */
@@ -336,8 +358,8 @@ static void take_peer_handoff(MultiplayerFrame* result)
 
 static int remote_world_changed(const Remote* r)
 {
-    return r->world_low != local_low || r->world_high != local_high ||
-           r->local_epoch != world_epoch;
+    return r->world.low != local_low || r->world.high != local_high ||
+           r->world.local_epoch != world_epoch;
 }
 
 /* True when this peer should have a replica in the local world now. */
@@ -359,7 +381,7 @@ static void remove_unwanted(Remote* r, const LocalTick* tick, RemoteTick* rt)
         return;
     }
     r->state = RS_IDLE;
-    r->failures = 0;
+    r->retry.failures = 0;
     forget_weapon(r);
 }
 
@@ -371,13 +393,13 @@ static void enter_waiting(Remote* r, const LocalTick* tick, const PeerState* pee
     {
         r->session = peer->session;
         r->epoch = peer->state.world_epoch;
-        r->world_low = local_low;
-        r->world_high = local_high;
-        r->local_epoch = world_epoch;
+        r->world.low = local_low;
+        r->world.high = local_high;
+        r->world.local_epoch = world_epoch;
         r->entered_at = now;
         r->state = RS_WAITING;
     }
-    else if (r->state == RS_BACKOFF && (int32_t)(now - r->retry_at) >= 0)
+    else if (r->state == RS_BACKOFF && (int32_t)(now - r->retry.at) >= 0)
     {
         r->state = RS_WAITING;
         r->entered_at = now - PEER_SPAWN_DELAY_MS;
@@ -424,7 +446,7 @@ static void wait_for_torso(Remote* r, const LocalTick* tick, RemoteTick* rt)
         else
         {
             r->state = RS_SPAWNED;
-            r->failures = 0;
+            r->retry.failures = 0;
         }
     }
     else if (tick->now - r->entered_at >= 3000u)
@@ -443,11 +465,11 @@ static void arm_remote(Remote* r, const LocalTick* tick, RemoteTick* rt)
     int slot = rt->target.weapon_slot;
     if (slot < 0)
     {
-        r->last_weapon = slot;
+        r->weapon.last = slot;
         return;
     }
-    if (slot == r->last_weapon ||
-        (slot == r->rejected_weapon && (int32_t)(tick->now - r->weapon_retry_at) < 0))
+    if (slot == r->weapon.last ||
+        (slot == r->weapon.rejected && (int32_t)(tick->now - r->weapon.retry_at) < 0))
         return;
 
     int armed = actor_arm(&r->actor, slot);
@@ -455,19 +477,19 @@ static void arm_remote(Remote* r, const LocalTick* tick, RemoteTick* rt)
         abandon(r, tick->local->game, &rt->update, &rt->cleanup_failed);
     else if (armed)
     {
-        r->last_weapon = slot;
-        r->rejected_weapon = -1;
+        r->weapon.last = slot;
+        r->weapon.rejected = -1;
     }
     else
     {
-        if (slot != r->rejected_weapon)
+        if (slot != r->weapon.rejected)
         {
             rt->update.event = ACTOR_REJECTED;
             rt->update.reason = ACTOR_REASON_WEAPON;
             rt->update.entity = r->actor.entity;
         }
-        r->rejected_weapon = slot;
-        r->weapon_retry_at = tick->now + 1000u;
+        r->weapon.rejected = slot;
+        r->weapon.retry_at = tick->now + 1000u;
     }
 }
 
@@ -532,7 +554,7 @@ static int tick_remote(unsigned int id, const LocalTick* tick, MultiplayerFrame*
     {
         actor_init(&r->actor, &engine);
         r->state = RS_IDLE;
-        r->failures = 0;
+        r->retry.failures = 0;
     }
 
     int wanted = remote_wanted(tick, rt.peer);
