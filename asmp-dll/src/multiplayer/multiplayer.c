@@ -5,8 +5,6 @@
 #include "../game/ui.h"
 #include "../game/display_hook.h"
 
-/* Retry delay doubles for this many failures, then stays at the maximum. */
-#define PEER_RETRY_DOUBLINGS 4u
 /* A peer must wait this long in RS_WAITING before its actor is spawned. */
 #define PEER_SPAWN_DELAY_MS 2000u
 
@@ -200,9 +198,9 @@ static void report(MultiplayerFrame* frame, unsigned int id, const Remote* r,
 }
 static void schedule_retry(Remote* r, DWORD now)
 {
-    DWORD delay =
-        r->failures < PEER_RETRY_DOUBLINGS ? (MP_RETRY_FIRST_MS << r->failures) : MP_RETRY_MAX_MS;
-    if (r->failures < PEER_RETRY_DOUBLINGS)
+    DWORD delay = mp_retry_delay(r->failures);
+    /* Stop counting once the delay is capped, so the counter cannot overflow. */
+    if (delay < MP_RETRY_MAX_MS)
         ++r->failures;
     r->retry_at = now + delay;
     r->state = RS_BACKOFF;

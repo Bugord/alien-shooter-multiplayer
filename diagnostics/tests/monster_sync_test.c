@@ -29,49 +29,62 @@ typedef struct MockSlot
     int f_spawn_host;
     uintptr_t f_root;
 } MockSlot;
+/* Per monster: puppet/combat state and death visual in mock_slots, armor
+   debris in armor_slots. Each mock resolves its slot from the handle it gets. */
 static MockSlot mock_slots[MP_MONSTER_CAPACITY];
 static MockSlot armor_slots[MP_MONSTER_CAPACITY];
-static unsigned int mock_slot;
-static int armor_selected;
-#define visual_slot       (*(armor_selected ? &armor_slots[mock_slot] : &mock_slots[mock_slot]))
-#define native            (mock_slots[mock_slot].unit)
-#define last_pose         (mock_slots[mock_slot].pose)
-#define last_replay       (mock_slots[mock_slot].replay_sequence)
-#define selected          (mock_slots[mock_slot].f_selected)
-#define owned             (mock_slots[mock_slot].f_owned)
-#define removal_abandoned (mock_slots[mock_slot].f_removal_abandoned)
-#define spawns            (mock_slots[mock_slot].f_spawns)
-#define watches           (mock_slots[mock_slot].f_watches)
-#define attaches          (mock_slots[mock_slot].f_attaches)
-#define applies           (mock_slots[mock_slot].f_applies)
-#define health_writes     (mock_slots[mock_slot].f_health_writes)
-#define replays           (mock_slots[mock_slot].f_replays)
-#define removals          (mock_slots[mock_slot].f_removals)
-#define native_removals   (mock_slots[mock_slot].f_native_removals)
-#define releases          (mock_slots[mock_slot].f_releases)
-#define last_health       (mock_slots[mock_slot].f_last_health)
-#define spawn_health      (mock_slots[mock_slot].f_spawn_health)
-#define visual_owned      (visual_slot.f_visual_owned)
-#define visual_plays      (visual_slot.f_visual_plays)
-#define visual_animation  (visual_slot.f_visual_animation)
-#define visual_removes    (visual_slot.f_visual_removes)
-#define visual_pose       (visual_slot.death_pose)
-#define visual_vid        (visual_slot.f_visual_vid)
-#define spawn_vid         (mock_slots[mock_slot].f_spawn_vid)
-#define spawn_host        (mock_slots[mock_slot].f_spawn_host)
+/* Shorthand for the single-monster checks below, which all inspect slot 0.
+   The mocks never use these names. */
+#define native            (mock_slots[0].unit)
+#define last_pose         (mock_slots[0].pose)
+#define last_replay       (mock_slots[0].replay_sequence)
+#define selected          (mock_slots[0].f_selected)
+#define owned             (mock_slots[0].f_owned)
+#define removal_abandoned (mock_slots[0].f_removal_abandoned)
+#define spawns            (mock_slots[0].f_spawns)
+#define watches           (mock_slots[0].f_watches)
+#define attaches          (mock_slots[0].f_attaches)
+#define applies           (mock_slots[0].f_applies)
+#define health_writes     (mock_slots[0].f_health_writes)
+#define replays           (mock_slots[0].f_replays)
+#define removals          (mock_slots[0].f_removals)
+#define native_removals   (mock_slots[0].f_native_removals)
+#define releases          (mock_slots[0].f_releases)
+#define last_health       (mock_slots[0].f_last_health)
+#define spawn_health      (mock_slots[0].f_spawn_health)
+#define visual_owned      (mock_slots[0].f_visual_owned)
+#define visual_plays      (mock_slots[0].f_visual_plays)
+#define visual_animation  (mock_slots[0].f_visual_animation)
+#define visual_removes    (mock_slots[0].f_visual_removes)
+#define visual_pose       (mock_slots[0].death_pose)
+#define visual_vid        (mock_slots[0].f_visual_vid)
+#define spawn_vid         (mock_slots[0].f_spawn_vid)
+#define spawn_host        (mock_slots[0].f_spawn_host)
 static uint32_t local_epoch;
 static int installed;
 static int fail_install, fail_init, fail_spawn, fail_apply, fail_remove, fail_release;
 static int fail_visual, fail_visual_remove;
 static unsigned int unhooks, fixture_stops;
 static DWORD clock_now;
-/* The real UnitPuppet and UnitCombat are private to their modules; these mock
-   handles only name the mock slot that the coordinator passed. */
+/* The real UnitPuppet, UnitCombat and UnitDeath are private to their modules;
+   these mock handles only carry the slot index the coordinator asked for. */
 struct UnitPuppet
 {
     unsigned int index;
 };
+struct UnitCombat
+{
+    unsigned int index;
+};
+/* Death slots below MP_MONSTER_CAPACITY are death visuals; the rest are the
+   armor-debris slots of the same monsters. */
+struct UnitDeath
+{
+    unsigned int index;
+};
 static UnitPuppet mock_puppets[MP_MONSTER_CAPACITY];
+static UnitCombat mock_fixtures[MP_MONSTER_CAPACITY];
+static UnitDeath mock_deaths[MP_MONSTER_CAPACITY * 2u];
 UnitPuppet* unit_puppet_slot(unsigned int index)
 {
     if (index >= MP_MONSTER_CAPACITY)
@@ -79,16 +92,6 @@ UnitPuppet* unit_puppet_slot(unsigned int index)
     mock_puppets[index].index = index;
     return &mock_puppets[index];
 }
-static void use_puppet(const UnitPuppet* puppet)
-{
-    CHECK(puppet && puppet >= mock_puppets && puppet < mock_puppets + MP_MONSTER_CAPACITY);
-    mock_slot = puppet->index;
-}
-struct UnitCombat
-{
-    unsigned int index;
-};
-static UnitCombat mock_fixtures[MP_MONSTER_CAPACITY];
 UnitCombat* unit_combat_slot(unsigned int index)
 {
     if (index >= MP_MONSTER_CAPACITY)
@@ -96,18 +99,6 @@ UnitCombat* unit_combat_slot(unsigned int index)
     mock_fixtures[index].index = index;
     return &mock_fixtures[index];
 }
-static void use_fixture(const UnitCombat* fixture)
-{
-    CHECK(fixture && fixture >= mock_fixtures && fixture < mock_fixtures + MP_MONSTER_CAPACITY);
-    mock_slot = fixture->index;
-}
-/* Death slots below MP_MONSTER_CAPACITY are death visuals; the rest are the
-   armor-debris slots of the same monsters. */
-struct UnitDeath
-{
-    unsigned int index;
-};
-static UnitDeath mock_deaths[MP_MONSTER_CAPACITY * 2u];
 UnitDeath* unit_death_slot(unsigned int index)
 {
     if (index >= MP_MONSTER_CAPACITY * 2u)
@@ -115,11 +106,36 @@ UnitDeath* unit_death_slot(unsigned int index)
     mock_deaths[index].index = index;
     return &mock_deaths[index];
 }
-static void use_death(const UnitDeath* death)
+static MockSlot* puppet_mock(const UnitPuppet* puppet)
+{
+    CHECK(puppet && puppet >= mock_puppets && puppet < mock_puppets + MP_MONSTER_CAPACITY);
+    return &mock_slots[puppet->index];
+}
+static MockSlot* fixture_mock(const UnitCombat* fixture)
+{
+    CHECK(fixture && fixture >= mock_fixtures && fixture < mock_fixtures + MP_MONSTER_CAPACITY);
+    return &mock_slots[fixture->index];
+}
+static int death_is_armor(const UnitDeath* death)
 {
     CHECK(death && death >= mock_deaths && death < mock_deaths + MP_MONSTER_CAPACITY * 2u);
-    armor_selected = death->index >= MP_MONSTER_CAPACITY;
-    mock_slot = death->index % MP_MONSTER_CAPACITY;
+    return death->index >= MP_MONSTER_CAPACITY;
+}
+/* The visual state of a death slot: the monster's own slot or its armor slot. */
+static MockSlot* death_mock(const UnitDeath* death)
+{
+    unsigned int monster = death->index % MP_MONSTER_CAPACITY;
+    return death_is_armor(death) ? &armor_slots[monster] : &mock_slots[monster];
+}
+/* The puppet/combat state of the monster that owns a death slot. */
+static MockSlot* death_owner(const UnitDeath* death)
+{
+    (void)death_is_armor(death);
+    return &mock_slots[death->index % MP_MONSTER_CAPACITY];
+}
+static uintptr_t mock_root(const MockSlot* m)
+{
+    return 100u + (uintptr_t)(m - mock_slots) * 2u;
 }
 int unit_death_init(uintptr_t base, ActorCreate create)
 {
@@ -146,45 +162,47 @@ int unit_combat_observe_entity(uintptr_t game, uintptr_t entity, uintptr_t* priv
 int unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
                     unsigned int animation)
 {
-    use_death(death);
-    CHECK(game == local.game && !visual_owned && (armor_selected || (!owned && !selected)));
-    ++visual_plays;
-    visual_pose = *pose;
-    visual_animation = animation;
-    visual_owned = 1;
+    MockSlot* v = death_mock(death);
+    MockSlot* m = death_owner(death);
+    CHECK(game == local.game && !v->f_visual_owned &&
+          (death_is_armor(death) || (!m->f_owned && !m->f_selected)));
+    ++v->f_visual_plays;
+    v->death_pose = *pose;
+    v->f_visual_animation = animation;
+    v->f_visual_owned = 1;
     return fail_visual ? -1 : 1;
 }
 UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
 {
-    use_death(death);
+    MockSlot* v = death_mock(death);
     CHECK(game == local.game);
     UnitDeathSample s = {0};
-    s.entities = visual_owned ? 2u : 0u;
+    s.entities = v->f_visual_owned ? 2u : 0u;
     return s;
 }
 int unit_death_remove(UnitDeath* death, uintptr_t game)
 {
-    use_death(death);
+    MockSlot* v = death_mock(death);
     CHECK(game == local.game);
-    ++visual_removes;
-    if (fail_visual_remove && visual_owned)
+    ++v->f_visual_removes;
+    if (fail_visual_remove && v->f_visual_owned)
         return 0;
-    visual_owned = 0;
+    v->f_visual_owned = 0;
     return 1;
 }
 int unit_death_play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
                          unsigned int animation, unsigned int vid)
 {
-    use_death(death);
-    visual_vid = vid;
+    death_mock(death)->f_visual_vid = vid;
     return unit_death_play(death, game, pose, animation);
 }
 int unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose* pose,
                           unsigned int vid)
 {
-    use_death(death);
+    MockSlot* m = death_owner(death);
+    CHECK(death_is_armor(death));
     CHECK(vid == 70u || vid == 90u);
-    CHECK((!owned && !selected) || (owned && selected == 1 && vid == 90u));
+    CHECK((!m->f_owned && !m->f_selected) || (m->f_owned && m->f_selected == 1 && vid == 90u));
     return unit_death_play_type(death, game, pose, 15u, vid);
 }
 int unit_death_stop(void)
@@ -253,173 +271,177 @@ int unit_combat_init(uintptr_t base, ActorCreate create, ActorDestroy destroy,
 }
 int unit_puppet_watch_first(UnitPuppet* puppet, uintptr_t game, uintptr_t player)
 {
-    use_puppet(puppet);
-    CHECK(game == local.game && player == local.player && installed && !selected);
-    ++watches;
-    selected = 1;
-    native.state = UNIT_PUPPET_ACTIVE;
-    native.entity = 100u + mock_slot * 2u;
-    native.captured_attacks = native.captured_deaths = 0;
+    MockSlot* m = puppet_mock(puppet);
+    CHECK(game == local.game && player == local.player && installed && !m->f_selected);
+    ++m->f_watches;
+    m->f_selected = 1;
+    m->unit.state = UNIT_PUPPET_ACTIVE;
+    m->unit.entity = mock_root(m);
+    m->unit.captured_attacks = 0;
+    m->unit.captured_deaths = 0;
     return 1;
 }
 int unit_puppet_attach_entity(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                               uintptr_t entity)
 {
-    use_puppet(puppet);
-    CHECK(game == local.game && player == local.player && entity == mock_slots[mock_slot].f_root &&
-          owned && !selected);
-    native.predicted_hits = native.captured_attacks = native.captured_deaths =
-        native.captured_forms = 0;
-    native.predictive = native.transitioning = 0;
-    native.death_animation = 0;
-    last_replay = 0;
-    ++attaches;
-    selected = 2;
-    native.state = UNIT_PUPPET_ACTIVE;
-    native.entity = entity;
+    MockSlot* m = puppet_mock(puppet);
+    CHECK(game == local.game && player == local.player && entity == m->f_root && m->f_owned &&
+          !m->f_selected);
+    m->unit.predicted_hits = 0;
+    m->unit.captured_attacks = 0;
+    m->unit.captured_deaths = 0;
+    m->unit.captured_forms = 0;
+    m->unit.predictive = 0;
+    m->unit.transitioning = 0;
+    m->unit.death_animation = 0;
+    m->replay_sequence = 0;
+    ++m->f_attaches;
+    m->f_selected = 2;
+    m->unit.state = UNIT_PUPPET_ACTIVE;
+    m->unit.entity = entity;
     return 1;
 }
 int unit_puppet_prediction(UnitPuppet* puppet, uintptr_t game)
 {
-    use_puppet(puppet);
-    CHECK(game == local.game && selected == 2 && owned);
-    native.predictive = 1;
+    MockSlot* m = puppet_mock(puppet);
+    CHECK(game == local.game && m->f_selected == 2 && m->f_owned);
+    m->unit.predictive = 1;
     return 1;
 }
 int unit_combat_spawn(UnitCombat* fixture, const Snapshot* spawn)
 {
-    use_fixture(fixture);
-    CHECK(spawn && spawn->game == local.game && !owned);
-    ++spawns;
-    owned = 1;
-    mock_slots[mock_slot].f_root = 100u + mock_slot * 2u;
-    spawn_health = spawn->health;
+    MockSlot* m = fixture_mock(fixture);
+    CHECK(spawn && spawn->game == local.game && !m->f_owned);
+    ++m->f_spawns;
+    m->f_owned = 1;
+    m->f_root = mock_root(m);
+    m->f_spawn_health = spawn->health;
     return fail_spawn ? -1 : 1;
 }
 int unit_combat_spawn_type(UnitCombat* fixture, const Snapshot* spawn, unsigned int vid,
                            const UnitPuppetPose* pose, int host)
 {
-    use_fixture(fixture);
+    MockSlot* m = fixture_mock(fixture);
     CHECK(pose);
-    spawn_vid = vid;
-    spawn_host = host;
-    memset(&native, 0, sizeof(native));
-    native.vid = vid;
-    native.animation = STEAM_ANIM_IDLE;
-    native.health = 88;
+    m->f_spawn_vid = vid;
+    m->f_spawn_host = host;
+    memset(&m->unit, 0, sizeof(m->unit));
+    m->unit.vid = vid;
+    m->unit.animation = STEAM_ANIM_IDLE;
+    m->unit.health = 88;
     int result = unit_combat_spawn(fixture, spawn);
-    native.x = pose->x;
-    native.y = pose->y;
-    native.z = pose->z;
-    native.velocity = pose->velocity;
-    native.direction = pose->direction;
-    native.moving = pose->moving;
+    m->unit.x = pose->x;
+    m->unit.y = pose->y;
+    m->unit.z = pose->z;
+    m->unit.velocity = pose->velocity;
+    m->unit.direction = pose->direction;
+    m->unit.moving = pose->moving;
     return result;
 }
 int unit_combat_spawn_predictive(UnitCombat* fixture, const Snapshot* spawn, unsigned int vid,
                                  const UnitPuppetPose* pose)
 {
-    use_fixture(fixture);
     return unit_combat_spawn_type(fixture, spawn, vid, pose, 0);
 }
 int unit_puppet_watch_stationary(UnitPuppet* puppet, uintptr_t game, uintptr_t player,
                                  uintptr_t entity)
 {
-    use_puppet(puppet);
-    CHECK(owned && entity == mock_slots[mock_slot].f_root && spawn_host);
+    MockSlot* m = puppet_mock(puppet);
+    CHECK(m->f_owned && entity == m->f_root && m->f_spawn_host);
     int result = unit_puppet_watch_first(puppet, game, player);
-    native.entity = entity;
-    native.behavior = native.moving = 0;
-    native.velocity = 0;
+    m->unit.entity = entity;
+    m->unit.behavior = 0;
+    m->unit.moving = 0;
+    m->unit.velocity = 0;
     return result;
 }
 UnitCombatSample unit_combat_sample(UnitCombat* fixture, uintptr_t game, int compare_sources)
 {
-    use_fixture(fixture);
+    MockSlot* m = fixture_mock(fixture);
     CHECK(game == local.game && (compare_sources == 0 || compare_sources == 1));
     UnitCombatSample s = {0};
-    s.root = owned ? mock_slots[mock_slot].f_root : 0;
-    s.child = owned ? 101u + mock_slot * 2u : 0;
-    s.private_entities = owned ? 2u : 0;
+    s.root = m->f_owned ? m->f_root : 0;
+    s.child = m->f_owned ? mock_root(m) + 1u : 0;
+    s.private_entities = m->f_owned ? 2u : 0;
     s.sources_unchanged = 1;
-    s.current_vid = native.vid;
-    s.transitioning = native.transitioning;
+    s.current_vid = m->unit.vid;
+    s.transitioning = m->unit.transitioning;
     return s;
 }
 int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* pose)
 {
-    use_puppet(puppet);
-    CHECK(game == local.game && selected == 2 && pose);
-    ++applies;
-    last_pose = *pose;
+    MockSlot* m = puppet_mock(puppet);
+    CHECK(game == local.game && m->f_selected == 2 && pose);
+    ++m->f_applies;
+    m->pose = *pose;
     if (fail_apply)
         return -1;
-    native.x = pose->x;
-    native.y = pose->y;
-    native.z = pose->z;
-    native.velocity = pose->velocity;
-    native.direction = pose->direction;
-    native.moving = pose->moving;
+    m->unit.x = pose->x;
+    m->unit.y = pose->y;
+    m->unit.z = pose->z;
+    m->unit.velocity = pose->velocity;
+    m->unit.direction = pose->direction;
+    m->unit.moving = pose->moving;
     return 1;
 }
 int unit_puppet_health(UnitPuppet* puppet, uintptr_t game, int value)
 {
-    use_puppet(puppet);
-    CHECK(game == local.game && selected == 2);
-    ++health_writes;
-    last_health = value;
-    native.health = value;
+    MockSlot* m = puppet_mock(puppet);
+    CHECK(game == local.game && m->f_selected == 2);
+    ++m->f_health_writes;
+    m->f_last_health = value;
+    m->unit.health = value;
     return 1;
 }
 int unit_puppet_replay(UnitPuppet* puppet, uintptr_t game, uint32_t sequence,
                        unsigned int animation)
 {
-    use_puppet(puppet);
-    CHECK(game == local.game && selected == 2 && animation == STEAM_ANIM_ATTACK);
-    CHECK(!last_replay || mp_sequence_newer(sequence, last_replay));
-    last_replay = sequence;
-    ++replays;
+    MockSlot* m = puppet_mock(puppet);
+    CHECK(game == local.game && m->f_selected == 2 && animation == STEAM_ANIM_ATTACK);
+    CHECK(!m->replay_sequence || mp_sequence_newer(sequence, m->replay_sequence));
+    m->replay_sequence = sequence;
+    ++m->f_replays;
     return 1;
 }
 UnitPuppetSample unit_puppet_sample(UnitPuppet* puppet, uintptr_t game)
 {
-    use_puppet(puppet);
+    MockSlot* m = puppet_mock(puppet);
     CHECK(game == local.game);
-    return native;
+    return m->unit;
 }
 int unit_puppet_release(UnitPuppet* puppet, uintptr_t game)
 {
-    use_puppet(puppet);
+    MockSlot* m = puppet_mock(puppet);
     CHECK(game == local.game);
-    ++releases;
+    ++m->f_releases;
     if (fail_release)
         return 0;
-    selected = 0;
-    native.state = UNIT_PUPPET_READY;
-    native.entity = 0;
-    last_replay = 0;
+    m->f_selected = 0;
+    m->unit.state = UNIT_PUPPET_READY;
+    m->unit.entity = 0;
+    m->replay_sequence = 0;
     return 1;
 }
 int unit_combat_remove(UnitCombat* fixture, uintptr_t game)
 {
-    use_fixture(fixture);
+    MockSlot* m = fixture_mock(fixture);
     CHECK(game == local.game);
-    ++removals;
-    if (!owned)
+    ++m->f_removals;
+    if (!m->f_owned)
     {
-        removal_abandoned = 0;
+        m->f_removal_abandoned = 0;
         return 1;
     }
-    CHECK(!selected); /* Release all borrowed hook references before deletion. */
-    if (removal_abandoned)
+    CHECK(!m->f_selected); /* Release all borrowed hook references before deletion. */
+    if (m->f_removal_abandoned)
         return 0;
-    ++native_removals;
+    ++m->f_native_removals;
     if (fail_remove)
     {
-        removal_abandoned = 1;
+        m->f_removal_abandoned = 1;
         return 0;
     }
-    owned = 0;
+    m->f_owned = 0;
     return 1;
 }
 int unit_combat_stop(void)
@@ -438,22 +460,8 @@ int unit_puppet_stop(void)
     return 1;
 }
 
-/* Mock calls switch mock_slot/armor_selected to the handle they receive. The
-   checks below read slot 0's death visual through the macros, so reset that
-   view after every coordinator tick. */
-static MonsterSyncFrame tick_and_view_slot0(const Snapshot* snapshot, enum ProbeResult result,
-                                            uint32_t epoch, uint32_t tick, DWORD now)
-{
-    MonsterSyncFrame frame = monster_sync_tick(snapshot, result, epoch, tick, now);
-    mock_slot = 0;
-    armor_selected = 0;
-    return frame;
-}
-
 static void defaults(void)
 {
-    mock_slot = 0;
-    armor_selected = 0;
     memset(mock_slots, 0, sizeof(mock_slots));
     memset(armor_slots, 0, sizeof(armor_slots));
     memset(&local, 0, sizeof(local));
@@ -512,7 +520,7 @@ static MonsterSyncFrame step_result(DWORD now, int authority, enum ProbeResult r
 {
     clock_now = now;
     monster_sync_publish(&remote, authority, now);
-    return tick_and_view_slot0(&local, result, local_epoch, now / 10u, now);
+    return monster_sync_tick(&local, result, local_epoch, now / 10u, now);
 }
 static MonsterSyncFrame step(DWORD now, int authority)
 {
@@ -529,7 +537,7 @@ static MonsterSyncFrame begin(enum MonsterRole role)
 static void finish(void)
 {
     monster_sync_request_stop();
-    MonsterSyncFrame f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 0, clock_now + 1u);
+    MonsterSyncFrame f = monster_sync_tick(&local, PROBE_OK, local_epoch, 0, clock_now + 1u);
     CHECK(f.cleanup && monster_sync_stopped() && monster_sync_stop());
     CHECK(!installed && !owned && !selected);
 }
@@ -585,7 +593,7 @@ static MonsterSyncFrame gallery_step(DWORD now, int authority)
     clock_now = now;
     for (unsigned int i = 0; i < 48u; ++i)
         monster_sync_publish_at(i, &gallery_remote[i], authority, now);
-    return tick_and_view_slot0(&local, PROBE_OK, local_epoch, now / 10u, now);
+    return monster_sync_tick(&local, PROBE_OK, local_epoch, now / 10u, now);
 }
 static void gallery_checks(void)
 {
@@ -639,7 +647,7 @@ static void gallery_checks(void)
         CHECK(mock_slots[i].f_visual_plays == 1u && mock_slots[i].f_spawns == 1u);
     /* Expiry cleans live replicas and dead visual ownership for every slot. */
     clock_now = 3021u;
-    f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 302u, clock_now);
+    f = monster_sync_tick(&local, PROBE_OK, local_epoch, 302u, clock_now);
     CHECK(!f.gallery_active && !f.gallery_faults);
     for (unsigned int i = 0; i < 48u; ++i)
         CHECK(!mock_slots[i].f_owned && !mock_slots[i].f_selected && !mock_slots[i].f_visual_owned);
@@ -1214,7 +1222,7 @@ static void prediction_chain_checks(void)
     predicted_damage(0u, 70, 50u, STEAM_ANIM_GIB_DEATH, 0);
     step(2010u, 0);
     clock_now = 3011u;
-    f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 301u, clock_now);
+    f = monster_sync_tick(&local, PROBE_OK, local_epoch, 301u, clock_now);
     CHECK(f.state == MS_WAITING && !owned && !selected && !visual_owned && !f.deaths);
     remote.state.sequence++;
     f = step(3020u, 0);
@@ -1410,7 +1418,7 @@ int main(void)
     f = begin(MONSTER_CLIENT);
     CHECK(f.state == MS_ACTIVE);
     clock_now = 3001u;
-    f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 300u, clock_now);
+    f = monster_sync_tick(&local, PROBE_OK, local_epoch, 300u, clock_now);
     CHECK(f.state == MS_WAITING && !owned &&
           native_removals == 1); /* No new publish: host expired. */
     CHECK(step(3010u, 0).state == MS_ACTIVE && spawns == 2);
@@ -1530,7 +1538,7 @@ int main(void)
     CHECK(f.state == MS_ACTIVE);
     fail_release = 1;
     monster_sync_request_stop();
-    f = tick_and_view_slot0(&local, PROBE_OK, local_epoch, 0, 2010u);
+    f = monster_sync_tick(&local, PROBE_OK, local_epoch, 0, 2010u);
     CHECK(!f.cleanup && !monster_sync_stopped() && !monster_sync_stop() && !unhooks &&
           !fixture_stops);
     fail_release = 0;

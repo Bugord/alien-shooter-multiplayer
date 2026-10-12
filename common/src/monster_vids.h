@@ -17,7 +17,11 @@ enum MonsterVid
     MONSTER_VID_FIRST = MONSTER_VID_SLUG,
     MONSTER_VID_LAST = MONSTER_VID_TANK_ARMORED,
     MONSTER_VID_STEP = 10,
-    MONSTER_VID_FROZEN_DELTA = 9
+    MONSTER_VID_FROZEN_DELTA = 9,
+    /* Class-5 armor-break shell that 70 creates on death; it creates one 60. */
+    MONSTER_VID_MONSTER2_ARMOR_SHELL = 771,
+    /* Class-9 weapon part linked to 50. */
+    MONSTER_VID_MONSTER1_PART = 108
 };
 
 /* A VID the host can spawn: 40, 50, ..., 90. */

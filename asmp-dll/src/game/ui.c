@@ -1,5 +1,6 @@
 #include <string.h>
 #include "ui.h"
+#include "world_list.h"
 static uintptr_t base;
 typedef void*(__fastcall* StringCreate)(void*, void*, const char*);
 typedef void(__fastcall* LoadMap)(void*, void*, char*);
@@ -52,10 +53,9 @@ uintptr_t ui_menu_item(uintptr_t game, unsigned int vid, unsigned int direction)
     __try
     {
         uintptr_t list = game + STEAM_GAME_MENU_LIST_OFFSET;
-        unsigned int count = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET);
-        unsigned int cap = *(unsigned int*)(list + STEAM_LIST_CAPACITY_OFFSET);
-        uintptr_t* items = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
-        if (!items || count > cap || count > STEAM_MENU_LIST_MAX_ENTRIES)
+        uintptr_t* items;
+        unsigned int count;
+        if (!native_list_read(list, STEAM_MENU_LIST_MAX_ENTRIES, &items, &count))
             return 0;
         for (unsigned int i = 0; i < count; ++i)
         {
@@ -142,10 +142,9 @@ int ui_show_weapon_icons(uintptr_t game)
         /* The direction byte cannot identify these: icons store slot*256/10 and
            the ammo gauges overwrite it with the ammo fraction. All of them are shown. */
         uintptr_t list = game + STEAM_GAME_MENU_LIST_OFFSET;
-        unsigned int count = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET);
-        unsigned int cap = *(unsigned int*)(list + STEAM_LIST_CAPACITY_OFFSET);
-        uintptr_t* items = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
-        if (!items || count > cap || count > STEAM_MENU_LIST_MAX_ENTRIES)
+        uintptr_t* items;
+        unsigned int count;
+        if (!native_list_read(list, STEAM_MENU_LIST_MAX_ENTRIES, &items, &count))
             return 0;
         for (unsigned int i = 0; i < count; ++i)
         {

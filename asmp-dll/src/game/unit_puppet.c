@@ -204,8 +204,8 @@ static int observe_form(UnitPuppet* puppet, uintptr_t entity, unsigned int reque
     uintptr_t actual = *(uintptr_t*)(entity + STEAM_ENTITY_VID_OFFSET);
     if (!result && actual != puppet->vid && puppet->watching)
     {
-        unsigned int frozen = puppet->current_vid / 10u * 10u + 9u;
-        if (!mp_monster_origin(puppet->current_vid) || frozen >= 1024u ||
+        unsigned int frozen = puppet->current_vid + MONSTER_VID_FROZEN_DELTA;
+        if (!mp_monster_origin(puppet->current_vid) || frozen >= STEAM_STOCK_VID_LIMIT ||
             actual != *(uintptr_t*)(puppet->game + STEAM_GAME_VID_TABLE_OFFSET + frozen * 4u) ||
             !actual || *(unsigned int*)(actual + STEAM_VID_INDEX_OFFSET) != frozen ||
             *(unsigned int*)(actual + STEAM_VID_CLASS_OFFSET) != STEAM_UNIT_CLASS)
@@ -246,7 +246,7 @@ static int prediction_descriptor(const UnitPuppet* puppet, uintptr_t vid, int ro
     if (!vid || !sanitized(vid) || *(int*)(vid + STEAM_VID_CREATE_SCRIPT_OFFSET) != -1)
         return 0;
     unsigned int index = *(unsigned int*)(vid + STEAM_VID_INDEX_OFFSET);
-    if (index >= 1024u ||
+    if (index >= STEAM_STOCK_VID_LIMIT ||
         (vid == *(uintptr_t*)(puppet->game + STEAM_GAME_VID_TABLE_OFFSET + index * 4u) &&
          vid != puppet->changing_vid))
         return 0;
@@ -268,10 +268,11 @@ static int observed_action(UnitPuppet* puppet, void* e, unsigned int kind, intpt
     uintptr_t prepared = 0;
     if ((uintptr_t)e == puppet->entity && kind == STEAM_ACT_CHANGE_VID)
     {
-        if (puppet->predictive &&
-            (!mp_monster_origin(puppet->current_vid) || a != (intptr_t)(puppet->current_vid + 9u)))
+        if (puppet->predictive && (!mp_monster_origin(puppet->current_vid) ||
+                                   a != (intptr_t)(puppet->current_vid + MONSTER_VID_FROZEN_DELTA)))
             return 0;
-        if (a > 0 && a < 1024 && observe_form(puppet, (uintptr_t)e, (unsigned int)a, &prepared) < 0)
+        if (a > 0 && a < STEAM_STOCK_VID_LIMIT &&
+            observe_form(puppet, (uintptr_t)e, (unsigned int)a, &prepared) < 0)
             return 0;
         /* Prediction must never escape through an unsupported stock descriptor. */
         if (puppet->predictive && (!prepared || !prediction_descriptor(puppet, prepared, 1)))
@@ -345,9 +346,10 @@ static int prediction_action(UnitPuppet* puppet, void* e, unsigned int kind, int
             /* Native animation completion may leave pain and resume the
                replicated movement pose, but never reset frozen/death forms. */
             unsigned int anim = *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET);
-            if (!puppet->dying && !puppet->transitioning && puppet->current_vid % 10u != 9u &&
+            if (!puppet->dying && !puppet->transitioning &&
+                !mp_monster_frozen(puppet->current_vid) &&
                 (anim == STEAM_ANIM_IDLE || anim == STEAM_ANIM_RUN || anim == STEAM_ANIM_ATTACK ||
-                 anim == 13u || anim == 14u))
+                 anim == STEAM_ANIM_PAIN || anim == STEAM_ANIM_PAIN_ALT))
             {
                 if (part)
                     shared.api.animation(e, NULL, STEAM_ANIM_IDLE);
@@ -621,13 +623,9 @@ static int attach(UnitPuppet* puppet, uintptr_t game, uintptr_t player, uintptr_
             return 0;
         for (unsigned int cat = 0; cat < STEAM_TICK_ENTITY_LIST_COUNT; ++cat)
         {
-            uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + cat * STEAM_LIST_SIZE;
-            unsigned int count = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET),
-                         cap = *(unsigned int*)(list + STEAM_LIST_CAPACITY_OFFSET);
-            uintptr_t* entries = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
-            if (!count)
-                continue;
-            if (!entries || count > cap || count > STEAM_LIST_MAX_ENTRIES)
+            uintptr_t* entries;
+            unsigned int count;
+            if (!world_list_read(game, cat, &entries, &count))
                 return 0;
             for (unsigned int i = 0; i < count; ++i)
             {
@@ -790,7 +788,7 @@ int unit_puppet_host_freeze(UnitPuppet* puppet, uintptr_t game)
     {
         if (!registered(puppet, game))
             return 0;
-        unsigned int frozen = puppet->current_vid + 9u;
+        unsigned int frozen = puppet->current_vid + MONSTER_VID_FROZEN_DELTA;
         on_action((void*)puppet->entity, NULL, STEAM_ACT_CHANGE_VID, frozen, STEAM_ANIM_IDLE, 0);
         if (puppet->current_vid != frozen || !registered(puppet, game))
             return 0;
@@ -853,12 +851,14 @@ int unit_puppet_apply(UnitPuppet* puppet, uintptr_t game, const UnitPuppetPose* 
         puppet->pose = *p;
         shared.api.move((void*)puppet->entity, NULL, p->x, p->y, p->z);
         shared.api.rotate((void*)puppet->entity, NULL, p->direction);
-        int frozen = puppet->predictive && puppet->current_vid % 10u == 9u;
+        int frozen = puppet->predictive && mp_monster_frozen(puppet->current_vid);
         *(float*)(puppet->entity + STEAM_ENTITY_VELOCITY_OFFSET) = frozen ? 0 : p->velocity;
         uint32_t* flags = (uint32_t*)(puppet->entity + STEAM_ENTITY_FLAGS_OFFSET);
         *flags = (*flags & ~STEAM_ENTITY_MOVING_FLAG) |
                  (p->moving && !frozen ? STEAM_ENTITY_MOVING_FLAG : 0);
-        if (!frozen && !(puppet->predictive && (animation == 13u || animation == 14u)) &&
+        if (!frozen &&
+            !(puppet->predictive &&
+              (animation == STEAM_ANIM_PAIN || animation == STEAM_ANIM_PAIN_ALT)) &&
             (!puppet->combat ||
              *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET) != STEAM_ANIM_ATTACK) &&
             *(unsigned int*)(puppet->entity + STEAM_ENTITY_ANIM_OFFSET) !=
@@ -922,7 +922,7 @@ int unit_puppet_prediction_test_hit(UnitPuppet* puppet, uintptr_t game, int dama
         {
             if (!mp_monster_origin(puppet->current_vid))
                 return 0;
-            unsigned int frozen = puppet->current_vid + 9u;
+            unsigned int frozen = puppet->current_vid + MONSTER_VID_FROZEN_DELTA;
             on_action((void*)puppet->entity, NULL, STEAM_ACT_CHANGE_VID, frozen, STEAM_ANIM_IDLE,
                       0);
             if (puppet->current_vid != frozen || !registered(puppet, game))

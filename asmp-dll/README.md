@@ -6,7 +6,7 @@ diagnostic launcher; see [Build, test and review](../diagnostics/README.md).
 
 | Path | Contents |
 | --- | --- |
-| [src/game/](src/game) | Engine API: verified addresses and layouts ([steam_profile.h](src/game/steam_profile.h)), probe, `world_list.h` (read-only entity list lookup), actor factory and combat API, menu/text bindings, and the vtable hooks (tick, world load, action, display) |
+| [src/game/](src/game) | Engine API: verified addresses and layouts ([steam_profile.h](src/game/steam_profile.h)), probe, `world_list.h` (read-only native list access), `entity_class.h` (entity class to vtable), actor factory and combat API, menu/text bindings, and the vtable hooks (tick, world load, action, display) |
 | [src/multiplayer/](src/multiplayer) | Production runtime ([runtime.c](src/multiplayer/runtime.c)), session state machine ([session.c](src/multiplayer/session.c)) and remote-player coordinator ([multiplayer.c](src/multiplayer/multiplayer.c)) with its position interpolation ([pose_buffer.c](src/multiplayer/pose_buffer.c)); retry timing shared by the coordinators is in [retry_policy.h](src/multiplayer/retry_policy.h) |
 | [src/multiplayer/client/](src/multiplayer/client) | Connection, packet validation and peer state; no native game entities |
 

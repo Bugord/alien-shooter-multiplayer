@@ -255,12 +255,7 @@ static void schedule_retry(MonsterSlot* slot, uintptr_t game, DWORD now)
     slot->armor_presented = 0;
     slot->state = MS_BACKOFF;
     slot->retry_at = now + slot->retry_delay;
-    if (slot->retry_delay < MP_RETRY_MAX_MS)
-    {
-        slot->retry_delay *= 2u;
-        if (slot->retry_delay > MP_RETRY_MAX_MS)
-            slot->retry_delay = MP_RETRY_MAX_MS;
-    }
+    slot->retry_delay = mp_retry_next_delay(slot->retry_delay);
 }
 static int same_world(const MonsterSlot* slot, const MpMonsterState* s)
 {

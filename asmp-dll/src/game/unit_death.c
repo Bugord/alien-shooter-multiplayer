@@ -2,6 +2,8 @@
 #include <math.h>
 #include "unit_death.h"
 #include "../../../common/src/monster_vids.h"
+#include "entity_class.h"
+#include "world_list.h"
 
 #define DEATH_VID_COUNT    9u
 #define DEATH_GRAPH_LIMIT  32u
@@ -52,9 +54,7 @@ static int private_index(const UnitDeath* death, uintptr_t vid)
 }
 static uintptr_t vtable(const UnitDeath* death, unsigned int i)
 {
-    return death->base + (death->classes[i] == 5   ? STEAM_CANNON_VTABLE_RVA
-                          : death->classes[i] == 8 ? STEAM_TERRAIN_VTABLE_RVA
-                                                   : STEAM_SPRITE_VTABLE_RVA);
+    return death->base + entity_class_vtable_rva(death->classes[i]);
 }
 int unit_death_init(uintptr_t base, ActorCreate create)
 {
@@ -168,10 +168,7 @@ static int prepare(UnitDeath* death, uintptr_t game)
     }
     return 1;
 }
-/* Stock-descriptor admission policy, not a claim about native table capacity.
-   Dynamic map-owned descriptors (1024+) are never shallow-cloned here. */
-#define DEATH_STOCK_VID_LIMIT 1024u
-#define DEATH_CREATION_LIMIT  16u
+#define DEATH_CREATION_LIMIT 16u
 typedef struct DeathGraph
 {
     uintptr_t sources[DEATH_GRAPH_LIMIT];
@@ -198,9 +195,10 @@ static int graph_visit(UnitDeath* death, uintptr_t game, uintptr_t source, Death
         return 0;
     unsigned int index = *(unsigned int*)(source + STEAM_VID_INDEX_OFFSET);
     unsigned int class_id = *(unsigned int*)(source + STEAM_VID_CLASS_OFFSET);
-    if (index >= DEATH_STOCK_VID_LIMIT ||
+    if (index >= STEAM_STOCK_VID_LIMIT ||
         *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + index * 4u) != source ||
-        (class_id != 5u && class_id != 8u && class_id != 9u) ||
+        (class_id != STEAM_CANNON_CLASS && class_id != STEAM_TERRAIN_CLASS &&
+         class_id != STEAM_PUPPET_PART_CLASS) ||
         !*(uintptr_t*)(source + STEAM_VID_BEHAVIOR_OFFSET) ||
         *(unsigned int*)(source + STEAM_VID_CATEGORY_OFFSET) >= STEAM_TICK_ENTITY_LIST_COUNT ||
         *(uintptr_t*)(source + STEAM_VID_SERVICE_OFFSET) ||
@@ -274,7 +272,7 @@ static int graph_visit(UnitDeath* death, uintptr_t game, uintptr_t source, Death
 static int prepare_type(UnitDeath* death, uintptr_t game, unsigned int source_vid,
                         unsigned int animation, int armor, unsigned int* multiplicity)
 {
-    if (source_vid >= DEATH_STOCK_VID_LIMIT)
+    if (source_vid >= STEAM_STOCK_VID_LIMIT)
         return 0;
     uintptr_t source = *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + source_vid * 4u);
     if (!source || *(unsigned int*)(source + STEAM_VID_INDEX_OFFSET) != source_vid ||
@@ -315,11 +313,9 @@ static int find_private(const UnitDeath* death, uintptr_t game, uintptr_t wanted
 {
     for (unsigned int c = 0; c < STEAM_TICK_ENTITY_LIST_COUNT; ++c)
     {
-        uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + c * STEAM_LIST_SIZE;
-        unsigned int n = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET),
-                     cap = *(unsigned int*)(list + STEAM_LIST_CAPACITY_OFFSET);
-        uintptr_t* entries = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
-        if (n > cap || n > STEAM_LIST_MAX_ENTRIES || (n && !entries))
+        uintptr_t* entries;
+        unsigned int n;
+        if (!world_list_read(game, c, &entries, &n))
             return 0;
         for (unsigned int j = 0; j < n; ++j)
             if (entries[j] == wanted)
@@ -343,11 +339,9 @@ UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
         }
         for (unsigned int c = 0; c < STEAM_TICK_ENTITY_LIST_COUNT; ++c)
         {
-            uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + c * STEAM_LIST_SIZE;
-            unsigned int n = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET),
-                         cap = *(unsigned int*)(list + STEAM_LIST_CAPACITY_OFFSET);
-            uintptr_t* entries = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
-            if (n > cap || n > STEAM_LIST_MAX_ENTRIES || (n && !entries))
+            uintptr_t* entries;
+            unsigned int n;
+            if (!world_list_read(game, c, &entries, &n))
             {
                 s.fault = 1;
                 return s;
@@ -393,7 +387,8 @@ UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
                 if ((unsigned int)i == death->corpse)
                     ++s.corpses;
                 if ((unsigned int)i == death->gib ||
-                    (death->gib == DEATH_GRAPH_LIMIT && death->classes[i] == 5u && i != 0))
+                    (death->gib == DEATH_GRAPH_LIMIT && death->classes[i] == STEAM_CANNON_CLASS &&
+                     i != 0))
                     ++s.gibs;
             }
         }
@@ -519,9 +514,10 @@ int unit_death_remove(UnitDeath* death, uintptr_t game)
             int index = -1;
             for (unsigned int c = 0; c < STEAM_TICK_ENTITY_LIST_COUNT && !found; ++c)
             {
-                uintptr_t list = game + STEAM_WORLD_LIST_OFFSET + c * STEAM_LIST_SIZE;
-                unsigned int n = *(unsigned int*)(list + STEAM_LIST_COUNT_OFFSET);
-                uintptr_t* entries = *(uintptr_t**)(list + STEAM_LIST_ITEMS_OFFSET);
+                uintptr_t* entries;
+                unsigned int n;
+                if (!world_list_read(game, c, &entries, &n))
+                    return 0;
                 for (unsigned int j = 0; j < n; ++j)
                 {
                     uintptr_t e = entries[j];
@@ -538,9 +534,12 @@ int unit_death_remove(UnitDeath* death, uintptr_t game)
             }
             if (!found)
                 break;
-            ActorDestroy destroy = death->classes[index] == 5   ? death->cannon_destroy
-                                   : death->classes[index] == 8 ? death->terrain_destroy
-                                                                : death->part_destroy;
+            unsigned int class_id = death->classes[index];
+            ActorDestroy destroy = death->part_destroy;
+            if (class_id == STEAM_CANNON_CLASS)
+                destroy = death->cannon_destroy;
+            else if (class_id == STEAM_TERRAIN_CLASS)
+                destroy = death->terrain_destroy;
             destroy((void*)found, NULL, 1);
         }
         s = unit_death_sample(death, game);

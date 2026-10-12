@@ -46,7 +46,11 @@
 #define STEAM_ANIM_RUN                    2u
 /* REA saved MAP loader and SPRITE update/action/teardown; private combat VIDs.
    0x440 is also animation script 14. Never edit the shared loaded descriptor. */
-#define STEAM_GAME_VID_TABLE_OFFSET        0x2BCu
+#define STEAM_GAME_VID_TABLE_OFFSET 0x2BCu
+/* Mod admission policy, not the native table capacity: only stock VID indices
+   below this are read from the VID table, cloned or substituted. Dynamic
+   map-owned descriptors (1024+) are never touched. */
+#define STEAM_STOCK_VID_LIMIT              1024u
 #define STEAM_VID_SIZE                     0x490u
 #define STEAM_ANIMATION_COUNT              17u
 #define STEAM_VID_ANIMATION_SCRIPTS_OFFSET 0x408u
@@ -67,12 +71,18 @@
 #define STEAM_ACT_CHANGE_VID 0x3Eu
 #define STEAM_ANIM_DEATH     15u
 #define STEAM_ANIM_GIB_DEATH 16u
+/* Hit-reaction (pain) animations after nonlethal DAMAGE. Native completion
+   leaves them through NEXT_COMMAND, like idle, run and attack. */
+#define STEAM_ANIM_PAIN     13u
+#define STEAM_ANIM_PAIN_ALT 14u
 /* REA death graph: CANNON (class5) and BUILDED_TERRAIN (class8), both
    use SPRITE teardown. CANNON collision returns immediately for mask0. */
 #define STEAM_CANNON_VTABLE_RVA         0xD94C8u
 #define STEAM_CANNON_DESTROY_RVA        0x18140u
 #define STEAM_TERRAIN_VTABLE_RVA        0xDA7E0u
 #define STEAM_TERRAIN_DESTROY_RVA       0x38380u
+#define STEAM_CANNON_CLASS              5u
+#define STEAM_TERRAIN_CLASS             8u
 #define STEAM_VID_COLLISION_MASK_OFFSET 0x18u
 #define STEAM_VID_HEALTH_OFFSET         0x28u
 #define STEAM_VID_CREATION_COUNT_OFFSET 0x294u
