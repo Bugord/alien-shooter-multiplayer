@@ -390,6 +390,31 @@ static int correct_prediction(MonsterSlot* slot, uintptr_t game)
     ++slot->corrections;
     return 1;
 }
+/* A local hit killed the client copy: replace it with a provisional death
+   effect until the host confirms or corrects it. Returns 1 shown, 0 failed. */
+static int present_predicted_death(MonsterSlot* slot, uintptr_t game,
+                                   const UnitPuppetSample* sample, DWORD now)
+{
+    slot->prediction = PREDICTION_DEATH;
+    slot->predicted_animation = sample->death_animation;
+    UnitPuppetPose pose = sample->death_pose;
+    if (!cleanup_live(slot, game) || !unit_death_remove(slot->death_visual, game))
+    {
+        slot->state = MS_ABANDONED;
+        return 0;
+    }
+    if (unit_death_play_type(slot->death_visual, game, &pose, sample->death_animation,
+                             slot->predicted_vid) != 1)
+    {
+        schedule_retry(slot, game, now);
+        return 0;
+    }
+    slot->death_at = now;
+    slot->host_pose = pose;
+    slot->state = MS_PREDICTED_DEAD;
+    return 1;
+}
+
 static int predict_hit(MonsterSlot* slot, uintptr_t game, const MpMonsterState* source, DWORD now)
 {
     if (!slot->presentation_vid || slot->prediction == PREDICTION_DEATH)
@@ -420,23 +445,7 @@ static int predict_hit(MonsterSlot* slot, uintptr_t game, const MpMonsterState* 
     }
     else if (sample.captured_deaths)
     {
-        slot->prediction = PREDICTION_DEATH;
-        slot->predicted_animation = sample.death_animation;
-        UnitPuppetPose pose = sample.death_pose;
-        if (!cleanup_live(slot, game) || !unit_death_remove(slot->death_visual, game))
-        {
-            slot->state = MS_ABANDONED;
-            return 0;
-        }
-        if (unit_death_play_type(slot->death_visual, game, &pose, sample.death_animation,
-                                 slot->predicted_vid) != 1)
-        {
-            schedule_retry(slot, game, now);
-            return 0;
-        }
-        slot->death_at = now;
-        slot->host_pose = pose;
-        slot->state = MS_PREDICTED_DEAD;
+        return present_predicted_death(slot, game, &sample, now);
     }
     else if (sample.vid != slot->presentation_vid)
     {
@@ -452,642 +461,955 @@ static int predict_hit(MonsterSlot* slot, uintptr_t game, const MpMonsterState* 
     }
     return 1;
 }
-static MonsterSyncFrame tick_slot(MonsterSlot* slot, const Snapshot* local, enum ProbeResult result,
-                                  uint32_t epoch, uint32_t tick, DWORD now,
-                                  const MonsterState* published, int local_authority,
-                                  const ReceivedMonsterEvent* received, unsigned int received_count)
+/* Inputs of one slot tick, gathered once per frame by monster_sync_tick. */
+typedef struct SlotTickInput
+{
+    const Snapshot* local;
+    enum ProbeResult result;
+    uint32_t epoch;
+    uint32_t tick;
+    DWORD now;
+    const MonsterState* published;
+    int local_authority;
+    const ReceivedMonsterEvent* received;
+    unsigned int received_count;
+} SlotTickInput;
+
+/* Result of one tick step: run the next step, or skip straight to the report. */
+enum TickStep
+{
+    TICK_CONTINUE,
+    TICK_REPORT
+};
+
+static uintptr_t input_game(const SlotTickInput* input)
+{
+    return input->local ? input->local->game : 0;
+}
+
+/* Removes everything when the coordinator asked this slot to stop. */
+static void stop_slot(MonsterSlot* slot, uintptr_t game, MonsterSyncFrame* frame)
+{
+    slot->state = MS_STOPPING;
+    frame->cleanup = cleanup(slot, game);
+    if (frame->cleanup)
+        InterlockedExchange(&slot->stopped, 1);
+}
+
+/* Forgets the previous world, and enters the current one, when the map key,
+   world epoch or level state changed since the last tick. */
+static enum TickStep reset_world(MonsterSlot* slot, const SlotTickInput* input)
+{
+    const Snapshot* local = input->local;
+    enum ProbeResult result = input->result;
+    uintptr_t game = input_game(input);
+    int valid_world =
+        local && (result == PROBE_OK || result == PROBE_NO_PLAYER || result == PROBE_NO_ARMY) &&
+        local->in_level && input->epoch;
+    if (valid_world && slot->world && slot->local_epoch == input->epoch &&
+        local->world_low == slot->low && local->world_high == slot->high)
+        return TICK_CONTINUE;
+
+    if (!cleanup(slot, game))
+    {
+        slot->state = MS_ABANDONED;
+        return TICK_REPORT;
+    }
+
+    slot->world = 0;
+    slot->host_captured = 0;
+    slot->staged_count = 0;
+    slot->seen_attacks = 0;
+    slot->seen_deaths = 0;
+    slot->event_sequence = 0;
+    slot->last_event = 0;
+    slot->host_epoch = 0;
+    slot->authority_session = 0;
+    slot->remote_dead = 0;
+    slot->death_presented = 0;
+    slot->vid = expected_vid(slot->index);
+    slot->form_revision = 1u;
+    slot->form_phase = MP_MONSTER_FORM_ACTIVE;
+    slot->form_from = slot->vid;
+    slot->armor_presented = 0;
+    slot->death_animation = 0;
+    memset(&slot->host_pose, 0, sizeof(slot->host_pose));
+    slot->state = MS_WAITING;
+    slot->retry_delay = MP_RETRY_FIRST_MS;
+    if (!valid_world)
+        return TICK_REPORT;
+
+    slot->game = game;
+    slot->local_epoch = input->epoch;
+    slot->low = local->world_low;
+    slot->high = local->world_high;
+    slot->settled_at = input->now;
+    slot->world = 1;
+    return TICK_CONTINUE;
+}
+
+/* Holds an abandoned slot, a slot in retry backoff and a world that has not
+   settled yet. A backoff that has elapsed goes back to waiting. */
+static enum TickStep wait_for_retry(MonsterSlot* slot, DWORD now)
+{
+    if (slot->state == MS_ABANDONED)
+        return TICK_REPORT;
+    if (slot->state == MS_BACKOFF && (int32_t)(now - slot->retry_at) < 0)
+        return TICK_REPORT;
+    if (slot->state == MS_BACKOFF)
+        slot->state = MS_WAITING;
+    if (now - slot->settled_at < MONSTER_SETTLE_MS)
+        return TICK_REPORT;
+    return TICK_CONTINUE;
+}
+
+/* Host lost authority: remove the watched monster and wait for authority. */
+static void release_host(MonsterSlot* slot, uintptr_t game)
+{
+    if (!cleanup(slot, game))
+    {
+        slot->state = MS_ABANDONED;
+        return;
+    }
+    slot->state = MS_WAITING;
+    slot->host_captured = 0;
+    slot->seen_attacks = 0;
+    slot->seen_deaths = 0;
+}
+
+/* Gallery host: spawns a stationary native monster of this slot's type in a
+   grid next to the player and watches it. Returns -1 fault, 0 not ready,
+   1 watched. */
+static int spawn_gallery_monster(MonsterSlot* slot, const Snapshot* local)
+{
+    uintptr_t game = local->game;
+    Snapshot spawn = *local;
+    spawn.health = 1;
+    UnitPuppetPose position = {local->x + 160.0f + (slot->index % 8u) * 80.0f,
+                               local->y - 150.0f + (slot->index / 8u) * 100.0f,
+                               local->z,
+                               0,
+                               128u,
+                               0};
+    int created =
+        unit_combat_spawn_type(slot->fixture, &spawn, expected_vid(slot->index), &position, 1);
+    if (created != 1)
+        return -1;
+
+    UnitCombatSample fixture_sample = unit_combat_sample(slot->fixture, game, 0);
+    if (fixture_sample.fault)
+        return -1;
+    return unit_puppet_watch_stationary(slot->puppet, game, local->player, fixture_sample.root);
+}
+
+/* Starts watching a native monster on the host, once per world. */
+static enum TickStep capture_host_monster(MonsterSlot* slot, const SlotTickInput* input)
+{
+    const Snapshot* local = input->local;
+    uintptr_t game = input_game(input);
+    if (slot->host_captured)
+        return TICK_CONTINUE;
+    if (!local->player)
+        return TICK_REPORT;
+
+    int attached;
+    if (gallery)
+        attached = spawn_gallery_monster(slot, local);
+    else
+        attached = unit_puppet_watch_first(slot->puppet, game, local->player);
+    if (attached < 0)
+    {
+        schedule_retry(slot, game, input->now);
+        return TICK_REPORT;
+    }
+    if (!attached)
+        return TICK_REPORT;
+
+    slot->host_captured = 1;
+    slot->state = MS_ACTIVE;
+    InterlockedExchange(&slot->stopped, 0);
+    return TICK_CONTINUE;
+}
+
+/* Gallery host: follows the fixture's root after a native form change created
+   a new entity, and takes the fixture's form state into the sample. */
+static enum TickStep sample_gallery_fixture(MonsterSlot* slot, const SlotTickInput* input,
+                                            MonsterSyncFrame* frame)
+{
+    uintptr_t game = input_game(input);
+    UnitCombatSample fixture_sample = unit_combat_sample(slot->fixture, game, 0);
+    if (fixture_sample.fault)
+    {
+        schedule_retry(slot, game, input->now);
+        return TICK_REPORT;
+    }
+
+    if (!fixture_sample.transitioning && fixture_sample.root &&
+        fixture_sample.root != frame->unit.entity && !slot->seen_deaths)
+    {
+        if (!unit_puppet_release(slot->puppet, game) ||
+            unit_puppet_watch_stationary(slot->puppet, game, input->local->player,
+                                         fixture_sample.root) != 1)
+        {
+            schedule_retry(slot, game, input->now);
+            return TICK_REPORT;
+        }
+        slot->seen_attacks = 0;
+        slot->seen_deaths = 0;
+        frame->unit = unit_puppet_sample(slot->puppet, game);
+    }
+
+    frame->unit.transitioning = fixture_sample.transitioning || frame->unit.transitioning;
+    if (fixture_sample.current_vid)
+        frame->unit.vid = fixture_sample.current_vid;
+    return TICK_CONTINUE;
+}
+
+/* Samples the watched native monster into frame->unit and keeps its live pose. */
+static enum TickStep sample_host_monster(MonsterSlot* slot, const SlotTickInput* input,
+                                         MonsterSyncFrame* frame)
+{
+    uintptr_t game = input_game(input);
+    frame->unit = unit_puppet_sample(slot->puppet, game);
+    if (gallery && sample_gallery_fixture(slot, input, frame) == TICK_REPORT)
+        return TICK_REPORT;
+    if (frame->unit.state == UNIT_PUPPET_FAULT)
+    {
+        schedule_retry(slot, game, input->now);
+        return TICK_REPORT;
+    }
+
+    if (frame->unit.entity && !slot->seen_deaths)
+    {
+        slot->host_pose.x = frame->unit.x;
+        slot->host_pose.y = frame->unit.y;
+        slot->host_pose.z = frame->unit.z;
+        slot->host_pose.direction = frame->unit.direction;
+        slot->host_pose.velocity = frame->unit.velocity;
+        slot->host_pose.moving = frame->unit.moving;
+    }
+    return TICK_CONTINUE;
+}
+
+/* Host: records a native form change (armor loss, freeze) as a new form
+   revision and stages a form event. *phase receives the current form phase. */
+static enum TickStep update_host_form(MonsterSlot* slot, const SlotTickInput* input,
+                                      const MonsterSyncFrame* frame, uint32_t* phase)
+{
+    uintptr_t game = input_game(input);
+    uint32_t current_vid = frame->unit.vid ? frame->unit.vid : slot->vid;
+    *phase = frame->unit.transitioning ? MP_MONSTER_FORM_ARMOR : MP_MONSTER_FORM_ACTIVE;
+
+    /* Medium armor already emits native debris. Large armor has no stock
+       fragments, so give the host the same separate visual as its clients. */
+    if ((current_vid == MONSTER_VID_TANK_ARMORED && *phase == MP_MONSTER_FORM_ARMOR) ||
+        (slot->vid == MONSTER_VID_TANK_ARMORED &&
+         (current_vid == MONSTER_VID_TANK ||
+          current_vid == MONSTER_VID_TANK + MONSTER_VID_FROZEN_DELTA)))
+    {
+        if (!present_armor(slot, game, &slot->host_pose, MONSTER_VID_TANK_ARMORED,
+                           slot->form_revision, input->now))
+            return TICK_REPORT;
+    }
+
+    if (current_vid != slot->vid || *phase != slot->form_phase)
+    {
+        slot->form_from = slot->vid;
+        slot->vid = current_vid;
+        slot->form_phase = *phase;
+        ++slot->form_revision;
+        ++slot->forms;
+        stage_event(slot, MP_MONSTER_FORM, input->tick, &slot->host_pose);
+    }
+    slot->state = *phase == MP_MONSTER_FORM_ARMOR ? MS_TRANSFORMING : MS_ACTIVE;
+    return TICK_CONTINUE;
+}
+
+/* Host: stages attack and death events from the native action counters. */
+static void stage_host_events(MonsterSlot* slot, const MonsterSyncFrame* frame, uint32_t phase,
+                              uint32_t tick)
+{
+    /* Counters come from native action callbacks, not animation snapshots. */
+    unsigned int count = frame->unit.captured_attacks - slot->seen_attacks;
+    if (count > MONSTER_EVENT_CAPACITY)
+    {
+        slot->dropped += count - MONSTER_EVENT_CAPACITY;
+        count = MONSTER_EVENT_CAPACITY;
+    }
+    for (unsigned int i = 0; i < count; ++i)
+    {
+        stage_event(slot, MP_MONSTER_ATTACK, tick, &slot->host_pose);
+        ++slot->attacks;
+    }
+    slot->seen_attacks = frame->unit.captured_attacks;
+
+    if (!phase && !slot->seen_deaths && (frame->unit.captured_deaths || !frame->unit.entity))
+    {
+        slot->death_animation = frame->unit.death_animation == STEAM_ANIM_GIB_DEATH
+                                    ? STEAM_ANIM_GIB_DEATH
+                                    : STEAM_ANIM_DEATH;
+        if (frame->unit.death_animation)
+            slot->host_pose = frame->unit.death_pose;
+        slot->host_pose.velocity = 0;
+        slot->host_pose.moving = 0;
+        stage_event(slot, MP_MONSTER_DEATH, tick, &slot->host_pose);
+        ++slot->deaths;
+        slot->seen_deaths = frame->unit.captured_deaths ? frame->unit.captured_deaths : 1u;
+    }
+}
+
+/* Host: builds the state packet that describes this monster now. */
+static MpMonsterState build_host_state(MonsterSlot* slot, const SlotTickInput* input,
+                                       const MonsterSyncFrame* frame, uint32_t phase)
+{
+    MpMonsterState output = {0};
+    output.sequence = ++slot->sequence;
+    output.world_low = slot->low;
+    output.world_high = slot->high;
+    output.world_epoch = input->epoch;
+    output.monster_id = slot->index + 1u;
+    output.vid = slot->vid;
+    output.tick = input->tick;
+    output.origin_vid = expected_vid(slot->index);
+    output.form_revision = slot->form_revision;
+    output.form_phase = phase;
+    output.alive = phase || (!slot->seen_deaths && frame->unit.entity &&
+                             frame->unit.animation < STEAM_ANIM_DEATH && frame->unit.health > 0);
+    output.health = phase ? 1 : output.alive ? frame->unit.health : 0;
+    output.x = slot->host_pose.x;
+    output.y = slot->host_pose.y;
+    output.z = slot->host_pose.z;
+    output.velocity = slot->host_pose.velocity;
+    output.moving = slot->host_pose.moving;
+    output.direction = slot->host_pose.direction;
+    if (phase)
+    {
+        output.velocity = 0;
+        output.moving = 0;
+    }
+    output.death_animation = output.alive ? 0 : slot->death_animation;
+    output.event_sequence = slot->event_sequence;
+    return output;
+}
+
+/* Host: hands the state and the staged events to the worker. Skips this frame
+   when the worker holds the lock; staged events wait for the next frame. */
+static void publish_host_state(MonsterSlot* slot, const MpMonsterState* output)
+{
+    if (!TryAcquireSRWLockExclusive(&lock))
+        return;
+
+    handoff.outgoing[slot->index] = *output;
+    handoff.has_outgoing[slot->index] = 1;
+    unsigned int sent = 0;
+    while (sent < slot->staged_count && handoff.count < MONSTER_EVENT_CAPACITY)
+    {
+        handoff.events[(handoff.head + handoff.count++) % MONSTER_EVENT_CAPACITY] =
+            slot->staged[sent++];
+    }
+    if (sent)
+    {
+        slot->staged_count -= sent;
+        memmove(slot->staged, slot->staged + sent, slot->staged_count * sizeof(*slot->staged));
+    }
+    ReleaseSRWLockExclusive(&lock);
+}
+
+/* Host side of one tick: watch the native monster and publish its state. */
+static void tick_host(MonsterSlot* slot, const SlotTickInput* input, MonsterSyncFrame* frame)
+{
+    if (!input->local_authority)
+    {
+        release_host(slot, input_game(input));
+        return;
+    }
+    if (capture_host_monster(slot, input) == TICK_REPORT)
+        return;
+    if (sample_host_monster(slot, input, frame) == TICK_REPORT)
+        return;
+
+    uint32_t phase;
+    if (update_host_form(slot, input, frame, &phase) == TICK_REPORT)
+        return;
+    stage_host_events(slot, frame, phase, input->tick);
+    MpMonsterState output = build_host_state(slot, input, frame, phase);
+    publish_host_state(slot, &output);
+}
+
+/* Client: starts over when the host changed its world epoch or the authority
+   (peer or session) changed. */
+static enum TickStep follow_authority(MonsterSlot* slot, uintptr_t game,
+                                      const MonsterState* incoming)
+{
+    const MpMonsterState* source = &incoming->state;
+    if (slot->host_epoch == source->world_epoch && slot->authority_id == incoming->authority_id &&
+        slot->authority_session == incoming->authority_session)
+        return TICK_CONTINUE;
+
+    if (!cleanup(slot, game))
+    {
+        slot->state = MS_ABANDONED;
+        return TICK_REPORT;
+    }
+    slot->host_epoch = source->world_epoch;
+    slot->authority_id = incoming->authority_id;
+    slot->authority_session = incoming->authority_session;
+    slot->state = MS_WAITING;
+    slot->remote_dead = 0;
+    slot->death_presented = 0;
+    slot->death_animation = 0;
+    slot->vid = 0;
+    slot->form_revision = 0;
+    slot->form_phase = 0;
+    slot->armor_presented = 0;
+    slot->last_event = 0;
+    return TICK_CONTINUE;
+}
+
+/* A late old form must not replace a newer allocation or a tombstone.
+   The transport also validates progression; retain this game-thread
+   boundary for events and stale handoff snapshots already in flight. */
+static int form_is_stale(const MonsterSlot* slot, const MpMonsterState* source)
+{
+    if (!slot->form_revision)
+        return 0;
+    if (source->form_revision < slot->form_revision)
+        return 1;
+    return source->form_revision == slot->form_revision &&
+           (source->vid != slot->vid || source->form_phase != slot->form_phase);
+}
+
+/* Death events can confirm a provisional effect before the next state
+   snapshot. Folds the first matching death event into incoming so both
+   deliveries use the same reconciliation path. */
+static void fold_death_event(MonsterSlot* slot, const SlotTickInput* input, MonsterState* incoming,
+                             unsigned int* considered)
+{
+    const MpMonsterState* source = &incoming->state;
+    for (unsigned int i = 0; i < input->received_count; ++i)
+    {
+        const MonsterEvent* event = &input->received[i].message;
+        const MpMonsterEvent* e = &event->event;
+        if (e->kind != MP_MONSTER_DEATH || input->now - input->received[i].received_at > 250u ||
+            event->authority_id != incoming->authority_id ||
+            event->authority_session != incoming->authority_session ||
+            e->world_epoch != source->world_epoch || e->world_low != slot->low ||
+            e->world_high != slot->high || e->monster_id != slot->index + 1u ||
+            !mp_monster_event_matches(source, e) ||
+            !mp_sequence_newer(e->sequence, slot->last_event))
+            continue;
+
+        slot->last_event = e->sequence;
+        ++*considered;
+        incoming->state.alive = 0;
+        incoming->state.health = 0;
+        incoming->state.death_animation = e->death_animation;
+        incoming->state.x = e->x;
+        incoming->state.y = e->y;
+        incoming->state.z = e->z;
+        incoming->state.direction = e->direction;
+        break;
+    }
+}
+
+/* Client: confirms or corrects a local hit prediction against the host state. */
+static enum TickStep reconcile_prediction(MonsterSlot* slot, uintptr_t game,
+                                          const MpMonsterState* source, DWORD now)
+{
+    if (slot->prediction == PREDICTION_NONE)
+        return TICK_CONTINUE;
+
+    if (!source->alive)
+    {
+        if (slot->prediction == PREDICTION_DEATH && slot->predicted_vid == source->vid &&
+            slot->predicted_animation == source->death_animation)
+        {
+            /* Promote the existing provisional effect, without replaying it. */
+            slot->death_presented = 1;
+            ++slot->confirmations;
+        }
+        else if (!correct_prediction(slot, game))
+            return TICK_REPORT;
+        forget_prediction(slot);
+    }
+    else if (slot->prediction != PREDICTION_DEATH && !source->form_phase &&
+             source->vid == slot->predicted_vid &&
+             mp_sequence_newer(source->sequence, slot->predicted_sequence) &&
+             ((slot->prediction == PREDICTION_FORM &&
+               source->form_revision > slot->form_revision) ||
+              (slot->predicted_health > 0 && source->health <= slot->predicted_health)))
+    {
+        forget_prediction(slot);
+        ++slot->confirmations;
+    }
+    else if (source->form_revision > slot->form_revision && !source->form_phase &&
+             source->vid != slot->predicted_vid)
+    {
+        if (!correct_prediction(slot, game))
+            return TICK_REPORT;
+    }
+    else if (now - slot->predicted_at >= MONSTER_PREDICTION_MS &&
+             mp_sequence_newer(source->sequence, slot->predicted_sequence))
+    {
+        if (!correct_prediction(slot, game))
+            return TICK_REPORT;
+    }
+    return TICK_CONTINUE;
+}
+
+/* True when an armored form lost its armor and became its successor form. */
+static int lost_armor(unsigned int previous_vid, unsigned int vid)
+{
+    if (previous_vid == MONSTER_VID_MONSTER2_ARMORED)
+        return vid == MONSTER_VID_MONSTER2 ||
+               vid == MONSTER_VID_MONSTER2 + MONSTER_VID_FROZEN_DELTA;
+    if (previous_vid == MONSTER_VID_TANK_ARMORED)
+        return vid == MONSTER_VID_TANK || vid == MONSTER_VID_TANK + MONSTER_VID_FROZEN_DELTA;
+    return 0;
+}
+
+/* Client: takes a new form revision from the host state. */
+static enum TickStep apply_form_revision(MonsterSlot* slot, uintptr_t game,
+                                         const MpMonsterState* source, DWORD now)
+{
+    unsigned int previous_vid = slot->vid;
+    unsigned int previous_phase = slot->form_phase;
+    if (source->form_revision == slot->form_revision)
+        return TICK_CONTINUE;
+
+    slot->vid = source->vid;
+    slot->form_revision = source->form_revision;
+    slot->form_phase = source->form_phase;
+    if (previous_vid)
+        ++slot->forms;
+
+    /* Recover an omitted armor-pending packet while the successor is
+       already current. A late join starts at the current form. */
+    if (previous_vid && !previous_phase && lost_armor(previous_vid, source->vid))
+    {
+        UnitPuppetPose armor_pose = {source->x, source->y, source->z, 0, source->direction, 0};
+        if (!slot->armor_presented &&
+            (!cleanup_live(slot, game) ||
+             !present_armor(slot, game, &armor_pose, previous_vid, source->form_revision, now)))
+            return TICK_REPORT;
+    }
+    return TICK_CONTINUE;
+}
+
+/* Client: the host reports this monster dead; show (or keep) its death. */
+static void show_remote_death(MonsterSlot* slot, uintptr_t game, const MpMonsterState* source,
+                              MonsterSyncFrame* frame, DWORD now)
+{
+    UnitPuppetPose pose = {source->x, source->y, source->z, 0, source->direction, 0};
+    present_death(slot, game, &pose, source->death_animation, now);
+    if (slot->state != MS_DEAD)
+        return;
+
+    frame->visual = unit_death_sample(slot->death_visual, game);
+    if (frame->visual.fault || (now - slot->death_at > MONSTER_PRESENTATION_LIFETIME_MS &&
+                                !unit_death_remove(slot->death_visual, game)))
+        slot->state = MS_ABANDONED;
+}
+
+/* True when a predicted form change is an armored monster losing its armor. */
+static int predicted_armor_loss(const MonsterSlot* slot, unsigned int view_vid)
+{
+    if (slot->prediction != PREDICTION_FORM)
+        return 0;
+    return (slot->presentation_vid == MONSTER_VID_MONSTER2_ARMORED &&
+            view_vid == MONSTER_VID_MONSTER2) ||
+           (slot->presentation_vid == MONSTER_VID_TANK_ARMORED && view_vid == MONSTER_VID_TANK);
+}
+
+/* Client: shows the live monster copy in the form, pose and health that the
+   host state (or a pending local prediction) describes. */
+static enum TickStep show_client_copy(MonsterSlot* slot, const SlotTickInput* input,
+                                      const MpMonsterState* source)
+{
+    uintptr_t game = input_game(input);
+    DWORD now = input->now;
+    UnitPuppetPose pose = {source->x,        source->y,         source->z,
+                           source->velocity, source->direction, source->moving};
+    unsigned int view_vid = source->vid;
+    int view_health = source->health;
+    if (source->form_phase == MP_MONSTER_FORM_ARMOR)
+    {
+        view_vid = mp_monster_armor_successor(source->vid);
+        view_health = 0;
+        pose.velocity = 0;
+        pose.moving = 0;
+    }
+    if (slot->prediction == PREDICTION_DEATH)
+    {
+        slot->state = MS_PREDICTED_DEAD;
+        return TICK_REPORT;
+    }
+    if (slot->prediction != PREDICTION_NONE)
+    {
+        view_vid = slot->predicted_vid;
+        view_health = slot->predicted_health;
+        if (mp_monster_frozen(view_vid))
+        {
+            pose.velocity = 0;
+            pose.moving = 0;
+        }
+    }
+
+    if ((source->form_phase == MP_MONSTER_FORM_ARMOR || predicted_armor_loss(slot, view_vid)) &&
+        !slot->armor_presented)
+    {
+        unsigned int armored = source->origin_vid;
+        if (!cleanup_live(slot, game) ||
+            !present_armor(slot, game, &pose, armored, source->form_revision, now))
+            return TICK_REPORT;
+    }
+
+    int spawning = !slot->presentation_vid;
+    if (!client_copy(slot, input->local, view_vid, &pose, view_health, now))
+        return TICK_REPORT;
+    if (spawning)
+        slot->last_event = source->event_sequence;
+    if (slot->prediction != PREDICTION_NONE && !slot->predicted_health)
+        slot->predicted_health = unit_puppet_sample(slot->puppet, game).health;
+    if (source->form_phase == MP_MONSTER_FORM_ARMOR)
+        slot->state = MS_TRANSFORMING;
+    return TICK_CONTINUE;
+}
+
+/* True when a received event belongs to this monster's current authority,
+   world and form, and is newer than the last accepted event. */
+static int event_matches_slot(const MonsterSlot* slot, const ReceivedMonsterEvent* received,
+                              DWORD now)
+{
+    const MonsterEvent* event = &received->message;
+    const MpMonsterEvent* e = &event->event;
+    return now - received->received_at <= 250u && event->authority_id == slot->authority_id &&
+           event->authority_session == slot->authority_session &&
+           e->world_epoch == slot->host_epoch && e->world_low == slot->low &&
+           e->world_high == slot->high && e->monster_id == slot->index + 1u &&
+           e->vid == slot->vid && e->origin_vid == expected_vid(slot->index) &&
+           e->form_revision == slot->form_revision && e->form_phase == slot->form_phase &&
+           mp_sequence_newer(e->sequence, slot->last_event);
+}
+
+/* Client: replays received attack events and presents a received death.
+   Every received event counts as considered. */
+static void replay_events(MonsterSlot* slot, const SlotTickInput* input,
+                          const MpMonsterState* source, unsigned int* considered)
+{
+    uintptr_t game = input_game(input);
+    DWORD now = input->now;
+    for (unsigned int i = 0; i < input->received_count; ++i)
+    {
+        ++*considered;
+        if (!event_matches_slot(slot, &input->received[i], now))
+        {
+            ++slot->rejected;
+            continue;
+        }
+
+        const MpMonsterEvent* e = &input->received[i].message.event;
+        slot->last_event = e->sequence;
+        /* Persistent state carries health and the complete current form.
+           Form events are a deduplicated watermark; they never guess HP. */
+        if (e->kind == MP_MONSTER_FORM)
+            continue;
+        if (e->kind == MP_MONSTER_DEATH)
+        {
+            UnitPuppetPose death_pose = {e->x, e->y, e->z, 0, e->direction, 0};
+            if (slot->prediction != PREDICTION_NONE && !correct_prediction(slot, game))
+                break;
+            present_death(slot, game, &death_pose, e->death_animation, now);
+            break;
+        }
+        if (e->kind != MP_MONSTER_ATTACK)
+        {
+            ++slot->rejected;
+            continue;
+        }
+
+        /* An old-form attack is still an acknowledged event, but its art
+           must not replace a predicted frozen/successor presentation. */
+        if (slot->presentation_vid != slot->vid || source->form_phase)
+            continue;
+        if (unit_puppet_replay(slot->puppet, game, e->sequence, STEAM_ANIM_ATTACK) != 1)
+        {
+            schedule_retry(slot, game, now);
+            break;
+        }
+        ++slot->attacks;
+    }
+}
+
+/* Client side of one tick: follow the host's state and events for this monster. */
+static void tick_client(MonsterSlot* slot, const SlotTickInput* input, MonsterSyncFrame* frame,
+                        unsigned int* considered)
+{
+    uintptr_t game = input_game(input);
+    DWORD now = input->now;
+    MonsterState incoming = *input->published;
+    const MpMonsterState* source = &incoming.state;
+    if (!incoming.present || !same_world(slot, source))
+    {
+        if (!cleanup(slot, game))
+            slot->state = MS_ABANDONED;
+        else
+            slot->state = MS_WAITING;
+        return;
+    }
+    if (follow_authority(slot, game, &incoming) == TICK_REPORT)
+        return;
+    if (form_is_stale(slot, source))
+    {
+        ++slot->rejected;
+        frame->unit = unit_puppet_sample(slot->puppet, game);
+        return;
+    }
+    if (slot->remote_dead && source->alive)
+        return;
+
+    if (!slot->remote_dead && source->alive && !source->form_phase)
+        fold_death_event(slot, input, &incoming, considered);
+    if (!slot->remote_dead && !predict_hit(slot, game, source, now))
+        return;
+    if (reconcile_prediction(slot, game, source, now) == TICK_REPORT)
+        return;
+    if (apply_form_revision(slot, game, source, now) == TICK_REPORT)
+        return;
+    if (!source->alive)
+    {
+        show_remote_death(slot, game, source, frame, now);
+        return;
+    }
+    if (slot->remote_dead)
+        return;
+    if (show_client_copy(slot, input, source) == TICK_REPORT)
+        return;
+
+    replay_events(slot, input, source, considered);
+    frame->unit = unit_puppet_sample(slot->puppet, game);
+    if (slot->state == MS_ACTIVE && frame->unit.state != UNIT_PUPPET_ACTIVE)
+        schedule_retry(slot, game, now);
+}
+
+/* Adds the armor-debris presentation to the frame and expires it. */
+static void report_armor(MonsterSlot* slot, uintptr_t game, DWORD now, MonsterSyncFrame* frame)
+{
+    if (!slot->armor_presented)
+        return;
+
+    UnitDeathSample armor = unit_death_sample(slot->armor_visual, game);
+    int expired = now - slot->armor_at > MONSTER_PRESENTATION_LIFETIME_MS;
+    if (armor.fault || (expired && !unit_death_remove(slot->armor_visual, game)))
+        slot->state = MS_ABANDONED;
+    frame->visual.entities += armor.entities;
+    frame->visual.gibs += armor.gibs;
+    frame->visual.fault = frame->visual.fault || armor.fault;
+}
+
+/* Fills the frame report from the slot after every tick step that ran. */
+static void report_frame(MonsterSlot* slot, const SlotTickInput* input, MonsterSyncFrame* frame,
+                         unsigned int considered)
+{
+    uintptr_t game = input_game(input);
+    DWORD now = input->now;
+    slot->rejected += input->received_count - considered;
+    if (slot->role == MONSTER_CLIENT)
+        frame->visual = unit_death_sample(slot->death_visual, game);
+    report_armor(slot, game, now, frame);
+
+    frame->death_animation = slot->death_animation;
+    frame->death_pose = slot->host_pose;
+    frame->state = slot->state;
+    frame->monster_id = slot->host_captured || slot->state == MS_ACTIVE || slot->remote_dead
+                            ? slot->index + 1u
+                            : 0u;
+    frame->host_epoch = slot->role == MONSTER_HOST ? slot->local_epoch : slot->host_epoch;
+    frame->attacks = slot->attacks;
+    frame->deaths = slot->deaths;
+    frame->forms = slot->forms;
+    frame->vid = slot->vid;
+    frame->form_revision = slot->form_revision;
+    frame->form_phase = slot->form_phase;
+    frame->dropped =
+        slot->dropped + (unsigned int)InterlockedCompareExchange(&incoming_dropped, 0, 0);
+    frame->rejected = slot->rejected;
+    frame->predictions = slot->predictions;
+    frame->confirmations = slot->confirmations;
+    frame->corrections = slot->corrections;
+    if (now - slot->logged_at >= 500u || frame->cleanup)
+    {
+        frame->event = 1;
+        slot->logged_at = now;
+    }
+}
+
+/* Runs the tick steps in order until one of them asks for the report. */
+static void run_tick_steps(MonsterSlot* slot, const SlotTickInput* input, MonsterSyncFrame* frame,
+                           unsigned int* considered)
+{
+    if (InterlockedCompareExchange(&slot->stopping, 0, 0))
+    {
+        stop_slot(slot, input_game(input), frame);
+        return;
+    }
+    if (reset_world(slot, input) == TICK_REPORT)
+        return;
+    if (wait_for_retry(slot, input->now) == TICK_REPORT)
+        return;
+
+    if (slot->role == MONSTER_HOST)
+        tick_host(slot, input, frame);
+    else
+        tick_client(slot, input, frame, considered);
+}
+
+/* One game-thread tick of one monster slot. */
+static MonsterSyncFrame tick_slot(MonsterSlot* slot, const SlotTickInput* input)
 {
     MonsterSyncFrame frame = {0};
     frame.role = slot->role;
     if (slot->state == MS_OFF)
         return frame;
-    MonsterState incoming = *published;
+
     unsigned int considered = 0;
-    uintptr_t game = local ? local->game : 0;
-    if (InterlockedCompareExchange(&slot->stopping, 0, 0))
-    {
-        slot->state = MS_STOPPING;
-        frame.cleanup = cleanup(slot, game);
-        if (frame.cleanup)
-            InterlockedExchange(&slot->stopped, 1);
-        goto report;
-    }
-    int valid_world =
-        local && (result == PROBE_OK || result == PROBE_NO_PLAYER || result == PROBE_NO_ARMY) &&
-        local->in_level && epoch;
-    if (!valid_world || !slot->world || slot->local_epoch != epoch ||
-        local->world_low != slot->low || local->world_high != slot->high)
-    {
-        if (!cleanup(slot, game))
-        {
-            slot->state = MS_ABANDONED;
-            goto report;
-        }
-        slot->world = 0;
-        slot->host_captured = 0;
-        slot->staged_count = 0;
-        slot->seen_attacks = 0;
-        slot->seen_deaths = 0;
-        slot->event_sequence = 0;
-        slot->last_event = 0;
-        slot->host_epoch = 0;
-        slot->authority_session = 0;
-        slot->remote_dead = 0;
-        slot->death_presented = 0;
-        slot->vid = expected_vid(slot->index);
-        slot->form_revision = 1u;
-        slot->form_phase = MP_MONSTER_FORM_ACTIVE;
-        slot->form_from = slot->vid;
-        slot->armor_presented = 0;
-        slot->death_animation = 0;
-        memset(&slot->host_pose, 0, sizeof(slot->host_pose));
-        slot->state = MS_WAITING;
-        slot->retry_delay = MP_RETRY_FIRST_MS;
-        if (!valid_world)
-            goto report;
-        slot->game = game;
-        slot->local_epoch = epoch;
-        slot->low = local->world_low;
-        slot->high = local->world_high;
-        slot->settled_at = now;
-        slot->world = 1;
-    }
-    if (slot->state == MS_ABANDONED)
-        goto report;
-    if (slot->state == MS_BACKOFF && (int32_t)(now - slot->retry_at) < 0)
-        goto report;
-    if (slot->state == MS_BACKOFF)
-        slot->state = MS_WAITING;
-    if (now - slot->settled_at < MONSTER_SETTLE_MS)
-        goto report;
-    if (slot->role == MONSTER_HOST)
-    {
-        if (!local_authority)
-        {
-            if (!cleanup(slot, game))
-                slot->state = MS_ABANDONED;
-            else
-            {
-                slot->state = MS_WAITING;
-                slot->host_captured = 0;
-                slot->seen_attacks = 0;
-                slot->seen_deaths = 0;
-            }
-            goto report;
-        }
-        if (!slot->host_captured)
-        {
-            if (!local->player)
-                goto report;
-            int attached;
-            if (gallery)
-            {
-                Snapshot spawn = *local;
-                spawn.health = 1;
-                UnitPuppetPose position = {local->x + 160.0f + (slot->index % 8u) * 80.0f,
-                                           local->y - 150.0f + (slot->index / 8u) * 100.0f,
-                                           local->z,
-                                           0,
-                                           128u,
-                                           0};
-                int created = unit_combat_spawn_type(slot->fixture, &spawn,
-                                                     expected_vid(slot->index), &position, 1);
-                if (created != 1)
-                {
-                    schedule_retry(slot, game, now);
-                    goto report;
-                }
-                UnitCombatSample fixture_sample = unit_combat_sample(slot->fixture, game, 0);
-                attached = fixture_sample.fault
-                               ? -1
-                               : unit_puppet_watch_stationary(slot->puppet, game, local->player,
-                                                              fixture_sample.root);
-            }
-            else
-                attached = unit_puppet_watch_first(slot->puppet, game, local->player);
-            if (attached < 0)
-            {
-                schedule_retry(slot, game, now);
-                goto report;
-            }
-            if (!attached)
-                goto report;
-            slot->host_captured = 1;
-            slot->state = MS_ACTIVE;
-            InterlockedExchange(&slot->stopped, 0);
-        }
-        frame.unit = unit_puppet_sample(slot->puppet, game);
-        if (gallery)
-        {
-            UnitCombatSample fixture_sample = unit_combat_sample(slot->fixture, game, 0);
-            if (fixture_sample.fault)
-            {
-                schedule_retry(slot, game, now);
-                goto report;
-            }
-            if (!fixture_sample.transitioning && fixture_sample.root &&
-                fixture_sample.root != frame.unit.entity && !slot->seen_deaths)
-            {
-                if (!unit_puppet_release(slot->puppet, game) ||
-                    unit_puppet_watch_stationary(slot->puppet, game, local->player,
-                                                 fixture_sample.root) != 1)
-                {
-                    schedule_retry(slot, game, now);
-                    goto report;
-                }
-                slot->seen_attacks = 0;
-                slot->seen_deaths = 0;
-                frame.unit = unit_puppet_sample(slot->puppet, game);
-            }
-            frame.unit.transitioning = fixture_sample.transitioning || frame.unit.transitioning;
-            if (fixture_sample.current_vid)
-                frame.unit.vid = fixture_sample.current_vid;
-        }
-        if (frame.unit.state == UNIT_PUPPET_FAULT)
-        {
-            schedule_retry(slot, game, now);
-            goto report;
-        }
-        if (frame.unit.entity && !slot->seen_deaths)
-        {
-            slot->host_pose.x = frame.unit.x;
-            slot->host_pose.y = frame.unit.y;
-            slot->host_pose.z = frame.unit.z;
-            slot->host_pose.direction = frame.unit.direction;
-            slot->host_pose.velocity = frame.unit.velocity;
-            slot->host_pose.moving = frame.unit.moving;
-        }
-        uint32_t current_vid = frame.unit.vid ? frame.unit.vid : slot->vid;
-        uint32_t phase = frame.unit.transitioning ? MP_MONSTER_FORM_ARMOR : MP_MONSTER_FORM_ACTIVE;
-        /* Medium armor already emits native debris. Large armor has no stock
-           fragments, so give the host the same separate visual as its clients. */
-        if ((current_vid == MONSTER_VID_TANK_ARMORED && phase == MP_MONSTER_FORM_ARMOR) ||
-            (slot->vid == MONSTER_VID_TANK_ARMORED &&
-             (current_vid == MONSTER_VID_TANK ||
-              current_vid == MONSTER_VID_TANK + MONSTER_VID_FROZEN_DELTA)))
-        {
-            if (!present_armor(slot, game, &slot->host_pose, MONSTER_VID_TANK_ARMORED,
-                               slot->form_revision, now))
-                goto report;
-        }
-        if (current_vid != slot->vid || phase != slot->form_phase)
-        {
-            slot->form_from = slot->vid;
-            slot->vid = current_vid;
-            slot->form_phase = phase;
-            ++slot->form_revision;
-            ++slot->forms;
-            stage_event(slot, MP_MONSTER_FORM, tick, &slot->host_pose);
-        }
-        slot->state = phase == MP_MONSTER_FORM_ARMOR ? MS_TRANSFORMING : MS_ACTIVE;
-        /* Counters come from native action callbacks, not animation snapshots. */
-        unsigned int count = frame.unit.captured_attacks - slot->seen_attacks;
-        if (count > MONSTER_EVENT_CAPACITY)
-        {
-            slot->dropped += count - MONSTER_EVENT_CAPACITY;
-            count = MONSTER_EVENT_CAPACITY;
-        }
-        for (unsigned int i = 0; i < count; ++i)
-        {
-            stage_event(slot, MP_MONSTER_ATTACK, tick, &slot->host_pose);
-            ++slot->attacks;
-        }
-        slot->seen_attacks = frame.unit.captured_attacks;
-        if (!phase && !slot->seen_deaths && (frame.unit.captured_deaths || !frame.unit.entity))
-        {
-            slot->death_animation = frame.unit.death_animation == STEAM_ANIM_GIB_DEATH
-                                        ? STEAM_ANIM_GIB_DEATH
-                                        : STEAM_ANIM_DEATH;
-            if (frame.unit.death_animation)
-                slot->host_pose = frame.unit.death_pose;
-            slot->host_pose.velocity = 0;
-            slot->host_pose.moving = 0;
-            stage_event(slot, MP_MONSTER_DEATH, tick, &slot->host_pose);
-            ++slot->deaths;
-            slot->seen_deaths = frame.unit.captured_deaths ? frame.unit.captured_deaths : 1u;
-        }
-        MpMonsterState output = {0};
-        output.sequence = ++slot->sequence;
-        output.world_low = slot->low;
-        output.world_high = slot->high;
-        output.world_epoch = epoch;
-        output.monster_id = slot->index + 1u;
-        output.vid = slot->vid;
-        output.tick = tick;
-        output.origin_vid = expected_vid(slot->index);
-        output.form_revision = slot->form_revision;
-        output.form_phase = phase;
-        output.alive = phase || (!slot->seen_deaths && frame.unit.entity &&
-                                 frame.unit.animation < STEAM_ANIM_DEATH && frame.unit.health > 0);
-        output.health = phase ? 1 : output.alive ? frame.unit.health : 0;
-        output.x = slot->host_pose.x;
-        output.y = slot->host_pose.y;
-        output.z = slot->host_pose.z;
-        output.velocity = slot->host_pose.velocity;
-        output.moving = slot->host_pose.moving;
-        output.direction = slot->host_pose.direction;
-        if (phase)
-        {
-            output.velocity = 0;
-            output.moving = 0;
-        }
-        output.death_animation = output.alive ? 0 : slot->death_animation;
-        output.event_sequence = slot->event_sequence;
-        if (TryAcquireSRWLockExclusive(&lock))
-        {
-            handoff.outgoing[slot->index] = output;
-            handoff.has_outgoing[slot->index] = 1;
-            unsigned int sent = 0;
-            while (sent < slot->staged_count && handoff.count < MONSTER_EVENT_CAPACITY)
-            {
-                handoff.events[(handoff.head + handoff.count++) % MONSTER_EVENT_CAPACITY] =
-                    slot->staged[sent++];
-            }
-            if (sent)
-            {
-                slot->staged_count -= sent;
-                memmove(slot->staged, slot->staged + sent,
-                        slot->staged_count * sizeof(*slot->staged));
-            }
-            ReleaseSRWLockExclusive(&lock);
-        }
-    }
-    else
-    {
-        const MpMonsterState* source = &incoming.state;
-        if (!incoming.present || !same_world(slot, source))
-        {
-            if (!cleanup(slot, game))
-                slot->state = MS_ABANDONED;
-            else
-                slot->state = MS_WAITING;
-            goto report;
-        }
-        if (slot->host_epoch != source->world_epoch ||
-            slot->authority_id != incoming.authority_id ||
-            slot->authority_session != incoming.authority_session)
-        {
-            if (!cleanup(slot, game))
-            {
-                slot->state = MS_ABANDONED;
-                goto report;
-            }
-            slot->host_epoch = source->world_epoch;
-            slot->authority_id = incoming.authority_id;
-            slot->authority_session = incoming.authority_session;
-            slot->state = MS_WAITING;
-            slot->remote_dead = 0;
-            slot->death_presented = 0;
-            slot->death_animation = 0;
-            slot->vid = 0;
-            slot->form_revision = 0;
-            slot->form_phase = 0;
-            slot->armor_presented = 0;
-            slot->last_event = 0;
-        }
-        /* A late old form must not replace a newer allocation or a tombstone.
-           The transport also validates progression; retain this game-thread
-           boundary for events and stale handoff snapshots already in flight. */
-        if (slot->form_revision &&
-            (source->form_revision < slot->form_revision ||
-             (source->form_revision == slot->form_revision &&
-              (source->vid != slot->vid || source->form_phase != slot->form_phase))))
-        {
-            ++slot->rejected;
-            frame.unit = unit_puppet_sample(slot->puppet, game);
-            goto report;
-        }
-        if (slot->remote_dead && source->alive)
-            goto report;
-        /* Death events can confirm a provisional effect before the next state
-           snapshot. Use the same reconciliation path for both deliveries. */
-        if (!slot->remote_dead && source->alive && !source->form_phase)
-        {
-            for (unsigned int i = 0; i < received_count; ++i)
-            {
-                const MonsterEvent* event = &received[i].message;
-                const MpMonsterEvent* e = &event->event;
-                if (e->kind != MP_MONSTER_DEATH || now - received[i].received_at > 250u ||
-                    event->authority_id != incoming.authority_id ||
-                    event->authority_session != incoming.authority_session ||
-                    e->world_epoch != source->world_epoch || e->world_low != slot->low ||
-                    e->world_high != slot->high || e->monster_id != slot->index + 1u ||
-                    !mp_monster_event_matches(source, e) ||
-                    !mp_sequence_newer(e->sequence, slot->last_event))
-                    continue;
-                slot->last_event = e->sequence;
-                ++considered;
-                incoming.state.alive = 0;
-                incoming.state.health = 0;
-                incoming.state.death_animation = e->death_animation;
-                incoming.state.x = e->x;
-                incoming.state.y = e->y;
-                incoming.state.z = e->z;
-                incoming.state.direction = e->direction;
-                break;
-            }
-        }
-        if (!slot->remote_dead && !predict_hit(slot, game, source, now))
-            goto report;
-        if (slot->prediction != PREDICTION_NONE)
-        {
-            if (!source->alive)
-            {
-                if (slot->prediction == PREDICTION_DEATH && slot->predicted_vid == source->vid &&
-                    slot->predicted_animation == source->death_animation)
-                {
-                    /* Promote the existing provisional effect, without replaying it. */
-                    slot->death_presented = 1;
-                    ++slot->confirmations;
-                }
-                else if (!correct_prediction(slot, game))
-                    goto report;
-                forget_prediction(slot);
-            }
-            else if (slot->prediction != PREDICTION_DEATH && !source->form_phase &&
-                     source->vid == slot->predicted_vid &&
-                     mp_sequence_newer(source->sequence, slot->predicted_sequence) &&
-                     ((slot->prediction == PREDICTION_FORM &&
-                       source->form_revision > slot->form_revision) ||
-                      (slot->predicted_health > 0 && source->health <= slot->predicted_health)))
-            {
-                forget_prediction(slot);
-                ++slot->confirmations;
-            }
-            else if (source->form_revision > slot->form_revision && !source->form_phase &&
-                     source->vid != slot->predicted_vid)
-            {
-                if (!correct_prediction(slot, game))
-                    goto report;
-            }
-            else if (now - slot->predicted_at >= MONSTER_PREDICTION_MS &&
-                     mp_sequence_newer(source->sequence, slot->predicted_sequence))
-            {
-                if (!correct_prediction(slot, game))
-                    goto report;
-            }
-        }
-        unsigned int previous_vid = slot->vid, previous_phase = slot->form_phase;
-        if (source->form_revision != slot->form_revision)
-        {
-            slot->vid = source->vid;
-            slot->form_revision = source->form_revision;
-            slot->form_phase = source->form_phase;
-            if (previous_vid)
-                ++slot->forms;
-            /* Recover an omitted armor-pending packet while the successor is
-               already current. A late join starts at the current form. */
-            if (previous_vid && !previous_phase &&
-                ((previous_vid == MONSTER_VID_MONSTER2_ARMORED &&
-                  (source->vid == MONSTER_VID_MONSTER2 ||
-                   source->vid == MONSTER_VID_MONSTER2 + MONSTER_VID_FROZEN_DELTA)) ||
-                 (previous_vid == MONSTER_VID_TANK_ARMORED &&
-                  (source->vid == MONSTER_VID_TANK ||
-                   source->vid == MONSTER_VID_TANK + MONSTER_VID_FROZEN_DELTA))))
-            {
-                UnitPuppetPose armor_pose = {source->x, source->y,         source->z,
-                                             0,         source->direction, 0};
-                if (!slot->armor_presented && (!cleanup_live(slot, game) ||
-                                               !present_armor(slot, game, &armor_pose, previous_vid,
-                                                              source->form_revision, now)))
-                    goto report;
-            }
-        }
-        if (!source->alive)
-        {
-            UnitPuppetPose pose = {source->x, source->y, source->z, 0, source->direction, 0};
-            present_death(slot, game, &pose, source->death_animation, now);
-            if (slot->state == MS_DEAD)
-            {
-                frame.visual = unit_death_sample(slot->death_visual, game);
-                if (frame.visual.fault ||
-                    (now - slot->death_at > MONSTER_PRESENTATION_LIFETIME_MS &&
-                     !unit_death_remove(slot->death_visual, game)))
-                    slot->state = MS_ABANDONED;
-            }
-            goto report;
-        }
-        if (slot->remote_dead)
-            goto report;
-        UnitPuppetPose pose = {source->x,        source->y,         source->z,
-                               source->velocity, source->direction, source->moving};
-        unsigned int view_vid = source->vid;
-        int view_health = source->health;
-        if (source->form_phase == MP_MONSTER_FORM_ARMOR)
-        {
-            view_vid = mp_monster_armor_successor(source->vid);
-            view_health = 0;
-            pose.velocity = 0;
-            pose.moving = 0;
-        }
-        if (slot->prediction == PREDICTION_DEATH)
-        {
-            slot->state = MS_PREDICTED_DEAD;
-            goto report;
-        }
-        if (slot->prediction != PREDICTION_NONE)
-        {
-            view_vid = slot->predicted_vid;
-            view_health = slot->predicted_health;
-            if (mp_monster_frozen(view_vid))
-            {
-                pose.velocity = 0;
-                pose.moving = 0;
-            }
-        }
-        if ((source->form_phase == MP_MONSTER_FORM_ARMOR ||
-             (slot->prediction == PREDICTION_FORM &&
-              ((slot->presentation_vid == MONSTER_VID_MONSTER2_ARMORED &&
-                view_vid == MONSTER_VID_MONSTER2) ||
-               (slot->presentation_vid == MONSTER_VID_TANK_ARMORED &&
-                view_vid == MONSTER_VID_TANK)))) &&
-            !slot->armor_presented)
-        {
-            unsigned int armored = source->origin_vid;
-            if (!cleanup_live(slot, game) ||
-                !present_armor(slot, game, &pose, armored, source->form_revision, now))
-                goto report;
-        }
-        int spawning = !slot->presentation_vid;
-        if (!client_copy(slot, local, view_vid, &pose, view_health, now))
-            goto report;
-        if (spawning)
-            slot->last_event = source->event_sequence;
-        if (slot->prediction != PREDICTION_NONE && !slot->predicted_health)
-            slot->predicted_health = unit_puppet_sample(slot->puppet, game).health;
-        if (source->form_phase == MP_MONSTER_FORM_ARMOR)
-            slot->state = MS_TRANSFORMING;
-        for (unsigned int i = 0; i < received_count; ++i)
-        {
-            ++considered;
-            const MonsterEvent* event = &received[i].message;
-            const MpMonsterEvent* e = &event->event;
-            if (now - received[i].received_at > 250u || event->authority_id != slot->authority_id ||
-                event->authority_session != slot->authority_session ||
-                e->world_epoch != slot->host_epoch || e->world_low != slot->low ||
-                e->world_high != slot->high || e->monster_id != slot->index + 1u ||
-                e->vid != slot->vid || e->origin_vid != expected_vid(slot->index) ||
-                e->form_revision != slot->form_revision || e->form_phase != slot->form_phase ||
-                !mp_sequence_newer(e->sequence, slot->last_event))
-            {
-                ++slot->rejected;
-                continue;
-            }
-            slot->last_event = e->sequence;
-            /* Persistent state carries health and the complete current form.
-               Form events are a deduplicated watermark; they never guess HP. */
-            if (e->kind == MP_MONSTER_FORM)
-                continue;
-            if (e->kind == MP_MONSTER_DEATH)
-            {
-                UnitPuppetPose death_pose = {e->x, e->y, e->z, 0, e->direction, 0};
-                if (slot->prediction != PREDICTION_NONE && !correct_prediction(slot, game))
-                    break;
-                present_death(slot, game, &death_pose, e->death_animation, now);
-                break;
-            }
-            if (e->kind != MP_MONSTER_ATTACK)
-            {
-                ++slot->rejected;
-                continue;
-            }
-            /* An old-form attack is still an acknowledged event, but its art
-               must not replace a predicted frozen/successor presentation. */
-            if (slot->presentation_vid != slot->vid || source->form_phase)
-                continue;
-            if (unit_puppet_replay(slot->puppet, game, e->sequence, STEAM_ANIM_ATTACK) != 1)
-            {
-                schedule_retry(slot, game, now);
-                break;
-            }
-            ++slot->attacks;
-        }
-        frame.unit = unit_puppet_sample(slot->puppet, game);
-        if (slot->state == MS_ACTIVE && frame.unit.state != UNIT_PUPPET_ACTIVE)
-            schedule_retry(slot, game, now);
-    }
-report:
-    slot->rejected += received_count - considered;
-    if (slot->role == MONSTER_CLIENT)
-        frame.visual = unit_death_sample(slot->death_visual, game);
-    if (slot->armor_presented)
-    {
-        UnitDeathSample armor = unit_death_sample(slot->armor_visual, game);
-        int expired = now - slot->armor_at > MONSTER_PRESENTATION_LIFETIME_MS;
-        if (armor.fault || (expired && !unit_death_remove(slot->armor_visual, game)))
-            slot->state = MS_ABANDONED;
-        frame.visual.entities += armor.entities;
-        frame.visual.gibs += armor.gibs;
-        frame.visual.fault = frame.visual.fault || armor.fault;
-    }
-    frame.death_animation = slot->death_animation;
-    frame.death_pose = slot->host_pose;
-    frame.state = slot->state;
-    frame.monster_id = slot->host_captured || slot->state == MS_ACTIVE || slot->remote_dead
-                           ? slot->index + 1u
-                           : 0u;
-    frame.host_epoch = slot->role == MONSTER_HOST ? slot->local_epoch : slot->host_epoch;
-    frame.attacks = slot->attacks;
-    frame.deaths = slot->deaths;
-    frame.forms = slot->forms;
-    frame.vid = slot->vid;
-    frame.form_revision = slot->form_revision;
-    frame.form_phase = slot->form_phase;
-    frame.dropped =
-        slot->dropped + (unsigned int)InterlockedCompareExchange(&incoming_dropped, 0, 0);
-    frame.rejected = slot->rejected;
-    frame.predictions = slot->predictions;
-    frame.confirmations = slot->confirmations;
-    frame.corrections = slot->corrections;
-    if (now - slot->logged_at >= 500u || frame.cleanup)
-    {
-        frame.event = 1;
-        slot->logged_at = now;
-    }
+    run_tick_steps(slot, input, &frame, &considered);
+    report_frame(slot, input, &frame, considered);
     return frame;
 }
+/* Inputs that monster_sync_tick takes from the worker handoff in one lock. */
+typedef struct TickHandoff
+{
+    MonsterState incoming[MP_MONSTER_CAPACITY];
+    int local_authority;
+    ReceivedMonsterEvent received[MONSTER_EVENT_CAPACITY];
+    unsigned int received_count;
+} TickHandoff;
+
+/* Gallery totals summed over every slot of one tick. */
+typedef struct GalleryTotals
+{
+    unsigned int active;
+    unsigned int dead;
+    unsigned int faults;
+    unsigned int deaths;
+    unsigned int attacks;
+    unsigned int predictions;
+    unsigned int confirmations;
+    unsigned int corrections;
+} GalleryTotals;
+
+/* Copies fresh incoming states and drains received events. Returns 0 when the
+   worker holds the lock; the game thread never waits for it. */
+static int take_tick_handoff(TickHandoff* out, DWORD now)
+{
+    if (!TryAcquireSRWLockExclusive(&lock))
+        return 0;
+    for (unsigned int i = 0; i < slot_count; ++i)
+    {
+        if (now - handoff.incoming_at[i] <= 1000u)
+            out->incoming[i] = handoff.incoming[i];
+    }
+    out->local_authority = handoff.local_authority;
+    out->received_count = handoff.received_count;
+    memcpy(out->received, handoff.received, out->received_count * sizeof(*out->received));
+    handoff.received_count = 0;
+    ReleaseSRWLockExclusive(&lock);
+    return 1;
+}
+
+/* Copies the received events addressed to one monster. Returns their count. */
+static unsigned int select_slot_events(const TickHandoff* taken, unsigned int index,
+                                       ReceivedMonsterEvent* matching)
+{
+    unsigned int count = 0;
+    for (unsigned int j = 0; j < taken->received_count; ++j)
+    {
+        if (taken->received[j].message.event.monster_id == index + 1u)
+            matching[count++] = taken->received[j];
+    }
+    return count;
+}
+
+static void fill_gallery_sample(MonsterGallerySample* sample, const MonsterSlot* slot,
+                                const MonsterSyncFrame* frame)
+{
+    sample->id = slot->index + 1u;
+    sample->vid = frame->vid;
+    sample->state = frame->state;
+    sample->form_revision = frame->form_revision;
+    sample->form_phase = frame->form_phase;
+    sample->presentation_vid = slot->presentation_vid;
+    sample->prediction = (unsigned int)slot->prediction;
+    sample->entity = frame->unit.entity;
+    sample->health = frame->unit.health;
+    sample->animation = frame->unit.animation;
+    sample->behavior = frame->unit.behavior;
+    sample->death_animation = frame->death_animation;
+    sample->x = frame->unit.entity ? frame->unit.x : frame->death_pose.x;
+    sample->y = frame->unit.entity ? frame->unit.y : frame->death_pose.y;
+    sample->effects = frame->visual.entities;
+    sample->fault = frame->visual.fault;
+}
+
+static void add_gallery_totals(GalleryTotals* totals, const MonsterSlot* slot,
+                               const MonsterSyncFrame* frame)
+{
+    totals->active +=
+        (frame->state == MS_ACTIVE || frame->state == MS_TRANSFORMING) && frame->unit.entity != 0;
+    totals->dead += frame->state == MS_DEAD || slot->seen_deaths != 0;
+    totals->faults +=
+        frame->state == MS_ABANDONED || frame->state == MS_BACKOFF || frame->visual.fault;
+    totals->deaths += frame->deaths;
+    totals->attacks += frame->attacks;
+    totals->predictions += frame->predictions;
+    totals->confirmations += frame->confirmations;
+    totals->corrections += frame->corrections;
+}
+
 MonsterSyncFrame monster_sync_tick(const Snapshot* local, enum ProbeResult result, uint32_t epoch,
                                    uint32_t tick, DWORD now)
 {
     MonsterSyncFrame output = {0};
-    MonsterState incoming[MP_MONSTER_CAPACITY] = {0};
-    ReceivedMonsterEvent received[MONSTER_EVENT_CAPACITY];
-    unsigned int received_count;
-    int local_authority;
-    if (!TryAcquireSRWLockExclusive(&lock))
+    TickHandoff taken = {0};
+    if (!take_tick_handoff(&taken, now))
     {
         output.state = slots[0].state;
         return output;
     }
-    for (unsigned int i = 0; i < slot_count; ++i)
-        if (now - handoff.incoming_at[i] <= 1000u)
-            incoming[i] = handoff.incoming[i];
-    local_authority = handoff.local_authority;
-    received_count = handoff.received_count;
-    memcpy(received, handoff.received, received_count * sizeof(*received));
-    handoff.received_count = 0;
-    ReleaseSRWLockExclusive(&lock);
+
     MonsterGallerySample samples[MP_MONSTER_CAPACITY] = {0};
-    unsigned int active = 0, dead = 0, faults = 0, deaths = 0, attacks = 0;
-    unsigned int predictions = 0, confirmations = 0, corrections = 0;
+    GalleryTotals totals = {0};
     int cleanup_all = 1;
     for (unsigned int index = 0; index < slot_count; ++index)
     {
         MonsterSlot* slot = &slots[index];
         ReceivedMonsterEvent matching[MONSTER_EVENT_CAPACITY];
-        unsigned int count = 0;
-        for (unsigned int j = 0; j < received_count; ++j)
-        {
-            if (received[j].message.event.monster_id == index + 1u)
-            {
-                matching[count++] = received[j];
-            }
-        }
-        MonsterSyncFrame frame = tick_slot(slot, local, result, epoch, tick, now, &incoming[index],
-                                           local_authority, matching, count);
+        unsigned int count = select_slot_events(&taken, index, matching);
+        SlotTickInput input = {
+            local,    result, epoch, tick, now, &taken.incoming[index], taken.local_authority,
+            matching, count};
+        MonsterSyncFrame frame = tick_slot(slot, &input);
         if (!index)
             output = frame;
         cleanup_all = cleanup_all && frame.cleanup;
-        MonsterGallerySample* sample = &samples[index];
-        sample->id = index + 1u;
-        sample->vid = frame.vid;
-        sample->state = frame.state;
-        sample->form_revision = frame.form_revision;
-        sample->form_phase = frame.form_phase;
-        sample->presentation_vid = slot->presentation_vid;
-        sample->prediction = (unsigned int)slot->prediction;
-        sample->entity = frame.unit.entity;
-        sample->health = frame.unit.health;
-        sample->animation = frame.unit.animation;
-        sample->behavior = frame.unit.behavior;
-        sample->death_animation = frame.death_animation;
-        sample->x = frame.unit.entity ? frame.unit.x : frame.death_pose.x;
-        sample->y = frame.unit.entity ? frame.unit.y : frame.death_pose.y;
-        sample->effects = frame.visual.entities;
-        sample->fault = frame.visual.fault;
-        active +=
-            (frame.state == MS_ACTIVE || frame.state == MS_TRANSFORMING) && frame.unit.entity != 0;
-        dead += frame.state == MS_DEAD || slot->seen_deaths != 0;
-        faults += frame.state == MS_ABANDONED || frame.state == MS_BACKOFF || frame.visual.fault;
-        deaths += frame.deaths;
-        attacks += frame.attacks;
-        predictions += frame.predictions;
-        confirmations += frame.confirmations;
-        corrections += frame.corrections;
+        fill_gallery_sample(&samples[index], slot, &frame);
+        add_gallery_totals(&totals, slot, &frame);
     }
+
     output.gallery_count = gallery ? slot_count : 0u;
-    output.gallery_active = active;
-    output.gallery_dead = dead;
-    output.gallery_faults = faults;
+    output.gallery_active = totals.active;
+    output.gallery_dead = totals.dead;
+    output.gallery_faults = totals.faults;
     memcpy(output.gallery, samples, sizeof(samples));
     output.cleanup = cleanup_all;
     if (gallery)
     {
-        output.deaths = deaths;
-        output.attacks = attacks;
-        output.predictions = predictions;
-        output.confirmations = confirmations;
-        output.corrections = corrections;
+        output.deaths = totals.deaths;
+        output.attacks = totals.attacks;
+        output.predictions = totals.predictions;
+        output.confirmations = totals.confirmations;
+        output.corrections = totals.corrections;
     }
     return output;
 }
