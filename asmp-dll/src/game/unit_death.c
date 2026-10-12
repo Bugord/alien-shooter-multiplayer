@@ -97,6 +97,93 @@ int unit_death_initialize(uintptr_t base, const UnitDeathEngine* api)
     initialized = 1;
     return 1;
 }
+#define DEATH_EDGE_COUNT (sizeof(edges) / sizeof(edges[0]))
+
+/* Caller in SEH. True when a stock VID can be copied: a plain native factory
+   entry without a service object or special factory flag. */
+static int plain_factory_vid(uintptr_t source)
+{
+    return *(unsigned int*)(source + STEAM_VID_CATEGORY_OFFSET) < STEAM_TICK_ENTITY_LIST_COUNT &&
+           !*(uintptr_t*)(source + STEAM_VID_SERVICE_OFFSET) &&
+           !(*(unsigned int*)(source + STEAM_VID_RESOURCE_FLAGS_OFFSET) &
+             STEAM_VID_SPECIAL_FACTORY_FLAG);
+}
+
+/* Makes a private VID copy purely visual: no counters, scripts, collision,
+   health or damage. */
+static void make_inert(unsigned char* d)
+{
+    memset(d + STEAM_VID_COUNTERS_OFFSET, 0, STEAM_VID_COUNTERS_SIZE);
+    *(int*)(d + STEAM_VID_DELETE_SCRIPT_OFFSET) = -1;
+    *(int*)(d + STEAM_VID_DAMAGE_SCRIPT_OFFSET) = -1;
+    *(int*)(d + STEAM_VID_COLLISION_SCRIPT_OFFSET) = -1;
+    *(unsigned int*)(d + STEAM_VID_COLLISION_MASK_OFFSET) = 0;
+    *(unsigned int*)(d + STEAM_VID_HEALTH_OFFSET) = 0;
+    *(int*)(d + STEAM_VID_DAMAGE_OFFSET) = 0;
+}
+
+/* Caller in SEH. Copies the legacy VID50 graph and checks it is exactly the
+   observed one: classes, the linked part and every creation edge. */
+static int copy_legacy_sources(UnitDeath* death, uintptr_t game, uintptr_t* sources)
+{
+    for (unsigned int i = 0; i < DEATH_VID_COUNT; ++i)
+    {
+        uintptr_t s = *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + indices[i] * 4u);
+        if (!s || *(unsigned int*)(s + STEAM_VID_INDEX_OFFSET) != indices[i] ||
+            *(unsigned int*)(s + STEAM_VID_CLASS_OFFSET) != legacy_classes[i] ||
+            !plain_factory_vid(s))
+            return 0;
+        sources[i] = s;
+        memcpy(death->vids[i], (void*)s, STEAM_VID_SIZE);
+    }
+    if (*(uintptr_t*)(sources[0] + STEAM_VID_LINKED_OFFSET) != sources[8])
+        return 0;
+    for (unsigned int e = 0; e < DEATH_EDGE_COUNT; ++e)
+    {
+        uintptr_t from = sources[edges[e].from];
+        unsigned int offset = edges[e].animation * 4u;
+        if (*(uintptr_t*)(from + STEAM_VID_CREATIONS_OFFSET + offset) != sources[edges[e].to] ||
+            *(unsigned int*)(from + STEAM_VID_CREATION_COUNT_OFFSET + offset) != edges[e].count)
+            return 0;
+    }
+    return 1;
+}
+
+/* Points one legacy copy's link and creations at the private copies.
+   Returns 0 for any link or edge outside the observed graph. */
+static int relink_legacy_copy(UnitDeath* death, unsigned int i, const uintptr_t* sources)
+{
+    unsigned char* d = death->vids[i];
+    make_inert(d);
+    uintptr_t link = *(uintptr_t*)(d + STEAM_VID_LINKED_OFFSET);
+    if (link && !(i == 0 && link == sources[8]))
+        return 0;
+    *(uintptr_t*)(d + STEAM_VID_LINKED_OFFSET) = link ? (uintptr_t)death->vids[8] : 0;
+    if (i == 8u)
+        memset(d + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
+
+    for (unsigned int a = 0; a < STEAM_ANIMATION_COUNT; ++a)
+    {
+        *(int*)(d + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + a * 4u) = -1;
+        uintptr_t target = *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u);
+        if (!target)
+            continue;
+        int count = *(int*)(d + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u);
+        unsigned int edge;
+        for (edge = 0; edge < DEATH_EDGE_COUNT; ++edge)
+        {
+            if (edges[edge].from == i && edges[edge].animation == a &&
+                target == sources[edges[edge].to] && count == (int)edges[edge].count)
+                break;
+        }
+        if (edge >= DEATH_EDGE_COUNT)
+            return 0;
+        *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) =
+            (uintptr_t)death->vids[edges[edge].to];
+    }
+    return 1;
+}
+
 /* Caller in SEH. Resolve every link through the loaded table before cloning.
    Only the observed visual graph is admitted, with bounded creation counts. */
 static int prepare(UnitDeath* death, uintptr_t game)
@@ -111,60 +198,12 @@ static int prepare(UnitDeath* death, uintptr_t game)
         death->linked[i] = DEATH_GRAPH_LIMIT;
     }
     death->linked[0] = 8;
-    for (unsigned int i = 0; i < DEATH_VID_COUNT; ++i)
-    {
-        uintptr_t s = *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + indices[i] * 4u);
-        if (!s || *(unsigned int*)(s + STEAM_VID_INDEX_OFFSET) != indices[i] ||
-            *(unsigned int*)(s + STEAM_VID_CLASS_OFFSET) != legacy_classes[i] ||
-            *(unsigned int*)(s + STEAM_VID_CATEGORY_OFFSET) >= STEAM_TICK_ENTITY_LIST_COUNT ||
-            *(uintptr_t*)(s + STEAM_VID_SERVICE_OFFSET) ||
-            (*(unsigned int*)(s + STEAM_VID_RESOURCE_FLAGS_OFFSET) &
-             STEAM_VID_SPECIAL_FACTORY_FLAG))
-            return 0;
-        sources[i] = s;
-        memcpy(death->vids[i], (void*)s, STEAM_VID_SIZE);
-    }
-    if (*(uintptr_t*)(sources[0] + STEAM_VID_LINKED_OFFSET) != sources[8])
+    if (!copy_legacy_sources(death, game, sources))
         return 0;
-    for (unsigned int e = 0; e < sizeof(edges) / sizeof(edges[0]); ++e)
-        if (*(uintptr_t*)(sources[edges[e].from] + STEAM_VID_CREATIONS_OFFSET +
-                          edges[e].animation * 4u) != sources[edges[e].to] ||
-            *(unsigned int*)(sources[edges[e].from] + STEAM_VID_CREATION_COUNT_OFFSET +
-                             edges[e].animation * 4u) != edges[e].count)
-            return 0;
     for (unsigned int i = 0; i < DEATH_VID_COUNT; ++i)
     {
-        unsigned char* d = death->vids[i];
-        memset(d + STEAM_VID_COUNTERS_OFFSET, 0, STEAM_VID_COUNTERS_SIZE);
-        *(int*)(d + STEAM_VID_DELETE_SCRIPT_OFFSET) = -1;
-        *(int*)(d + STEAM_VID_DAMAGE_SCRIPT_OFFSET) = -1;
-        *(int*)(d + STEAM_VID_COLLISION_SCRIPT_OFFSET) = -1;
-        *(unsigned int*)(d + STEAM_VID_COLLISION_MASK_OFFSET) = 0;
-        *(unsigned int*)(d + STEAM_VID_HEALTH_OFFSET) = 0;
-        *(int*)(d + STEAM_VID_DAMAGE_OFFSET) = 0;
-        uintptr_t link = *(uintptr_t*)(d + STEAM_VID_LINKED_OFFSET);
-        if (link && !(i == 0 && link == sources[8]))
+        if (!relink_legacy_copy(death, i, sources))
             return 0;
-        *(uintptr_t*)(d + STEAM_VID_LINKED_OFFSET) = link ? (uintptr_t)death->vids[8] : 0;
-        if (i == 8u)
-            memset(d + STEAM_VID_CREATIONS_OFFSET, 0, STEAM_ANIMATION_COUNT * 4u);
-        for (unsigned int a = 0; a < STEAM_ANIMATION_COUNT; ++a)
-        {
-            *(int*)(d + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + a * 4u) = -1;
-            uintptr_t target = *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u);
-            if (!target)
-                continue;
-            int count = *(int*)(d + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u);
-            unsigned int edge;
-            for (edge = 0; edge < sizeof(edges) / sizeof(edges[0]); ++edge)
-                if (edges[edge].from == i && edges[edge].animation == a &&
-                    target == sources[edges[edge].to] && count == (int)edges[edge].count)
-                    break;
-            if (edge >= sizeof(edges) / sizeof(edges[0]))
-                return 0;
-            *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) =
-                (uintptr_t)death->vids[edges[edge].to];
-        }
     }
     return 1;
 }
@@ -176,14 +215,91 @@ typedef struct DeathGraph
     int armor;
 } DeathGraph;
 static int graph_visit(UnitDeath* death, uintptr_t game, uintptr_t source, DeathGraph* graph,
+                       unsigned int* result, int linked_art);
+
+/* Caller in SEH. True when a graph node is a stock visual VID (cannon, terrain
+   or part class) with a behavior, loaded at its own table index. */
+static int visual_node_admissible(uintptr_t game, uintptr_t source)
+{
+    unsigned int index = *(unsigned int*)(source + STEAM_VID_INDEX_OFFSET);
+    unsigned int class_id = *(unsigned int*)(source + STEAM_VID_CLASS_OFFSET);
+    if (index >= STEAM_STOCK_VID_LIMIT ||
+        *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + index * 4u) != source)
+        return 0;
+    if (class_id != STEAM_CANNON_CLASS && class_id != STEAM_TERRAIN_CLASS &&
+        class_id != STEAM_PUPPET_PART_CLASS)
+        return 0;
+    return *(uintptr_t*)(source + STEAM_VID_BEHAVIOR_OFFSET) && plain_factory_vid(source);
+}
+
+static void clear_creation(unsigned char* d, unsigned int animation)
+{
+    *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + animation * 4u) = 0;
+    *(unsigned int*)(d + STEAM_VID_CREATION_COUNT_OFFSET + animation * 4u) = 0;
+}
+
+/* Visits the linked part of node i (a class-9 SPRITE without a link of its
+   own) and adds its cost to *total. */
+static int visit_linked_part(UnitDeath* death, uintptr_t game, uintptr_t source, DeathGraph* graph,
+                             unsigned int i, unsigned int* total)
+{
+    uintptr_t linked = *(uintptr_t*)(source + STEAM_VID_LINKED_OFFSET);
+    if (!linked)
+        return 1;
+    unsigned int child;
+    if (death->classes[i] == 9u || *(unsigned int*)(linked + STEAM_VID_CLASS_OFFSET) != 9u ||
+        *(uintptr_t*)(linked + STEAM_VID_LINKED_OFFSET) ||
+        !graph_visit(death, game, linked, graph, &child, 1))
+        return 0;
+    death->linked[i] = child;
+    *(uintptr_t*)(death->vids[i] + STEAM_VID_LINKED_OFFSET) = (uintptr_t)death->vids[child];
+    *total += graph->cost[child];
+    return 1;
+}
+
+/* Visits what node i creates on animation a and points the private copy at
+   it. Armor graphs drop the living successor UNIT. Keeps *total bounded. */
+static int visit_creation(UnitDeath* death, uintptr_t game, uintptr_t source, DeathGraph* graph,
+                          unsigned int i, unsigned int a, unsigned int* total)
+{
+    unsigned char* d = death->vids[i];
+    uintptr_t target = *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + a * 4u);
+    if (!target)
+        return 1;
+    if (graph->armor && *(unsigned int*)(target + STEAM_VID_CLASS_OFFSET) == STEAM_UNIT_CLASS)
+    {
+        unsigned int successor = *(unsigned int*)(target + STEAM_VID_INDEX_OFFSET);
+        if ((successor != MONSTER_VID_MONSTER2 && successor != MONSTER_VID_TANK) ||
+            *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + successor * 4u) != target)
+            return 0;
+        clear_creation(d, a);
+        return 1;
+    }
+
+    unsigned int count = *(unsigned int*)(source + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u);
+    unsigned int child;
+    if (!count || count > DEATH_CREATION_LIMIT ||
+        !graph_visit(death, game, target, graph, &child, 0) ||
+        graph->cost[child] > (DEATH_ENTITY_LIMIT - *total) / count)
+        return 0;
+    *total += count * graph->cost[child];
+    *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = (uintptr_t)death->vids[child];
+    return 1;
+}
+
+/* Caller in SEH. Depth-first copy of a death graph into private VIDs.
+ *result receives the node index of source; cycles are rejected. */
+static int graph_visit(UnitDeath* death, uintptr_t game, uintptr_t source, DeathGraph* graph,
                        unsigned int* result, int linked_art)
 {
     if (!source)
         return 0;
     unsigned int i;
     for (i = 0; i < death->count; ++i)
+    {
         if (graph->sources[i] == source)
             break;
+    }
     if (i < death->count)
     {
         if (graph->colors[i] != 2u)
@@ -191,78 +307,32 @@ static int graph_visit(UnitDeath* death, uintptr_t game, uintptr_t source, Death
         *result = i;
         return 1;
     }
-    if (death->count >= DEATH_GRAPH_LIMIT)
+    if (death->count >= DEATH_GRAPH_LIMIT || !visual_node_admissible(game, source))
         return 0;
-    unsigned int index = *(unsigned int*)(source + STEAM_VID_INDEX_OFFSET);
-    unsigned int class_id = *(unsigned int*)(source + STEAM_VID_CLASS_OFFSET);
-    if (index >= STEAM_STOCK_VID_LIMIT ||
-        *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + index * 4u) != source ||
-        (class_id != STEAM_CANNON_CLASS && class_id != STEAM_TERRAIN_CLASS &&
-         class_id != STEAM_PUPPET_PART_CLASS) ||
-        !*(uintptr_t*)(source + STEAM_VID_BEHAVIOR_OFFSET) ||
-        *(unsigned int*)(source + STEAM_VID_CATEGORY_OFFSET) >= STEAM_TICK_ENTITY_LIST_COUNT ||
-        *(uintptr_t*)(source + STEAM_VID_SERVICE_OFFSET) ||
-        (*(unsigned int*)(source + STEAM_VID_RESOURCE_FLAGS_OFFSET) &
-         STEAM_VID_SPECIAL_FACTORY_FLAG))
-        return 0;
+
     i = death->count++;
     graph->sources[i] = source;
     graph->colors[i] = 1;
-    death->classes[i] = class_id;
+    death->classes[i] = *(unsigned int*)(source + STEAM_VID_CLASS_OFFSET);
     death->linked[i] = DEATH_GRAPH_LIMIT;
     unsigned char* d = death->vids[i];
     memcpy(d, (void*)source, STEAM_VID_SIZE);
-    memset(d + STEAM_VID_COUNTERS_OFFSET, 0, STEAM_VID_COUNTERS_SIZE);
-    *(int*)(d + STEAM_VID_DELETE_SCRIPT_OFFSET) = -1;
-    *(int*)(d + STEAM_VID_DAMAGE_SCRIPT_OFFSET) = -1;
-    *(int*)(d + STEAM_VID_COLLISION_SCRIPT_OFFSET) = -1;
-    *(unsigned int*)(d + STEAM_VID_COLLISION_MASK_OFFSET) = 0;
-    *(unsigned int*)(d + STEAM_VID_HEALTH_OFFSET) = 0;
-    *(int*)(d + STEAM_VID_DAMAGE_OFFSET) = 0;
+    make_inert(d);
     unsigned int total = 1;
-    uintptr_t linked = *(uintptr_t*)(source + STEAM_VID_LINKED_OFFSET);
-    if (linked)
-    {
-        unsigned int child;
-        if (class_id == 9u || *(unsigned int*)(linked + STEAM_VID_CLASS_OFFSET) != 9u ||
-            *(uintptr_t*)(linked + STEAM_VID_LINKED_OFFSET) ||
-            !graph_visit(death, game, linked, graph, &child, 1))
-            return 0;
-        death->linked[i] = child;
-        *(uintptr_t*)(d + STEAM_VID_LINKED_OFFSET) = (uintptr_t)death->vids[child];
-        total += graph->cost[child];
-    }
+    if (!visit_linked_part(death, game, source, graph, i, &total))
+        return 0;
+
     for (unsigned int a = 0; a < STEAM_ANIMATION_COUNT; ++a)
     {
         *(int*)(d + STEAM_VID_ANIMATION_SCRIPTS_OFFSET + a * 4u) = -1;
-        uintptr_t target = *(uintptr_t*)(source + STEAM_VID_CREATIONS_OFFSET + a * 4u);
         /* A linked SPRITE is borrowed art only, just like scoped VID108. */
         if (linked_art)
         {
-            *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = 0;
-            *(unsigned int*)(d + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u) = 0;
+            clear_creation(d, a);
             continue;
         }
-        if (!target)
-            continue;
-        if (graph->armor && *(unsigned int*)(target + STEAM_VID_CLASS_OFFSET) == STEAM_UNIT_CLASS)
-        {
-            unsigned int successor = *(unsigned int*)(target + STEAM_VID_INDEX_OFFSET);
-            if ((successor != MONSTER_VID_MONSTER2 && successor != MONSTER_VID_TANK) ||
-                *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + successor * 4u) != target)
-                return 0;
-            *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = 0;
-            *(unsigned int*)(d + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u) = 0;
-            continue;
-        }
-        unsigned int count = *(unsigned int*)(source + STEAM_VID_CREATION_COUNT_OFFSET + a * 4u),
-                     child;
-        if (!count || count > DEATH_CREATION_LIMIT ||
-            !graph_visit(death, game, target, graph, &child, 0) ||
-            graph->cost[child] > (DEATH_ENTITY_LIMIT - total) / count)
+        if (!visit_creation(death, game, source, graph, i, a, &total))
             return 0;
-        total += count * graph->cost[child];
-        *(uintptr_t*)(d + STEAM_VID_CREATIONS_OFFSET + a * 4u) = (uintptr_t)death->vids[child];
     }
     graph->cost[i] = total;
     graph->colors[i] = 2;
@@ -277,10 +347,7 @@ static int prepare_type(UnitDeath* death, uintptr_t game, unsigned int source_vi
     uintptr_t source = *(uintptr_t*)(game + STEAM_GAME_VID_TABLE_OFFSET + source_vid * 4u);
     if (!source || *(unsigned int*)(source + STEAM_VID_INDEX_OFFSET) != source_vid ||
         *(unsigned int*)(source + STEAM_VID_CLASS_OFFSET) != STEAM_UNIT_CLASS ||
-        *(unsigned int*)(source + STEAM_VID_CATEGORY_OFFSET) >= STEAM_TICK_ENTITY_LIST_COUNT ||
-        *(uintptr_t*)(source + STEAM_VID_SERVICE_OFFSET) ||
-        (*(unsigned int*)(source + STEAM_VID_RESOURCE_FLAGS_OFFSET) &
-         STEAM_VID_SPECIAL_FACTORY_FLAG))
+        !plain_factory_vid(source))
         return 0;
     *multiplicity = *(unsigned int*)(source + STEAM_VID_CREATION_COUNT_OFFSET + animation * 4u);
     if (!*multiplicity || *multiplicity > 2u ||
@@ -325,6 +392,49 @@ static int find_private(const UnitDeath* death, uintptr_t game, uintptr_t wanted
     }
     return 0;
 }
+/* Caller in SEH. Checks that private entity e (node i) is linked to its part
+   and parent exactly as the private graph says. */
+static int private_links_valid(const UnitDeath* death, uintptr_t game, uintptr_t e, unsigned int i)
+{
+    uintptr_t child = *(uintptr_t*)(e + STEAM_ENTITY_CHILD_OFFSET);
+    uintptr_t parent = *(uintptr_t*)(e + STEAM_ENTITY_PARENT_OFFSET);
+    unsigned int link = death->linked[i];
+    if (child && (link >= death->count || !find_private(death, game, child, link) ||
+                  *(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) != e ||
+                  *(uintptr_t*)(child + STEAM_ENTITY_CHILD_OFFSET)))
+        return 0;
+    if (!parent)
+        return 1;
+
+    unsigned int parent_index;
+    for (parent_index = 0; parent_index < death->count; ++parent_index)
+    {
+        if (death->linked[parent_index] == i && find_private(death, game, parent, parent_index))
+            break;
+    }
+    return parent_index != death->count && *(uintptr_t*)(parent + STEAM_ENTITY_CHILD_OFFSET) == e;
+}
+
+/* Caller in SEH. Counts one map entity into s if it is one of ours.
+   Returns 0 on a fault (wrong vtable, broken links or too many entities). */
+static int count_private_entity(const UnitDeath* death, uintptr_t game, uintptr_t e,
+                                UnitDeathSample* s)
+{
+    int i = private_index(death, *(uintptr_t*)(e + STEAM_ENTITY_VID_OFFSET));
+    if (i < 0)
+        return 1;
+    if (*(uintptr_t*)e != vtable(death, (unsigned int)i) || ++s->entities > DEATH_ENTITY_LIMIT)
+        return 0;
+    if (!private_links_valid(death, game, e, (unsigned int)i))
+        return 0;
+    if ((unsigned int)i == death->corpse)
+        ++s->corpses;
+    if ((unsigned int)i == death->gib ||
+        (death->gib == DEATH_GRAPH_LIMIT && death->classes[i] == STEAM_CANNON_CLASS && i != 0))
+        ++s->gibs;
+    return 1;
+}
+
 UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
 {
     UnitDeathSample s = {0};
@@ -348,48 +458,11 @@ UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
             }
             for (unsigned int j = 0; j < n; ++j)
             {
-                uintptr_t e = entries[j];
-                if (!e)
-                    continue;
-                int i = private_index(death, *(uintptr_t*)(e + STEAM_ENTITY_VID_OFFSET));
-                if (i < 0)
-                    continue;
-                if (*(uintptr_t*)e != vtable(death, (unsigned int)i) ||
-                    ++s.entities > DEATH_ENTITY_LIMIT)
+                if (entries[j] && !count_private_entity(death, game, entries[j], &s))
                 {
                     s.fault = 1;
                     return s;
                 }
-                uintptr_t child = *(uintptr_t*)(e + STEAM_ENTITY_CHILD_OFFSET);
-                uintptr_t parent = *(uintptr_t*)(e + STEAM_ENTITY_PARENT_OFFSET);
-                unsigned int link = death->linked[i];
-                if (child && (link >= death->count || !find_private(death, game, child, link) ||
-                              *(uintptr_t*)(child + STEAM_ENTITY_PARENT_OFFSET) != e ||
-                              *(uintptr_t*)(child + STEAM_ENTITY_CHILD_OFFSET)))
-                {
-                    s.fault = 1;
-                    return s;
-                }
-                if (parent)
-                {
-                    unsigned int parent_index;
-                    for (parent_index = 0; parent_index < death->count; ++parent_index)
-                        if (death->linked[parent_index] == (unsigned int)i &&
-                            find_private(death, game, parent, parent_index))
-                            break;
-                    if (parent_index == death->count ||
-                        *(uintptr_t*)(parent + STEAM_ENTITY_CHILD_OFFSET) != e)
-                    {
-                        s.fault = 1;
-                        return s;
-                    }
-                }
-                if ((unsigned int)i == death->corpse)
-                    ++s.corpses;
-                if ((unsigned int)i == death->gib ||
-                    (death->gib == DEATH_GRAPH_LIMIT && death->classes[i] == STEAM_CANNON_CLASS &&
-                     i != 0))
-                    ++s.gibs;
             }
         }
     }
@@ -399,12 +472,19 @@ UnitDeathSample unit_death_sample(UnitDeath* death, uintptr_t game)
     }
     return s;
 }
+/* True when a ready, empty slot may play a death animation at pose p. */
+static int play_request_valid(const UnitDeath* death, const UnitPuppetPose* p,
+                              unsigned int animation)
+{
+    return death && death->state == DEATH_READY && !death->game && p &&
+           (animation == STEAM_ANIM_DEATH || animation == STEAM_ANIM_GIB_DEATH) && isfinite(p->x) &&
+           isfinite(p->y) && isfinite(p->z) && p->direction <= 255u;
+}
+
 int unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
                     unsigned int animation)
 {
-    if (!death || death->state != DEATH_READY || death->game || !p ||
-        (animation != STEAM_ANIM_DEATH && animation != STEAM_ANIM_GIB_DEATH) || !isfinite(p->x) ||
-        !isfinite(p->y) || !isfinite(p->z) || p->direction > 255u)
+    if (!play_request_valid(death, p, animation))
         return 0;
     __try
     {
@@ -434,9 +514,7 @@ int unit_death_play(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
 static int play_type(UnitDeath* death, uintptr_t game, const UnitPuppetPose* p,
                      unsigned int animation, unsigned int source_vid, int armor)
 {
-    if (!death || death->state != DEATH_READY || death->game || !p ||
-        (animation != STEAM_ANIM_DEATH && animation != STEAM_ANIM_GIB_DEATH) || !isfinite(p->x) ||
-        !isfinite(p->y) || !isfinite(p->z) || p->direction > 255u)
+    if (!play_request_valid(death, p, animation))
         return 0;
     __try
     {
@@ -485,6 +563,46 @@ int unit_death_play_armor(UnitDeath* death, uintptr_t game, const UnitPuppetPose
         return 0;
     return play_type(death, game, p, STEAM_ANIM_DEATH, source_vid, 1);
 }
+/* Caller in SEH. Finds one of our entities without a parent (a part goes with
+   its parent). *found stays 0 when none is left. Returns 0 on a list fault. */
+static int find_private_root(const UnitDeath* death, uintptr_t game, uintptr_t* found, int* index)
+{
+    for (unsigned int c = 0; c < STEAM_TICK_ENTITY_LIST_COUNT; ++c)
+    {
+        uintptr_t* entries;
+        unsigned int n;
+        if (!world_list_read(game, c, &entries, &n))
+            return 0;
+        for (unsigned int j = 0; j < n; ++j)
+        {
+            uintptr_t e = entries[j];
+            if (!e)
+                continue;
+            int i = private_index(death, *(uintptr_t*)(e + STEAM_ENTITY_VID_OFFSET));
+            if (i >= 0 && !*(uintptr_t*)(e + STEAM_ENTITY_PARENT_OFFSET))
+            {
+                *found = e;
+                *index = i;
+                return 1;
+            }
+        }
+    }
+    return 1;
+}
+
+/* Caller in SEH. Deletes one entity through the deleting destructor of its
+   native class. */
+static void destroy_private_entity(const UnitDeath* death, uintptr_t entity, unsigned int index)
+{
+    unsigned int class_id = death->classes[index];
+    ActorDestroy destroy = death->part_destroy;
+    if (class_id == STEAM_CANNON_CLASS)
+        destroy = death->cannon_destroy;
+    else if (class_id == STEAM_TERRAIN_CLASS)
+        destroy = death->terrain_destroy;
+    destroy((void*)entity, NULL, 1);
+}
+
 int unit_death_remove(UnitDeath* death, uintptr_t game)
 {
     if (!death)
@@ -512,35 +630,11 @@ int unit_death_remove(UnitDeath* death, uintptr_t game)
         {
             uintptr_t found = 0;
             int index = -1;
-            for (unsigned int c = 0; c < STEAM_TICK_ENTITY_LIST_COUNT && !found; ++c)
-            {
-                uintptr_t* entries;
-                unsigned int n;
-                if (!world_list_read(game, c, &entries, &n))
-                    return 0;
-                for (unsigned int j = 0; j < n; ++j)
-                {
-                    uintptr_t e = entries[j];
-                    if (!e)
-                        continue;
-                    int i = private_index(death, *(uintptr_t*)(e + STEAM_ENTITY_VID_OFFSET));
-                    if (i >= 0 && !*(uintptr_t*)(e + STEAM_ENTITY_PARENT_OFFSET))
-                    {
-                        found = e;
-                        index = i;
-                        break;
-                    }
-                }
-            }
+            if (!find_private_root(death, game, &found, &index))
+                return 0;
             if (!found)
                 break;
-            unsigned int class_id = death->classes[index];
-            ActorDestroy destroy = death->part_destroy;
-            if (class_id == STEAM_CANNON_CLASS)
-                destroy = death->cannon_destroy;
-            else if (class_id == STEAM_TERRAIN_CLASS)
-                destroy = death->terrain_destroy;
-            destroy((void*)found, NULL, 1);
+            destroy_private_entity(death, found, (unsigned int)index);
         }
         s = unit_death_sample(death, game);
         if (s.fault || s.entities)
