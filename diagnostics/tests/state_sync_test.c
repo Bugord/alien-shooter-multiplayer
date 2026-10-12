@@ -8,6 +8,23 @@
 #include "epnet_client.h"
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
 
+/* Windows reserves blocks of about 100 UDP ports (see `netsh int ipv4 show
+   excludedportrange protocol=udp`), so a PID-derived port can be refused.
+   Steps past such a block until the server binds; *port receives the port. */
+#define TEST_PORT_ATTEMPTS 16
+#define TEST_PORT_STEP 101
+static MpServer* create_test_server(unsigned short first_port, unsigned short* port)
+{
+    for (unsigned int attempt = 0; attempt < TEST_PORT_ATTEMPTS; ++attempt)
+    {
+        *port = (unsigned short)(first_port + attempt * TEST_PORT_STEP);
+        MpServer* server = mp_server_create(*port, 4);
+        if (server)
+            return server;
+    }
+    return NULL;
+}
+
 static void pump(MpServer* server, StateClient* a, StateClient* b, unsigned long milliseconds,
     const MpState* sa, const MpState* sb) {
     DWORD start = GetTickCount();
@@ -108,8 +125,9 @@ int main(void) {
     CHECK(n && mp_roster_decode(hs, n, back, &count) && count == 2 && back[1].id == 7 && !strcmp(back[1].name, "Seven"));
     CHECK(!mp_roster_decode(hs, n - 1, back, &count) && !mp_roster_decode(hs, n + 1, back, &count));
     roster[1].id = 0; CHECK(!mp_roster_encode(hs, sizeof(hs), roster, 2) || (n = mp_roster_encode(hs, sizeof(hs), roster, 2), !mp_roster_decode(hs, n, back, &count))); /* Duplicate id. */
-    unsigned short port = (unsigned short)(55000 + GetCurrentProcessId() % 5000);
-    MpServer* server = mp_server_create(port, 4); CHECK(server);
+    unsigned short port;
+    MpServer* server = create_test_server((unsigned short)(55000 + GetCurrentProcessId() % 5000), &port);
+    CHECK(server);
     StateClient* a = state_client_create("127.0.0.1", port, "First", NULL); CHECK(a);
     StateClient* b = state_client_create("127.0.0.1", port, "Second", NULL); CHECK(b);
     pump(server, a, b, 1200, &original, &original);
