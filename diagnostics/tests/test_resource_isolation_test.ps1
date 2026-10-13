@@ -82,10 +82,11 @@ function Invoke-TestLauncher([string]$Launcher, [string[]]$Arguments) {
     Set-Content -LiteralPath (Join-Path $source 'saves\options.ini') -Value "[graph]`r`nScreenX=800`r`nScreenY=600`r`nFullScreen=1" -Encoding ascii
     Set-Content -LiteralPath (Join-Path $source 'saves\save.ini') -Value 'owner=original' -Encoding ascii
     foreach ($file in @('MAINMENU.LGC', 'mainmenu.men')) { Set-Content -LiteralPath (Join-Path $source "Maps\$file") -Value 'native menu' -Encoding ascii }
-    foreach ($file in @('asmp_play.lgc', 'asmp_play.men', 'mainmenu.lgc', 'asmp_mainmenu.men')) {
+    foreach ($file in @('asmp_play.lgc', 'asmp_play.men', 'asmp_lobby.men', 'mainmenu.lgc', 'asmp_mainmenu.men')) {
         Set-Content -LiteralPath (Join-Path $fixture "game\AlienShooter\Maps\$file") -Value "multiplayer $file" -Encoding ascii
     }
     Set-Content -LiteralPath (Join-Path $scripts 'build\asmp-diag.dll') -Value 'fixture DLL' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $scripts 'build\asmp-server.exe') -Value 'fixture server' -Encoding ascii
     Set-Content -LiteralPath (Join-Path $scripts 'build\asmp-diag-launch.exe') -Value 'never executed' -Encoding ascii
     $sourceBefore = Get-Snapshot $source
     foreach ($instance in @('default', 'client-a', 'client-b')) { & (Join-Path $scripts 'prepare-test-game.ps1') -Source $source -Instance $instance | Out-Null }
@@ -97,6 +98,7 @@ function Invoke-TestLauncher([string]$Launcher, [string[]]$Arguments) {
     foreach ($runtime in @($pair.ClientA, $pair.ClientB)) {
         Check ((Get-FileHash -LiteralPath (Join-Path $runtime 'asmp-diag.dll')).Hash -eq $pair.DllSha256) 'both DLL copies verified before launch'
         Check (Test-Path -LiteralPath (Join-Path $runtime 'logs') -PathType Container) 'separate log directories prepared'
+        Check ((Get-Content -LiteralPath (Join-Path $runtime 'asmp-server.exe') -Raw).Trim() -eq 'fixture server') 'server copied next to each DLL'
     }
     $secondPair = & (Join-Path $scripts 'prepare-test-runtimes.ps1')
     Check ($secondPair.Directory -ne $pair.Directory) 'fresh runtime directory on each preparation'
@@ -161,6 +163,7 @@ function Invoke-TestLauncher([string]$Launcher, [string[]]$Arguments) {
         Check ((Get-Content -LiteralPath (Join-Path $copy 'Maps\survive_01.lgc') -Raw).Trim() -eq 'native survival script') 'failed network launch restores that instance survival script'
     }
     $launchA = $testState.Launches[0]; $launchB = $testState.Launches[1]
+    Check ((Get-Content -LiteralPath (Join-Path $a 'Maps\asmp_lobby.men') -Raw).Trim() -eq 'multiplayer asmp_lobby.men') 'multiplayer launch copies the room menu'
     Check ($launchA.Name -eq 'LocalA' -and $launchA.Server -eq '127.0.0.1' -and $launchA.Port -eq '27021' -and $launchA.Multiplayer -eq '1' -and !$launchA.Dummy) 'A launcher environment'
     Check ($launchB.Name -eq 'LocalB' -and !$launchB.Server -and $launchB.Port -eq '27022' -and !$launchB.Multiplayer -and $launchB.Dummy -eq '1') 'B does not inherit A environment'
     Check ($launchA.Arguments[0] -eq (Join-Path $a 'AlienShooter.exe') -and $launchB.Arguments[1] -eq (Join-Path $pair.ClientB 'asmp-diag.dll')) 'launcher uses selected game and DLL paths'

@@ -12,8 +12,12 @@ try {
     $dll = Assert-TestDirectory (Join-Path $build 'asmp-diag.dll') $build
     if (!(Test-Path -LiteralPath $dll -PathType Leaf)) { throw 'Run build.ps1 first.' }
     $hash = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
+    # The menu's Create button starts asmp-server.exe from the DLL's directory.
+    $server = Assert-TestDirectory (Join-Path $build 'asmp-server.exe') $build
+    if (!(Test-Path -LiteralPath $server -PathType Leaf)) { throw 'Run build.ps1 -Server first.' }
+    $serverHash = (Get-FileHash -LiteralPath $server -Algorithm SHA256).Hash
     $pairRoot = Assert-TestDirectory (Join-Path $build 'two-client') $build
-    Assert-TestFreeSpace $pairRoot (2 * (Get-Item -LiteralPath $dll).Length)
+    Assert-TestFreeSpace $pairRoot (2 * ((Get-Item -LiteralPath $dll).Length + (Get-Item -LiteralPath $server).Length))
     $id = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), ([guid]::NewGuid().ToString('N'))
     $directory = Assert-TestDirectory (Join-Path $pairRoot $id) $pairRoot
     # Never overwrite an earlier runtime: its pinned DLL/logs may still be in use.
@@ -23,6 +27,8 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $runtime 'logs') | Out-Null
         Copy-Item -LiteralPath $dll -Destination (Join-Path $runtime 'asmp-diag.dll')
         if ((Get-FileHash -LiteralPath (Join-Path $runtime 'asmp-diag.dll') -Algorithm SHA256).Hash -ne $hash) { throw "Runtime DLL verification failed: $instance" }
+        Copy-Item -LiteralPath $server -Destination (Join-Path $runtime 'asmp-server.exe')
+        if ((Get-FileHash -LiteralPath (Join-Path $runtime 'asmp-server.exe') -Algorithm SHA256).Hash -ne $serverHash) { throw "Runtime server verification failed: $instance" }
     }
     # Mark complete only after both copies have been verified.
     foreach ($instance in @('client-a', 'client-b')) {

@@ -42,7 +42,7 @@ static uintptr_t item(uintptr_t game, unsigned int vid, unsigned int direction)
         RaiseException(0xE0000001u, 0, 0, NULL);
     if (root_menu && vid == 705 && direction == 204)
         return (uintptr_t)root_entity;
-    if (room_menu && vid == 2 && direction == 1)
+    if (room_menu && vid == 2 && direction == 25)
         return (uintptr_t)room_entity;
     if (!form_menu)
         return 0;

@@ -23,7 +23,7 @@
 #define FORM_STATUS_VID    2u
 #define FORM_STATUS_DIR    0u
 #define ROOM_STATUS_VID    2u
-#define ROOM_STATUS_DIR    1u
+#define ROOM_STATUS_DIR    25u /* ndir 1: the script finds it with MenuFind(2, 1). */
 #define NICKNAME_VID       4u
 #define NICKNAME_DIR       2u
 #define ADDRESS_VID        4u

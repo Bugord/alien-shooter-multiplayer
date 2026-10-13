@@ -84,6 +84,7 @@ ResetGameParameters()
 main()
 {
   int menu,i;
+  int bridgeStatus;
   iff( 1 )
   {
     SetCursor(CURSOR_NORMAL);
@@ -115,11 +116,20 @@ main()
         MenuAction(705,5,ANI_MENUDISABLE);
       }
     }
-    // The runtime requests this only after losing a live connection.
-    if( !StartEffectTime && Action(MenuFind(705,MENU_ASMP_VIRTUAL),ACT_GET_HP)==SPMS_CONNECTION_LOST )
+    // The DLL routes back to multiplayer after a lost connection or a cancelled start.
+    if( !StartEffectTime )
     {
-      asmpReturnStatus = SPMS_CONNECTION_LOST;
-      ChangeMenuState(MENU_ASMP);
+      bridgeStatus = Action(MenuFind(705,MENU_ASMP_VIRTUAL),ACT_GET_HP);
+      if( bridgeStatus==SPMS_CONNECTION_LOST )
+      {
+        asmpReturnStatus = SPMS_CONNECTION_LOST;
+        ChangeMenuState(MENU_ASMP);
+      }
+      else if( bridgeStatus==SPMS_RETURN_LOBBY )
+      {
+        asmpReturnStatus = SPMS_IDLE; // The form opens and the DLL switches to the room.
+        ChangeMenuState(MENU_ASMP);
+      }
     }
     if( MenuLClick() && MenuNVidUnderCursor()==705 )
     {
@@ -383,13 +393,15 @@ main()
     }
 	if( MenuLClick() )
 	{
-	  if( MenuNDirUnderCursor() == 2 ) // Main menu
+	  if( MenuNDirUnderCursor() == 2 ) // Main menu; in the room it also leaves the room
 	  {
+	    LeaveMultiplayerMenu();
 	    ChangeMenuState(MENU_MAIN);
 	  }
 	}
     if( GetKey()==27 )
     {
+	  LeaveMultiplayerMenu();
 	  ChangeMenuState(MENU_MAIN);
     }
 	TactMultiplayerMenu();
