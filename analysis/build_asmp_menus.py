@@ -13,7 +13,10 @@ The .men format (Alien Shooter menu resource), as far as these files use it:
     terminator: u32 4, u32 0xFFFFFFFF
 
 The script's MenuFind(vid, ndir) and MenuNDirUnderCursor() use the direction byte
-ndir*256/10, so a menu entity the script must find needs such a byte (1 -> 25).
+ndir*256/10 (1 -> 25). This works for buttons; a status text at byte 25 was not
+found in the live test, so both status texts stay at byte 0 and the DLL tells the
+room menu apart by the direction byte of its action label (ROOM_MARKER_DIR).
+The text font comes from the VID: 3 is the button label font, 4 the caption font.
 
 The tool is idempotent: it removes the records it added before adding them again.
 It rewrites asmp_play.men (adds the Create button) and asmp_lobby.men (the room).
@@ -32,8 +35,7 @@ LOBBY_PATH = MAPS / "asmp_lobby.men"
 
 # VIDs used by the menu.
 VID_STATUS_TEXT = 2   # Text bound to a script variable, health field = status code.
-VID_STATIC_TEXT = 3   # Literal or string-table text.
-VID_VALUE_TEXT = 4    # Text bound to a script variable (edit boxes, labels).
+VID_STATIC_TEXT = 3   # Button label font; literal, string-table or variable text.
 VID_FIGURE_MALE = 706
 VID_FIGURE_FEMALE = 707
 VID_BUTTON = 705
@@ -51,17 +53,21 @@ NDIR_3 = 76
 SPRITE_BODY_LENGTH = 36
 TERMINATOR = struct.pack("<II", 4, 0xFFFFFFFF)
 
-# Positions of the existing form records (button, label, status).
+# Raw direction byte of the room menu's action label; session.c ROOM_MARKER_DIR.
+ROOM_MARKER_DIR = 5
+
+# Layout. Menu y is relative to the screen centre: a 480-pixel-high render shows
+# y up to about 230, so the three form buttons are stacked 36 apart (the main menu
+# uses 30) and the status line moves above them.
 BUTTON_X = 446.0
 LABEL_X = 447.0
-CONNECT_BUTTON_Y = 131.0
-CONNECT_LABEL_Y = 130.0
-MAIN_MENU_BUTTON_Y = 185.0
-MAIN_MENU_LABEL_Y = 183.0
-STATUS_Y = 155.0
-ROW_STEP = 54.0           # Distance between the existing buttons.
-CREATE_BUTTON_Y = MAIN_MENU_BUTTON_Y + ROW_STEP
-CREATE_LABEL_Y = MAIN_MENU_LABEL_Y + ROW_STEP
+STATUS_Y = 100.0
+ROW_STEP = 36.0
+FIRST_BUTTON_Y = 131.0
+SECOND_BUTTON_Y = FIRST_BUTTON_Y + ROW_STEP
+THIRD_BUTTON_Y = SECOND_BUTTON_Y + ROW_STEP
+LABEL_RISE = 1.0          # Labels sit one pixel above their button ("CONNECT").
+STRING_LABEL_RISE = 2.0   # String-table labels sit two pixels above ("MainMenu").
 
 
 class Record:
@@ -84,6 +90,9 @@ class Record:
             return None
         raw = bytes(self.body[SPRITE_BODY_LENGTH + 4:])
         return raw.split(b"\0", 1)[0].decode("latin-1")
+
+    def move(self, x, y):
+        struct.pack_into("<ff", self.body, 8, x, y)
 
     def encode(self):
         return struct.pack("<I", len(self.body)) + bytes(self.body)
@@ -147,11 +156,28 @@ def is_create_record(record):
     return record.vid == VID_STATIC_TEXT and record.text == "CREATE"
 
 
+def place_form_record(record):
+    """Moves the original buttons, labels and status into the three-button layout."""
+    if record.vid == VID_BUTTON and record.direction == NDIR_1:
+        record.move(BUTTON_X, FIRST_BUTTON_Y)
+    elif record.vid == VID_STATIC_TEXT and record.text == "CONNECT":
+        record.move(LABEL_X, FIRST_BUTTON_Y - LABEL_RISE)
+    elif record.vid == VID_BUTTON and record.direction == NDIR_2:
+        record.move(BUTTON_X, THIRD_BUTTON_Y)
+    elif record.vid == VID_STATIC_TEXT and record.text == "MainMenu":
+        record.move(LABEL_X, THIRD_BUTTON_Y - STRING_LABEL_RISE)
+    elif record.vid == VID_STATUS_TEXT:
+        record.move(LABEL_X, STATUS_Y)
+
+
 def form_records(records):
-    """The connect form: the original records plus the Create button (ndir 3)."""
+    """The connect form: CONNECT, CREATE (ndir 3) and MAIN MENU, status above them."""
     kept = [record for record in records if not is_create_record(record)]
-    kept.append(make_sprite(VID_BUTTON, BUTTON_X, CREATE_BUTTON_Y, NDIR_3))
-    kept.append(make_text(VID_STATIC_TEXT, LABEL_X, CREATE_LABEL_Y, 0, FONT_LITERAL, "CREATE"))
+    for record in kept:
+        place_form_record(record)
+    kept.append(make_sprite(VID_BUTTON, BUTTON_X, SECOND_BUTTON_Y, NDIR_3))
+    kept.append(make_text(VID_STATIC_TEXT, LABEL_X, SECOND_BUTTON_Y - LABEL_RISE, 0,
+                          FONT_LITERAL, "CREATE"))
     return kept
 
 
@@ -159,16 +185,19 @@ def lobby_records():
     """The room menu. The room list itself is drawn by the DLL (session_draw).
 
     - action button (ndir 1): the label is the script variable asmpStrAction
-      (READY / NOT READY / START);
-    - status text (VID 2, ndir 1): the DLL writes room codes into its health;
+      (READY / NOT READY / START) in the button label font (VID 3, like LEAVE);
+      its direction byte marks the room menu;
+    - status text (VID 2, byte 0): the DLL writes room codes into its health;
     - leave button (ndir 2): the main menu script leaves the room on it.
     """
     return [
-        make_sprite(VID_BUTTON, BUTTON_X, CONNECT_BUTTON_Y, NDIR_1),
-        make_sprite(VID_BUTTON, BUTTON_X, MAIN_MENU_BUTTON_Y, NDIR_2),
-        make_text(VID_VALUE_TEXT, LABEL_X, CONNECT_LABEL_Y, 0, FONT_VARIABLE, "asmpStrAction"),
-        make_text(VID_STATIC_TEXT, LABEL_X, MAIN_MENU_LABEL_Y, 0, FONT_LITERAL, "LEAVE"),
-        make_text(VID_STATUS_TEXT, LABEL_X, STATUS_Y, NDIR_1, FONT_VARIABLE, "asmpStrConnecting"),
+        make_sprite(VID_BUTTON, BUTTON_X, FIRST_BUTTON_Y, NDIR_1),
+        make_sprite(VID_BUTTON, BUTTON_X, SECOND_BUTTON_Y, NDIR_2),
+        make_text(VID_STATIC_TEXT, LABEL_X, FIRST_BUTTON_Y - LABEL_RISE, ROOM_MARKER_DIR,
+                  FONT_VARIABLE, "asmpStrAction"),
+        make_text(VID_STATIC_TEXT, LABEL_X, SECOND_BUTTON_Y - LABEL_RISE, 0, FONT_LITERAL,
+                  "LEAVE"),
+        make_text(VID_STATUS_TEXT, LABEL_X, STATUS_Y, 0, FONT_VARIABLE, "asmpStrConnecting"),
     ]
 
 

@@ -24,6 +24,7 @@
 #define NICKNAME_ITEM 1u
 #define ADDRESS_ITEM  2u
 #define BUTTON_ITEM   3u
+#define MARKER_ITEM   3u
 #define LEVEL_MAP     "maps\\Level_01.map"
 #define HOST_ID       0u
 #define GUEST_ID      1u
@@ -42,8 +43,10 @@ static uintptr_t item(uintptr_t game, unsigned int vid, unsigned int direction)
         RaiseException(0xE0000001u, 0, 0, NULL);
     if (root_menu && vid == 705 && direction == 204)
         return (uintptr_t)root_entity;
-    if (room_menu && vid == 2 && direction == 25)
+    if (room_menu && vid == 2 && direction == 0)
         return (uintptr_t)room_entity;
+    if (room_menu && vid == 3 && direction == 5)
+        return MARKER_ITEM; /* The room menu's action label. */
     if (!form_menu)
         return 0;
     if (vid == 2 && direction == 0)

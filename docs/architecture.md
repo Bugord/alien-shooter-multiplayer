@@ -135,8 +135,9 @@ worker repeats each request every 500 ms until the snapshot shows it
 revision is dropped, so a stale click can not start a changed room.
 
 `session.c` drives the menu and the level load. The menu scripts and the DLL
-talk through the health field of two status texts: the form status
-(VID 2, direction byte 0) and the room status (VID 2, byte 25). Codes are
+talk through the health field of the status text (VID 2, direction byte 0) that
+both menus have. The room menu is told apart by its action label (VID 3, the
+button label font, direction byte 5), which the script never looks up. Codes are
 `enum MenuStatus` in `session.h` and `SPMS_*` in `asmp_play.lgc`. The session
 waits in the room until the host's start reaches it, loads the map, reports it
 loaded and keeps gameplay off until the room is IN_GAME: only then does the

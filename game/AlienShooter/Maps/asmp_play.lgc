@@ -18,11 +18,13 @@ static int asmpFormStatus = 0;
 #define ASMP_MENU_FORM  0
 #define ASMP_MENU_LOBBY 1
 
-// MenuFind takes ndir; the menu files store the byte ndir*256/10.
+// MenuFind takes ndir; the menu files store the byte ndir*256/10. Both menus keep
+// their status text at ndir 0 (a text at ndir 1 was not found live); the DLL tells
+// the room menu apart by its action label.
 #define FORM_STATUS_VID  2
 #define FORM_STATUS_NDIR 0
 #define ROOM_STATUS_VID  2
-#define ROOM_STATUS_NDIR 1
+#define ROOM_STATUS_NDIR 0
 
 #define BUTTON_VID       705
 #define BUTTON_NDIR_MAIN 1 // Form: connect. Room: ready or start.

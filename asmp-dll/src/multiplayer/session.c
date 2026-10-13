@@ -19,11 +19,14 @@
 #define MAIN_MENU_MAP              "maps\\mainmenu.map"
 #define LOCAL_HOST_ADDRESS         "127.0.0.1"
 
-/* Menu entities: VID index and the raw direction byte of the menu record. */
-#define FORM_STATUS_VID    2u
-#define FORM_STATUS_DIR    0u
-#define ROOM_STATUS_VID    2u
-#define ROOM_STATUS_DIR    25u /* ndir 1: the script finds it with MenuFind(2, 1). */
+/* Menu entities: VID index and the raw direction byte of the menu record. Both menus
+   keep their status text at byte 0, where the script's MenuFind(2, 0) finds it (live
+   check: a text at byte 25 was not found). The room menu is told apart by its action
+   label, which the script never looks up. */
+#define STATUS_VID         2u
+#define STATUS_DIR         0u
+#define ROOM_MARKER_VID    3u /* Button label font, like LEAVE. */
+#define ROOM_MARKER_DIR    5u
 #define NICKNAME_VID       4u
 #define NICKNAME_DIR       2u
 #define ADDRESS_VID        4u
@@ -35,7 +38,7 @@
 
 /* Room panel layout in screen pixels. */
 #define PANEL_X           24.0f
-#define PANEL_Y           24.0f
+#define PANEL_Y           40.0f /* DrawText draws above y; 24 clipped the first line live. */
 #define PANEL_LINE        16.0f
 #define PANEL_WHITE       0xFFFFFFFFu
 #define PANEL_GREEN       0xFF60FF60u
@@ -270,8 +273,12 @@ static void read_menu(uintptr_t game, MenuView* view)
 {
     memset(view, 0, sizeof(*view));
     view->game = game;
-    view->form_status = session.engine.menu_item(game, FORM_STATUS_VID, FORM_STATUS_DIR);
-    view->room_status = session.engine.menu_item(game, ROOM_STATUS_VID, ROOM_STATUS_DIR);
+    uintptr_t status = session.engine.menu_item(game, STATUS_VID, STATUS_DIR);
+    if (session.engine.menu_item(game, ROOM_MARKER_VID, ROOM_MARKER_DIR))
+        view->room_status = status;
+    else
+        view->form_status = status;
+
     view->nickname = session.engine.menu_item(game, NICKNAME_VID, NICKNAME_DIR);
     view->address = session.engine.menu_item(game, ADDRESS_VID, ADDRESS_DIR);
     view->button = session.engine.menu_item(game, CONNECT_BUTTON_VID, CONNECT_BUTTON_DIR);
