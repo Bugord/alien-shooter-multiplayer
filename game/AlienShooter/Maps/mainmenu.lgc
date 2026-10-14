@@ -393,7 +393,9 @@ main()
     }
 	if( MenuLClick() )
 	{
-	  if( MenuNDirUnderCursor() == 2 ) // Main menu; in the room it also leaves the room
+	  // Main menu; in the room it also leaves the room. Only the button: the room's
+	  // selector arrows use ndir 2 as well.
+	  if( MenuNVidUnderCursor() == 705 && MenuNDirUnderCursor() == 2 )
 	  {
 	    LeaveMultiplayerMenu();
 	    ChangeMenuState(MENU_MAIN);

@@ -1,6 +1,6 @@
 /* Lobby wire format shared by the relay server and the client DLL: one room snapshot
    sent by the server, and the small requests clients send (ready, settings, start,
-   loaded). Layer: common/ (protocol). Words are big-endian; strings are
+   loaded, character). Layer: common/ (protocol). Words are big-endian; strings are
    length-prefixed ASCII without a terminator, like protocol.h. */
 
 #ifndef MP_LOBBY_PROTOCOL_H
@@ -13,8 +13,10 @@
 #define MPT_C_LOBBY_SETTINGS 0x42
 #define MPT_C_LOBBY_START    0x43
 #define MPT_C_LOBBY_LOADED   0x44
+#define MPT_C_LOBBY_PROFILE  0x45
 
-#define MP_LOBBY_VERSION 1u
+/* Version 2: every roster entry carries the player's character. */
+#define MP_LOBBY_VERSION 2u
 
 /* Every packet family a client and the server must agree on, packed into one
    word. A lobby snapshot with another value comes from an incompatible build. */
@@ -29,13 +31,15 @@
    otherwise the start is cancelled and the room returns to the lobby. */
 #define MP_LOBBY_LOAD_TIMEOUT_MS 30000u
 
-#define MP_LOBBY_REQUEST_SIZE 16
-#define MP_LOBBY_START_SIZE   12
-#define MP_LOBBY_LOADED_SIZE  12
-#define MP_LOBBY_HEADER_SIZE  48
+#define MP_LOBBY_REQUEST_SIZE     16
+#define MP_LOBBY_START_SIZE       12
+#define MP_LOBBY_LOADED_SIZE      12
+#define MP_LOBBY_PROFILE_SIZE     12
+#define MP_LOBBY_HEADER_SIZE      48
+#define MP_LOBBY_ENTRY_WORDS_SIZE 16 /* id, session, flags, character */
 #define MP_LOBBY_MAX_SIZE                                                                          \
     (MP_LOBBY_HEADER_SIZE + 1 + MP_MAX_MAP_NAME_LEN + 4 +                                          \
-     MP_ROSTER_MAX_ENTRIES * (13 + MP_MAX_NAME_LEN))
+     MP_ROSTER_MAX_ENTRIES * (MP_LOBBY_ENTRY_WORDS_SIZE + 1 + MP_MAX_NAME_LEN))
 
 enum MpLobbyPhase
 {
@@ -70,11 +74,20 @@ enum MpLobbyEntryFlag
 #define MP_LOBBY_ENTRY_FLAGS_ALL                                                                   \
     (MP_LOBBY_ENTRY_READY | MP_LOBBY_ENTRY_PARTICIPANT | MP_LOBBY_ENTRY_LOADED)
 
+/* The hero a player picked in the room: the game's PlayerSex "male" or "female". */
+enum MpCharacter
+{
+    MP_CHARACTER_MALE = 0,
+    MP_CHARACTER_FEMALE = 1,
+    MP_CHARACTER_COUNT = 2
+};
+
 typedef struct MpLobbyEntry
 {
     uint32_t id;
     uint32_t session;
     uint32_t flags;
+    uint32_t character; /* enum MpCharacter */
     char name[MP_MAX_NAME_LEN + 1];
 } MpLobbyEntry;
 
@@ -122,6 +135,12 @@ typedef struct MpLobbyLoaded
     uint32_t room;
     uint32_t run_epoch;
 } MpLobbyLoaded;
+
+typedef struct MpLobbyProfile
+{
+    uint32_t room;
+    uint32_t character; /* enum MpCharacter */
+} MpLobbyProfile;
 
 /* Returns the mode for a valid level path, or 0. */
 static inline uint32_t mp_mode_for_map(const char* map)
@@ -186,6 +205,8 @@ static inline int mp_lobby_valid(const MpLobby* lobby)
             return 0;
         if (participant && !started)
             return 0;
+        if (entry->character >= MP_CHARACTER_COUNT)
+            return 0;
         if (!mp_is_player_name(entry->name))
             return 0;
         seen |= 1u << entry->id;
@@ -245,12 +266,13 @@ static inline int mp_lobby_encode(uint8_t* out, size_t capacity, const MpLobby* 
     for (unsigned int i = 0; i < lobby->count; ++i)
     {
         const MpLobbyEntry* entry = &lobby->entries[i];
-        if (capacity < at + 12)
+        if (capacity < at + MP_LOBBY_ENTRY_WORDS_SIZE)
             return 0;
         mp_put_u32(out + at, entry->id);
         mp_put_u32(out + at + 4, entry->session);
         mp_put_u32(out + at + 8, entry->flags);
-        at += 12;
+        mp_put_u32(out + at + 12, entry->character);
+        at += MP_LOBBY_ENTRY_WORDS_SIZE;
 
         used = mp_write_string(out + at, capacity - at, entry->name);
         if (!used)
@@ -296,12 +318,13 @@ static inline int mp_lobby_decode(const uint8_t* p, int length, MpLobby* lobby)
     for (uint32_t i = 0; i < count; ++i)
     {
         MpLobbyEntry* entry = &lobby->entries[i];
-        if (total < at + 12)
+        if (total < at + MP_LOBBY_ENTRY_WORDS_SIZE)
             return 0;
         entry->id = mp_get_u32(p + at);
         entry->session = mp_get_u32(p + at + 4);
         entry->flags = mp_get_u32(p + at + 8);
-        at += 12;
+        entry->character = mp_get_u32(p + at + 12);
+        at += MP_LOBBY_ENTRY_WORDS_SIZE;
 
         if (!mp_read_string(p + at, total - at, entry->name, sizeof(entry->name), &used))
             return 0;
@@ -394,6 +417,24 @@ static inline int mp_lobby_loaded_decode(const uint8_t* p, int length, MpLobbyLo
     loaded->room = mp_get_u32(p + 4);
     loaded->run_epoch = mp_get_u32(p + 8);
     return loaded->room && loaded->run_epoch;
+}
+
+/* Client -> server: this player picked another character. */
+static inline void mp_lobby_profile_encode(uint8_t out[MP_LOBBY_PROFILE_SIZE],
+                                           const MpLobbyProfile* profile)
+{
+    mp_put_u32(out, MP_LOBBY_VERSION);
+    mp_put_u32(out + 4, profile->room);
+    mp_put_u32(out + 8, profile->character);
+}
+
+static inline int mp_lobby_profile_decode(const uint8_t* p, int length, MpLobbyProfile* profile)
+{
+    if (length != MP_LOBBY_PROFILE_SIZE || mp_get_u32(p) != MP_LOBBY_VERSION)
+        return 0;
+    profile->room = mp_get_u32(p + 4);
+    profile->character = mp_get_u32(p + 8);
+    return profile->room && profile->character < MP_CHARACTER_COUNT;
 }
 
 #endif

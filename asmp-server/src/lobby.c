@@ -1,7 +1,7 @@
 /* Room state of the relay server: who is in the room, who hosts it, who is ready,
-   which map is selected, and the start/load barrier that lets gameplay begin only
-   after every participant loaded the map. Layer: asmp-server (relay). No sockets
-   and no clock of its own: server.c passes events and the current time. */
+   which character each player picked, which map is selected, and the start/load barrier that lets
+   gameplay begin only after every participant loaded the map. Layer: asmp-server (relay). No
+   sockets and no clock of its own: server.c passes events and the current time. */
 
 #include <string.h>
 #include "lobby.h"
@@ -289,6 +289,23 @@ enum LobbyResult lobby_mark_loaded(Lobby* lobby, uint32_t id, uint32_t session,
     return LOBBY_CHANGED;
 }
 
+enum LobbyResult lobby_set_character(Lobby* lobby, uint32_t id, uint32_t session,
+                                     const MpLobbyProfile* request)
+{
+    if (!lobby || !request || lobby->phase != MP_LOBBY_OPEN || request->room != lobby->room)
+        return LOBBY_UNCHANGED;
+    if (request->character >= MP_CHARACTER_COUNT)
+        return LOBBY_UNCHANGED;
+
+    LobbyMember* member = find_member(lobby, id, session);
+    if (!member || member->ready || member->character == request->character)
+        return LOBBY_UNCHANGED;
+
+    member->character = request->character;
+    touch(lobby);
+    return LOBBY_CHANGED;
+}
+
 enum LobbyResult lobby_tick(Lobby* lobby, unsigned long now)
 {
     if (!lobby || lobby->phase != MP_LOBBY_STARTING)
@@ -339,6 +356,7 @@ void lobby_snapshot(const Lobby* lobby, MpLobby* out)
         entry->id = i;
         entry->session = member->session;
         entry->flags = member_flags(member);
+        entry->character = member->character;
         strcpy_s(entry->name, sizeof(entry->name), member->name);
     }
 }

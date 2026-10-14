@@ -2,14 +2,20 @@
    turns "create" and "connect" into worker commands, follows the room snapshot, loads
    the map only when the host's start reaches this player, reports the load, and
    allows gameplay only after every participant loaded. It also returns to the menu
-   or the room when a connection ends or a start is cancelled. Layer: multiplayer/
-   (session/map state machine). The game thread owns the state; the worker sees
-   commands, intents and links only through the lock. */
+   or the room when a connection ends or a start is cancelled, and turns the room
+   menu's clicks (mode, mission, character) into the room intent; menu_view.c builds
+   what the menus show. Layer: multiplayer/ (session/map state machine). The game
+   thread owns the state; the worker sees commands, intents and links only through
+   the lock. */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "session.h"
+#include "map_catalog.h"
+#include "menu_layout.h"
+#include "menu_texts.h"
+#include "menu_view.h"
 #include "../game/ui.h"
 
 #define SESSION_CONNECT_TIMEOUT_MS 15000u /* Server start (5 s) plus the connection. */
@@ -22,11 +28,11 @@
 /* Menu entities: VID index and the raw direction byte of the menu record. Both menus
    keep their status text at byte 0, where the script's MenuFind(2, 0) finds it (live
    check: a text at byte 25 was not found). The room menu is told apart by its action
-   label, which the script never looks up. */
-#define STATUS_VID         2u
-#define STATUS_DIR         0u
-#define ROOM_MARKER_VID    3u /* Button label font, like LEAVE. */
-#define ROOM_MARKER_DIR    5u
+   label, which the script never looks up (menu_layout.h). */
+#define STATUS_VID         MENU_VID_STATUS
+#define STATUS_DIR         MENU_DIR_STATUS
+#define ROOM_MARKER_VID    MENU_VID_LABEL
+#define ROOM_MARKER_DIR    MENU_DIR_ACTION_LABEL
 #define NICKNAME_VID       4u
 #define NICKNAME_DIR       2u
 #define ADDRESS_VID        4u
@@ -36,14 +42,10 @@
 #define ROOT_BRIDGE_VID    705u
 #define ROOT_BRIDGE_DIR    204u
 
-/* Room panel layout in screen pixels. */
-#define PANEL_X           24.0f
-#define PANEL_Y           40.0f /* DrawText draws above y; 24 clipped the first line live. */
-#define PANEL_LINE        16.0f
-#define PANEL_WHITE       0xFFFFFFFFu
-#define PANEL_GREEN       0xFF60FF60u
-#define PANEL_YELLOW      0xFFFFE060u
-#define PANEL_LINE_LENGTH 64
+/* The in-level hint while the other players load, in screen pixels. */
+#define HINT_X      24.0f
+#define HINT_Y      40.0f /* DrawText draws above y; 24 clipped the first line live. */
+#define HINT_YELLOW 0xFFFFE060u
 
 typedef struct MenuView
 {
@@ -89,13 +91,30 @@ static struct
         char map[128];
     } start;
 
-    /* Game-thread copy of the room for drawing. */
+    /* Game-thread copy of the room for the menu. */
     struct
     {
         int known;
         MpLobby lobby;
         uint32_t local_id;
+        char local_address[16];
     } room;
+
+    /* What the room menu needs besides the snapshot. */
+    struct
+    {
+        unsigned int available_modes; /* CATALOG_MODE_BIT per mode this copy has */
+        int was_ready;                /* Guest: seen ready at ready_revision. */
+        uint32_t ready_revision;
+        MenuTextCache texts;
+    } room_menu;
+
+    /* The server this connection uses, for the room header. */
+    struct
+    {
+        char address[16];
+        unsigned short port;
+    } server;
 
     /* Guarded by `lock`. */
     int pending;
@@ -125,8 +144,8 @@ int session_enable(uintptr_t base)
 {
     if (!ui_bind(base))
         return 0;
-    SessionEngine api = {ui_menu_item, ui_text,     ui_menu_status,
-                         ui_button,    ui_load_map, ui_screen_text};
+    SessionEngine api = {ui_menu_item, ui_text,        ui_menu_status, ui_button,
+                         ui_load_map,  ui_screen_text, ui_set_text,    ui_set_text_file};
     if (session_initialize(&api))
         return 1;
     ui_stop();
@@ -171,6 +190,10 @@ static int request(enum SessionCommand command, const char* host, unsigned short
     {
         memset(&session.start, 0, sizeof(session.start));
         memset(&session.room, 0, sizeof(session.room));
+        memset(&session.room_menu, 0, sizeof(session.room_menu));
+        session.room_menu.available_modes = CATALOG_ALWAYS_AVAILABLE;
+        strcpy_s(session.server.address, sizeof(session.server.address), host);
+        session.server.port = port;
     }
     return 1;
 }
@@ -369,6 +392,8 @@ static void remember_room(const LinkView* link)
     {
         session.room.lobby = link->link.lobby;
         session.room.local_id = link->link.local_id;
+        strcpy_s(session.room.local_address, sizeof(session.room.local_address),
+                 link->link.local_address);
     }
 }
 
@@ -387,6 +412,17 @@ static int local_is_host(void)
 }
 
 /* Reads name and address from the form and queues a host or join command. */
+/* Player names travel in capitals: the menu fonts draw lower case Latin in another
+   style, and a name saved by an older build may still hold lower case. */
+static void to_capitals(char* name)
+{
+    for (; *name; ++name)
+    {
+        if (*name >= 'a' && *name <= 'z')
+            *name = (char)(*name - 'a' + 'A');
+    }
+}
+
 static void submit_form(const MenuView* menu, enum SessionCommand command)
 {
     char name[16];
@@ -398,6 +434,7 @@ static void submit_form(const MenuView* menu, enum SessionCommand command)
         session.engine.status(menu->form_status, SM_BAD_NICKNAME);
         return;
     }
+    to_capitals(name);
     int host_optional = command == SESSION_HOST;
     if (!session.engine.text(menu->address, address, sizeof(address)) ||
         !parse_address(address, &port, host_optional))
@@ -478,8 +515,93 @@ static void tick_connecting(const MenuView* menu, const LinkView* link, DWORD no
     session.state = SS_LOBBY;
 }
 
-/* Handles the room menu's request code. Returns 1 when the player left. */
-static int consume_room_request(const MenuView* menu)
+/* The settings the room menu shows: the host's pending choice, else the room's map.
+   Returns 0 when that map is not in the catalogue. */
+static int shown_settings(MapChoice* choice)
+{
+    const char* map = session.room.lobby.map;
+    if (session.intent.settings_wanted && local_is_host())
+        map = session.intent.settings_map;
+    return map_catalog_parse(map, choice);
+}
+
+/* Host: steps the mode (mode_step) or the mission (mission_step) and asks the room for
+   the new map. Ignored outside an open room. */
+static void step_settings(int mode_step, int mission_step)
+{
+    if (!local_is_host() || session.room.lobby.phase != MP_LOBBY_OPEN)
+        return;
+
+    MapChoice choice = {CATALOG_CAMPAIGN, 1u};
+    shown_settings(&choice);
+    if (mode_step)
+        choice = map_catalog_step_mode(choice, mode_step, session.room_menu.available_modes);
+    else
+        choice = map_catalog_step_mission(choice, mission_step);
+
+    char map[MP_MAX_MAP_NAME_LEN];
+    if (!map_catalog_map_path(&choice, map, sizeof(map)))
+        return;
+    session.intent.settings_wanted = 1;
+    strcpy_s(session.intent.settings_map, sizeof(session.intent.settings_map), map);
+}
+
+/* A guest that is ready keeps its character; nobody changes it during a start. */
+static int character_unlocked(void)
+{
+    const MpLobbyEntry* entry = local_entry();
+    if (!entry || session.room.lobby.phase != MP_LOBBY_OPEN)
+        return 0;
+    return local_is_host() || !(entry->flags & MP_LOBBY_ENTRY_READY);
+}
+
+static void want_character(uint32_t character)
+{
+    session.intent.character_wanted = 1;
+    session.intent.character_value = character;
+}
+
+/* A click on the hero selector; ignored while the character is locked. */
+static void choose_character(uint32_t character)
+{
+    if (character_unlocked())
+        want_character(character);
+}
+
+/* The script's first code in a new room menu: add-on maps and the saved character. */
+static void apply_setup(int flags)
+{
+    unsigned int modes = CATALOG_ALWAYS_AVAILABLE;
+    if (flags & SM_SETUP_ADDON)
+        modes |= CATALOG_MODE_BIT(CATALOG_ADDON);
+    if (flags & SM_SETUP_ADDON2)
+        modes |= CATALOG_MODE_BIT(CATALOG_ADDON2);
+    session.room_menu.available_modes = modes;
+    want_character((flags & SM_SETUP_FEMALE) ? MP_CHARACTER_FEMALE : MP_CHARACTER_MALE);
+}
+
+/* The action button: the host starts, a guest toggles ready. `enabled` is the view's
+   rule (everyone ready, the maps present). */
+static void press_action(int enabled)
+{
+    const MpLobbyEntry* entry = local_entry();
+    if (!enabled || !entry || session.room.lobby.phase != MP_LOBBY_OPEN)
+        return;
+
+    if (local_is_host())
+    {
+        session.intent.start_wanted = 1;
+        session.intent.start_room = session.room.lobby.room;
+        session.intent.start_revision = session.room.lobby.revision;
+        return;
+    }
+    session.intent.ready_wanted = 1;
+    session.intent.ready_value = (entry->flags & MP_LOBBY_ENTRY_READY) ? 0u : 1u;
+    session.intent.ready_settings_revision = session.room.lobby.settings_revision;
+}
+
+/* Handles one request code of the room menu. Returns 1 when the player left. */
+static int consume_room_request(const MenuView* menu, const LobbyView* view)
 {
     int code = read_status(menu->room_status);
     if (code == SM_LOBBY_LEAVE)
@@ -488,58 +610,92 @@ static int consume_room_request(const MenuView* menu)
         disconnect(SS_OFFLINE, 0);
         return 1;
     }
-    if (code != SM_LOBBY_ACTION)
-        return 0;
 
-    const MpLobbyEntry* entry = local_entry();
-    if (entry && session.room.lobby.phase == MP_LOBBY_OPEN)
-    {
-        if (local_is_host())
-        {
-            session.intent.start_wanted = 1;
-            session.intent.start_room = session.room.lobby.room;
-            session.intent.start_revision = session.room.lobby.revision;
-        }
-        else
-        {
-            session.intent.ready_wanted = 1;
-            session.intent.ready_value = (entry->flags & MP_LOBBY_ENTRY_READY) ? 0u : 1u;
-            session.intent.ready_settings_revision = session.room.lobby.settings_revision;
-        }
-    }
+    if (code == SM_LOBBY_ACTION)
+        press_action(view->action_enabled);
+    else if (code == SM_LOBBY_MODE_PREV || code == SM_LOBBY_MODE_NEXT)
+        step_settings(code == SM_LOBBY_MODE_NEXT ? 1 : -1, 0);
+    else if (code == SM_LOBBY_MISSION_PREV || code == SM_LOBBY_MISSION_NEXT)
+        step_settings(0, code == SM_LOBBY_MISSION_NEXT ? 1 : -1);
+    else if (code == SM_LOBBY_HERO_MALE || code == SM_LOBBY_HERO_FEMALE)
+        choose_character(code == SM_LOBBY_HERO_FEMALE ? MP_CHARACTER_FEMALE : MP_CHARACTER_MALE);
+    else if (code >= SM_LOBBY_SETUP && code <= SM_SETUP_LAST)
+        apply_setup(code - SM_LOBBY_SETUP);
+    else
+        return 0; /* A display code: nothing to do. */
+
     session.engine.status(menu->room_status, SM_IDLE);
     return 0;
 }
 
-/* True when every member other than the host is ready. */
-static int guests_ready(const MpLobby* lobby)
-{
-    for (unsigned int i = 0; i < lobby->count; ++i)
-    {
-        const MpLobbyEntry* entry = &lobby->entries[i];
-        if (entry->id == lobby->host_id)
-            continue;
-        if (!(entry->flags & MP_LOBBY_ENTRY_READY))
-            return 0;
-    }
-    return 1;
-}
-
-static enum MenuStatus room_display(void)
+/* Guest: remembers when it was ready, to explain a reset caused by new settings. */
+static int settings_changed_since_ready(void)
 {
     const MpLobbyEntry* entry = local_entry();
-    const MpLobby* lobby = &session.room.lobby;
-    int participant = entry && (entry->flags & MP_LOBBY_ENTRY_PARTICIPANT);
+    if (!entry || local_is_host())
+        return 0;
+    if (entry->flags & MP_LOBBY_ENTRY_READY)
+    {
+        session.room_menu.was_ready = 1;
+        session.room_menu.ready_revision = session.room.lobby.settings_revision;
+        return 0;
+    }
+    return session.room_menu.was_ready &&
+           session.room_menu.ready_revision != session.room.lobby.settings_revision;
+}
 
-    if (lobby->phase == MP_LOBBY_IN_GAME || (lobby->phase == MP_LOBBY_STARTING && !participant))
-        return SM_LOBBY_IN_PROGRESS;
-    if (lobby->phase == MP_LOBBY_STARTING)
-        return SM_LOBBY_STARTING;
-    if (local_is_host())
-        return guests_ready(lobby) ? SM_LOBBY_HOST_CAN_START : SM_LOBBY_HOST_WAITING;
-    if (entry && (entry->flags & MP_LOBBY_ENTRY_READY))
-        return SM_LOBBY_READY;
-    return SM_LOBBY_NOT_READY;
+/* The character the room menu shows: the wanted one until the room shows it. */
+static uint32_t shown_character(void)
+{
+    if (session.intent.character_wanted)
+        return session.intent.character_value;
+    const MpLobbyEntry* entry = local_entry();
+    return entry ? entry->character : MP_CHARACTER_MALE;
+}
+
+/* Builds the room view from the snapshot and the menu's text bank. */
+static void build_room_view(const MenuView* menu, LobbyView* view)
+{
+    MenuBankContext context = {&session.engine, menu->game};
+    TextBank bank = menu_texts_bank(&context);
+    int host = local_is_host();
+
+    LobbyViewInput input;
+    memset(&input, 0, sizeof(input));
+    input.lobby = &session.room.lobby;
+    input.local_id = session.room.local_id;
+    input.settings_known = shown_settings(&input.settings);
+    input.character = shown_character();
+    input.available_modes = session.room_menu.available_modes;
+    input.settings_changed = settings_changed_since_ready();
+    input.address = host ? session.room.local_address : session.server.address;
+    input.port = session.server.port;
+    menu_view_lobby(&input, &bank, view);
+}
+
+/* Shows the text of the form's status code. */
+static void present_form(const MenuView* menu, DWORD now)
+{
+    if (!menu->form_status)
+        return;
+    MenuBankContext context = {&session.engine, menu->game};
+    TextBank bank = menu_texts_bank(&context);
+    char text[MENU_VIEW_TEXT_MAX];
+    enum MenuStatus code = (enum MenuStatus)read_status(menu->form_status);
+    menu_view_form_status(code, session.server.port, now, &bank, text, sizeof(text));
+    menu_texts_set(&session.engine, menu->game, MENU_VID_CAPTION, MENU_DIR_STATUS_TEXT, text);
+}
+
+/* The script code that releases the menu for this map: a catalogue map names its mode
+   and mission, so the script can save the GameType and LevelNumber the level reads. */
+static enum MenuStatus release_code(const char* map)
+{
+    MapChoice choice;
+    if (!map_catalog_parse(map, &choice))
+        return SM_RELEASE_MENU;
+    int code =
+        SM_RELEASE_MISSION_BASE + (int)choice.mode * SM_RELEASE_MODE_STRIDE + (int)choice.mission;
+    return (enum MenuStatus)code;
 }
 
 /* The host's start reached this participant: freeze the start and load its map. */
@@ -556,7 +712,7 @@ static void begin_room_load(const MenuView* menu)
     session.intent.loaded_room = 0;
     session.intent.loaded_run_epoch = 0;
 
-    show(menu, SM_RELEASE_MENU);
+    show(menu, release_code(session.start.map));
     session.state = SS_RELEASE_MENU;
 }
 
@@ -601,7 +757,12 @@ static void tick_lobby(const MenuView* menu, const LinkView* link, DWORD now)
             session.engine.status(menu->form_status, SM_ENTER_LOBBY);
         return;
     }
-    if (consume_room_request(menu))
+    if (!session.room.known)
+        return;
+
+    LobbyView view;
+    build_room_view(menu, &view);
+    if (consume_room_request(menu, &view))
         return;
 
     const MpLobbyEntry* entry = local_entry();
@@ -612,8 +773,10 @@ static void tick_lobby(const MenuView* menu, const LinkView* link, DWORD now)
         begin_room_load(menu);
         return;
     }
-    if (read_status(menu->room_status) != (int)room_display())
-        session.engine.status(menu->room_status, room_display());
+    if (read_status(menu->room_status) != (int)view.code)
+        session.engine.status(menu->room_status, view.code);
+    menu_texts_show_lobby(&session.engine, menu->game, menu->button, &view,
+                          &session.room_menu.texts);
 }
 
 /* True when the server cancelled the start this player is loading. */
@@ -854,6 +1017,8 @@ int session_tick(const Snapshot* sample, enum ProbeResult result, DWORD now)
         read_link(&link);
         remember_room(&link);
         loaded = tick_state(sample, &menu, &link, now);
+        if (!loaded)
+            present_form(&menu, now);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -870,66 +1035,16 @@ enum SessionState session_state(void)
     return InterlockedCompareExchange(&session.enabled, 0, 0) ? session.state : SS_OFFLINE;
 }
 
-static const char* mode_name(uint32_t mode)
-{
-    return mode == MP_MODE_SURVIVAL ? "survival" : "campaign";
-}
-
-static const char* notice_text(uint32_t notice)
-{
-    if (notice == MP_LOBBY_NOTICE_LOAD_TIMEOUT)
-        return "Start cancelled: a player did not finish loading";
-    if (notice == MP_LOBBY_NOTICE_PLAYER_LEFT)
-        return "Start cancelled: a player left";
-    return NULL;
-}
-
-/* One roster line: marker for this player, name, and host or ready state. */
-static void draw_member(const MpLobbyEntry* entry, float y)
-{
-    const MpLobby* lobby = &session.room.lobby;
-    char line[PANEL_LINE_LENGTH];
-    int is_local = entry->id == session.room.local_id;
-    int is_host = entry->id == lobby->host_id && entry->session == lobby->host_session;
-    int ready = (entry->flags & MP_LOBBY_ENTRY_READY) != 0;
-    const char* role = is_host ? "host" : (ready ? "ready" : "not ready");
-
-    sprintf_s(line, sizeof(line), "%s%s - %s", is_local ? "> " : "  ", entry->name, role);
-    session.engine.draw_text(PANEL_X, y, line, ready || is_host ? PANEL_GREEN : PANEL_WHITE);
-}
-
-static void draw_room_panel(void)
-{
-    const MpLobby* lobby = &session.room.lobby;
-    char line[PANEL_LINE_LENGTH];
-    float y = PANEL_Y;
-
-    sprintf_s(line, sizeof(line), "Room: %s (%s), %u/%u players", lobby->map,
-              mode_name(lobby->mode), lobby->count, lobby->capacity);
-    session.engine.draw_text(PANEL_X, y, line, PANEL_WHITE);
-    for (unsigned int i = 0; i < lobby->count; ++i)
-    {
-        y += PANEL_LINE;
-        draw_member(&lobby->entries[i], y);
-    }
-
-    const char* notice = notice_text(lobby->notice);
-    if (notice)
-        session.engine.draw_text(PANEL_X, y + PANEL_LINE * 2.0f, notice, PANEL_YELLOW);
-}
-
 void session_draw(void)
 {
-    if (!InterlockedCompareExchange(&session.enabled, 0, 0) || !session.engine.draw_text)
+    if (!InterlockedCompareExchange(&session.enabled, 0, 0))
         return;
     if (GetCurrentThreadId() != session.game_thread)
         return;
 
-    if (session.state == SS_LOBBY && session.room.known)
-        draw_room_panel();
-    else if (session.state == SS_WAIT_PLAYERS)
-        session.engine.draw_text(PANEL_X, PANEL_Y, "Waiting for the other players to load...",
-                                 PANEL_YELLOW);
+    if (session.state == SS_WAIT_PLAYERS && session.engine.draw_text)
+        session.engine.draw_text(HINT_X, HINT_Y, "Waiting for the other players to load...",
+                                 HINT_YELLOW);
 }
 
 /* Disables the session and drops pending commands. */

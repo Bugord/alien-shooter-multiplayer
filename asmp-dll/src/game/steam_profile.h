@@ -131,6 +131,11 @@
 #define STEAM_STEXT_DESTRUCTOR_RVA 0x38550u
 #define STEAM_STEXT_ACTION_RVA     0x260E0u
 #define STEAM_STEXT_TEXT_OFFSET    0x74u
+/* STEXT action commands (EXPORT.LGC ACT_SET_TEXT / ACT_SET_FILE). Argument 1 is the
+   address of a native string object (a char* owned by the game allocator); the action
+   copies it and recalculates the visible length (+0x7C) through 0x26620. */
+#define STEAM_ACT_SET_TEXT 0x78u
+#define STEAM_ACT_SET_FILE 0x7Bu
 /* GAME menu entity list uses the same count/capacity/entries layout as world lists. */
 #define STEAM_GAME_MENU_LIST_OFFSET 0x274u
 /* common_statebar.lgc builds the weapon panel once per level and hides icons of

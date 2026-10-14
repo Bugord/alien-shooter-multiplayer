@@ -26,6 +26,7 @@ typedef struct LobbyMember
     int ready;
     int participant;
     int loaded;
+    uint32_t character; /* enum MpCharacter */
 } LobbyMember;
 
 typedef struct Lobby
@@ -65,6 +66,11 @@ enum LobbyResult lobby_start(Lobby* lobby, uint32_t id, uint32_t session,
                              const MpLobbyStart* request, unsigned long now);
 enum LobbyResult lobby_mark_loaded(Lobby* lobby, uint32_t id, uint32_t session,
                                    const MpLobbyLoaded* request);
+
+/* Changes a member's character while the room is open. A ready guest is locked:
+   it agreed to play with the character the others saw. */
+enum LobbyResult lobby_set_character(Lobby* lobby, uint32_t id, uint32_t session,
+                                     const MpLobbyProfile* request);
 
 /* Cancels a start that did not finish loading in MP_LOBBY_LOAD_TIMEOUT_MS. */
 enum LobbyResult lobby_tick(Lobby* lobby, unsigned long now);

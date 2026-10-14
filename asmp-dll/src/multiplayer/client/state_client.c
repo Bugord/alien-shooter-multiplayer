@@ -707,3 +707,13 @@ int state_client_send_lobby_loaded(StateClient* c, const MpLobbyLoaded* request)
     transport_send(c->transport, MPT_C_LOBBY_LOADED, packet, sizeof(packet));
     return 1;
 }
+
+int state_client_send_lobby_profile(StateClient* c, const MpLobbyProfile* request)
+{
+    if (!c || !c->ready || !request)
+        return 0;
+    uint8_t packet[MP_LOBBY_PROFILE_SIZE];
+    mp_lobby_profile_encode(packet, request);
+    transport_send(c->transport, MPT_C_LOBBY_PROFILE, packet, sizeof(packet));
+    return 1;
+}

@@ -17,7 +17,7 @@
 #define MP_SHOT_VERSION       1u
 #define MP_HANDSHAKE_VERSION  1u
 #define MP_MAX_NAME_LEN       15
-#define MP_MAX_MAP_NAME_LEN   24
+#define MP_MAX_MAP_NAME_LEN   32 /* Fits "maps\addon2\Level_06.map" and its terminator. */
 #define MP_ROSTER_INTERVAL_MS 2000u
 #define MP_STATE_SIZE         116
 #define MP_MAX_HEALTH_LIMIT   100000

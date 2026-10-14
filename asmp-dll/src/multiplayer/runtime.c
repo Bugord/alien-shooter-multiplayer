@@ -8,6 +8,7 @@
 #include "runtime.h"
 #include "server_process.h"
 #include "lobby_requests.h"
+#include "client/transport.h"
 #include "../game/world_hook.h"
 #include "../game/ui.h"
 
@@ -51,6 +52,7 @@ static struct
     enum SessionFailure failure;
     ConnectionRequest command;
     LobbyRequests requests;
+    char lan_address[16]; /* Host: found once the connection to our server stands. */
     struct
     {
         ServerProcess process;
@@ -337,6 +339,7 @@ static void serve_session_request(DWORD now)
     runtime.generation = command.generation;
     runtime.connecting_at = now;
     runtime.failure = SF_NONE;
+    runtime.lan_address[0] = 0;
     if (command.command == SESSION_CONNECT)
         open_client(command.host, command.port);
     else if (command.command == SESSION_HOST)
@@ -407,6 +410,9 @@ static void track_connection(DWORD now)
     }
     if (state_client_connected(runtime.client))
     {
+        /* The room header tells the host which address friends type. */
+        if (runtime.network != NS_CONNECTED && runtime.command.command == SESSION_HOST)
+            transport_udp_lan_address(runtime.lan_address, sizeof(runtime.lan_address));
         runtime.network = NS_CONNECTED;
         return;
     }
@@ -436,6 +442,7 @@ static void publish_link(void)
     if (map)
         strcpy_s(link.map, sizeof(link.map), map);
     link.lobby_known = state_client_lobby(runtime.client, &link.lobby, &link.local_id);
+    strcpy_s(link.local_address, sizeof(link.local_address), runtime.lan_address);
     session_publish_link(runtime.generation, &link);
 }
 
@@ -454,6 +461,16 @@ static int send_loaded(void* context, const MpLobbyLoaded* request)
     return state_client_send_lobby_loaded(context, request);
 }
 
+static int send_settings(void* context, const MpLobbySettings* request)
+{
+    return state_client_send_lobby_settings(context, request);
+}
+
+static int send_profile(void* context, const MpLobbyProfile* request)
+{
+    return state_client_send_lobby_profile(context, request);
+}
+
 /* Repeats the room requests of the game thread until the snapshot shows them. */
 static void send_lobby_requests(DWORD now)
 {
@@ -467,7 +484,8 @@ static void send_lobby_requests(DWORD now)
     if (intent.generation != runtime.generation)
         return;
 
-    LobbySender sender = {runtime.client, send_ready, send_start, send_loaded};
+    LobbySender sender = {runtime.client, send_ready,    send_start,
+                          send_loaded,    send_settings, send_profile};
     lobby_requests_step(&runtime.requests, &intent, &lobby, local_id, now, &sender);
 }
 

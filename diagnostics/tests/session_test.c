@@ -1,5 +1,6 @@
 /* Checks for asmp-dll/src/multiplayer/session.c with a mock menu: form validation,
-   host and join commands, the room (ready, start, load barrier), cancelled starts,
+   host and join commands, the room (ready, start, load barrier, mode, mission and
+   character requests, release codes, room texts), cancelled starts,
    the host leaving, late joiners, leaving the room, the diagnostic direct join, load
    timeout, lost connections and native faults. */
 
@@ -8,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../asmp-dll/src/multiplayer/session.h"
+#include "../../asmp-dll/src/multiplayer/menu_layout.h"
 #include "../../common/src/protocol.h"
 
 #define CHECK(x)                                                                                   \
@@ -24,7 +26,8 @@
 #define NICKNAME_ITEM 1u
 #define ADDRESS_ITEM  2u
 #define BUTTON_ITEM   3u
-#define MARKER_ITEM   3u
+#define TEXT_ITEM(vid, dir) (0x10000u + (vid) * 256u + (dir))
+#define TEXT_LENGTH         64
 #define LEVEL_MAP     "maps\\Level_01.map"
 #define HOST_ID       0u
 #define GUEST_ID      1u
@@ -35,6 +38,7 @@ static char nickname[32] = "Tester", address[40] = "127.0.0.1:27020", loaded_map
 static Snapshot sample;
 static unsigned int generation;
 static MpLobby room;
+static char shown[5][256][TEXT_LENGTH]; /* Texts the session set, by font VID and dir. */
 
 static uintptr_t item(uintptr_t game, unsigned int vid, unsigned int direction)
 {
@@ -45,8 +49,8 @@ static uintptr_t item(uintptr_t game, unsigned int vid, unsigned int direction)
         return (uintptr_t)root_entity;
     if (room_menu && vid == 2 && direction == 0)
         return (uintptr_t)room_entity;
-    if (room_menu && vid == 3 && direction == 5)
-        return MARKER_ITEM; /* The room menu's action label. */
+    if (room_menu && (vid == 3 || vid == 4))
+        return TEXT_ITEM(vid, direction); /* Includes the action label (3, 5). */
     if (!form_menu)
         return 0;
     if (vid == 2 && direction == 0)
@@ -60,9 +64,25 @@ static uintptr_t item(uintptr_t game, unsigned int vid, unsigned int direction)
     return 0;
 }
 
+/* True for the fake text entities of the room menu (not the status buffers). */
+static int is_text_item(uintptr_t entity)
+{
+    return entity >= TEXT_ITEM(0, 0) && entity < TEXT_ITEM(5, 0);
+}
+
+static char* shown_text(uintptr_t entity)
+{
+    unsigned int key = (unsigned int)entity - 0x10000u;
+    return shown[key / 256u][key % 256u];
+}
+
 static int text(uintptr_t entity, char* out, unsigned int capacity)
 {
     const char* source = entity == NICKNAME_ITEM ? nickname : address;
+    if (is_text_item(entity))
+        source = shown_text(entity);
+    else if (entity != NICKNAME_ITEM && entity != ADDRESS_ITEM)
+        source = ""; /* A status text. */
     if (strlen(source) >= capacity)
         return 0;
     strcpy_s(out, capacity, source);
@@ -102,6 +122,20 @@ static void draw_text(float x, float y, const char* line, uint32_t color)
     ++drawn_lines;
 }
 
+static int set_text(uintptr_t entity, const char* value)
+{
+    if (!is_text_item(entity))
+        return 1; /* Status entities: the code is what the checks read. */
+    strcpy_s(shown_text(entity), TEXT_LENGTH, value);
+    return 1;
+}
+
+static int set_text_file(uintptr_t entity, const char* path)
+{
+    sprintf_s(shown_text(entity), TEXT_LENGTH, "file:%s", path);
+    return 1;
+}
+
 static int tick(DWORD now)
 {
     return session_tick(&sample, PROBE_OK, now);
@@ -110,7 +144,7 @@ static int tick(DWORD now)
 static void reset(void)
 {
     session_stop();
-    SessionEngine api = {item, text, status, button, load, draw_text};
+    SessionEngine api = {item, text, status, button, load, draw_text, set_text, set_text_file};
     CHECK(session_initialize(&api));
     CHECK(!session_initialize(&api));
     memset(&sample, 0, sizeof(sample));
@@ -122,6 +156,7 @@ static void reset(void)
     room_menu = root_menu = disabled = loads = fault = drawn_lines = 0;
     strcpy_s(nickname, sizeof(nickname), "Tester");
     strcpy_s(address, sizeof(address), "127.0.0.1:27020");
+    memset(shown, 0, sizeof(shown));
 }
 
 static void enter_level(void)
@@ -228,6 +263,7 @@ static void check_form(void)
     strcpy_s(address, sizeof(address), "10.0.0.5");
     command = submit(SM_CONNECT_REQUESTED, 4);
     CHECK(!strcmp(command.host, "10.0.0.5") && command.port == MP_DEFAULT_PORT);
+    CHECK(!strcmp(command.name, "TESTER")); /* Names travel in capitals. */
     CHECK(read_code(form_entity) == SM_CONNECTING && disabled);
     tick(5);
     publish(0u, SF_NO_ANSWER);
@@ -257,7 +293,20 @@ static void check_guest_start(void)
     join_room(GUEST_ID, 100);
     CHECK(read_code(room_entity) == SM_LOBBY_NOT_READY);
     session_draw();
-    CHECK(drawn_lines == 3); /* Title and two players. */
+    CHECK(drawn_lines == 0); /* The room is drawn by the menu texts, not by DrawText. */
+    CHECK(!strcmp(shown[3][MENU_DIR_ROW_NAME], "Host"));
+    CHECK(!strcmp(shown[3][MENU_DIR_ROW_NAME + 1], "Guest"));
+    CHECK(!strcmp(shown[4][MENU_DIR_ROW_NUMBER + 1], "2"));
+    CHECK(strstr(shown[4][MENU_DIR_HEADER], "Host (127.0.0.1:27020)") != NULL);
+    /* The game loads the briefing into the hidden source; its first paragraph (here the
+       mock's whole text) becomes the title. */
+    CHECK(!strcmp(shown[4][MENU_DIR_BRIEFING_SOURCE], "file:Text\\level_01.txt"));
+    CHECK(!strcmp(shown[4][MENU_DIR_MISSION_TITLE], "file:Text\\level_01.txt"));
+
+    /* A guest cannot change the settings. */
+    status((uintptr_t)room_entity, SM_LOBBY_MISSION_NEXT);
+    tick(103);
+    CHECK(!intent().settings_wanted && read_code(room_entity) == SM_LOBBY_NOT_READY);
 
     status((uintptr_t)room_entity, SM_LOBBY_ACTION);
     tick(104);
@@ -270,10 +319,17 @@ static void check_guest_start(void)
     tick(105);
     CHECK(read_code(room_entity) == SM_LOBBY_READY);
 
+    /* Ready locks the character. */
+    status((uintptr_t)room_entity, SM_LOBBY_HERO_FEMALE);
+    tick(105);
+    CHECK(!intent().character_wanted && read_code(room_entity) == SM_LOBBY_READY);
+
     make_room(MP_LOBBY_STARTING, 1u);
     publish(GUEST_ID, SF_NONE);
     tick(106);
-    CHECK(session_state() == SS_RELEASE_MENU && read_code(room_entity) == SM_RELEASE_MENU);
+    /* Level_01 of the campaign: base + mode 0 * stride + mission 1. */
+    CHECK(session_state() == SS_RELEASE_MENU &&
+          read_code(room_entity) == SM_RELEASE_MISSION_BASE + 1);
     room_menu = 0;
     tick(107);
     CHECK(tick(108) == 1 && loads == 1 && !strcmp(loaded_map, LEVEL_MAP));
@@ -319,6 +375,36 @@ static void check_host_and_cancel(void)
     reset();
     join_room(HOST_ID, 200);
     CHECK(read_code(room_entity) == SM_LOBBY_HOST_WAITING);
+
+    /* Setup from the script: no add-ons, the saved female character. */
+    status((uintptr_t)room_entity, SM_LOBBY_SETUP + SM_SETUP_FEMALE);
+    tick(201);
+    LobbyIntent wanted = intent();
+    CHECK(wanted.character_wanted && wanted.character_value == MP_CHARACTER_FEMALE);
+    CHECK(read_code(room_entity) == SM_LOBBY_HOST_WAITING);
+
+    /* The host steps the mission, then the mode; without add-ons survival follows. */
+    status((uintptr_t)room_entity, SM_LOBBY_MISSION_NEXT);
+    tick(202);
+    wanted = intent();
+    CHECK(wanted.settings_wanted && !strcmp(wanted.settings_map, "maps\\Level_02.map"));
+    status((uintptr_t)room_entity, SM_LOBBY_MODE_NEXT);
+    tick(202);
+    /* The view of this tick was built before the request: mission 2. "Of" is a bank word. */
+    CHECK(!strcmp(shown[3][MENU_DIR_MISSION_VALUE], "2  10"));
+    CHECK(!strcmp(intent().settings_map, "maps\\survive_01.map"));
+    status((uintptr_t)room_entity, SM_LOBBY_MODE_PREV);
+    tick(202);
+    CHECK(!strcmp(intent().settings_map, "maps\\Level_01.map"));
+
+    /* With add-on maps the mode selector reaches them. */
+    status((uintptr_t)room_entity, SM_LOBBY_SETUP + SM_SETUP_ADDON);
+    tick(203);
+    status((uintptr_t)room_entity, SM_LOBBY_MODE_NEXT);
+    tick(203);
+    CHECK(!strcmp(intent().settings_map, "maps\\addon\\Level_01.map"));
+    CHECK(intent().character_value == MP_CHARACTER_MALE);
+
     room.entries[1].flags = MP_LOBBY_ENTRY_READY;
     ++room.revision;
     publish(HOST_ID, SF_NONE);
@@ -326,7 +412,7 @@ static void check_host_and_cancel(void)
     CHECK(read_code(room_entity) == SM_LOBBY_HOST_CAN_START);
     status((uintptr_t)room_entity, SM_LOBBY_ACTION);
     tick(205);
-    LobbyIntent wanted = intent();
+    wanted = intent();
     CHECK(wanted.start_wanted && wanted.start_room == 77u && wanted.start_revision == 6u);
 
     make_room(MP_LOBBY_STARTING, 1u);
@@ -359,7 +445,7 @@ static void check_host_and_cancel(void)
     CHECK(read_code(room_entity) == SM_LOBBY_HOST_WAITING);
     drawn_lines = 0;
     session_draw();
-    CHECK(drawn_lines == 4); /* Title, two players and the notice. */
+    CHECK(drawn_lines == 0);
 
     /* A new start with a new epoch loads again. */
     make_room(MP_LOBBY_STARTING, 2u);

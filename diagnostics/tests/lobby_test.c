@@ -60,6 +60,7 @@ static void check_round_trip(const Lobby* lobby)
     {
         CHECK(decoded.entries[i].id == original.entries[i].id);
         CHECK(decoded.entries[i].flags == original.entries[i].flags);
+        CHECK(decoded.entries[i].character == original.entries[i].character);
         CHECK(!strcmp(decoded.entries[i].name, original.entries[i].name));
     }
 
@@ -108,6 +109,16 @@ static void check_request_codecs(void)
     strcpy_s(settings.map, sizeof(settings.map), "maps\\mainmenu.map");
     CHECK(!mp_lobby_settings_encode(packet, sizeof(packet), &settings));
 
+    MpLobbyProfile profile = {7u, MP_CHARACTER_FEMALE};
+    MpLobbyProfile profile_out;
+    mp_lobby_profile_encode(packet, &profile);
+    CHECK(mp_lobby_profile_decode(packet, MP_LOBBY_PROFILE_SIZE, &profile_out));
+    CHECK(profile_out.room == 7u && profile_out.character == MP_CHARACTER_FEMALE);
+    CHECK(!mp_lobby_profile_decode(packet, MP_LOBBY_PROFILE_SIZE + 1, &profile_out));
+    profile.character = MP_CHARACTER_COUNT;
+    mp_lobby_profile_encode(packet, &profile);
+    CHECK(!mp_lobby_profile_decode(packet, MP_LOBBY_PROFILE_SIZE, &profile_out));
+
     CHECK(mp_mode_for_map(LEVEL_MAP) == MP_MODE_CAMPAIGN);
     CHECK(mp_mode_for_map("maps/SURVIVE_02.MAP") == MP_MODE_SURVIVAL);
     CHECK(!mp_mode_for_map("maps\\mainmenu.map"));
@@ -130,6 +141,10 @@ static void check_invalid_snapshots(const Lobby* lobby)
 
     bad = snapshot_of(lobby);
     bad.mode = MP_MODE_SURVIVAL; /* Mode does not match the level map. */
+    CHECK(!mp_lobby_valid(&bad));
+
+    bad = snapshot_of(lobby);
+    bad.entries[0].character = MP_CHARACTER_COUNT; /* Unknown character. */
     CHECK(!mp_lobby_valid(&bad));
 
     bad = snapshot_of(lobby);
@@ -195,6 +210,45 @@ static void check_host_and_ready(void)
     CHECK(flags_of(&lobby, GUEST_ID) == 0u);
     CHECK(lobby_change_settings(&lobby, HOST_ID, HOST_SESSION, &settings) == LOBBY_UNCHANGED);
     check_round_trip(&lobby);
+}
+
+/* Characters: any member while open, a ready guest is locked, and the snapshot
+   carries the choice. */
+static void check_characters(void)
+{
+    Lobby lobby;
+    join_two(&lobby);
+    MpLobbyProfile female = {lobby.room, MP_CHARACTER_FEMALE};
+    CHECK(lobby_set_character(&lobby, HOST_ID, HOST_SESSION, &female) == LOBBY_CHANGED);
+    CHECK(lobby_set_character(&lobby, HOST_ID, HOST_SESSION, &female) == LOBBY_UNCHANGED);
+    MpLobby snapshot = snapshot_of(&lobby);
+    CHECK(mp_lobby_entry(&snapshot, HOST_ID)->character == MP_CHARACTER_FEMALE);
+    CHECK(mp_lobby_entry(&snapshot, GUEST_ID)->character == MP_CHARACTER_MALE);
+    check_round_trip(&lobby);
+
+    set_guest_ready(&lobby, 1u);
+    CHECK(lobby_set_character(&lobby, GUEST_ID, GUEST_SESS, &female) == LOBBY_UNCHANGED);
+    set_guest_ready(&lobby, 0u);
+    CHECK(lobby_set_character(&lobby, GUEST_ID, GUEST_SESS, &female) == LOBBY_CHANGED);
+
+    MpLobbyProfile invalid = {lobby.room, MP_CHARACTER_COUNT};
+    CHECK(lobby_set_character(&lobby, HOST_ID, HOST_SESSION, &invalid) == LOBBY_UNCHANGED);
+    MpLobbyProfile foreign = {lobby.room + 1u, MP_CHARACTER_MALE};
+    CHECK(lobby_set_character(&lobby, HOST_ID, HOST_SESSION, &foreign) == LOBBY_UNCHANGED);
+
+    /* No changes while the participants load. */
+    set_guest_ready(&lobby, 1u);
+    CHECK(host_start(&lobby, 100u) == LOBBY_CHANGED);
+    MpLobbyProfile male = {lobby.room, MP_CHARACTER_MALE};
+    CHECK(lobby_set_character(&lobby, HOST_ID, HOST_SESSION, &male) == LOBBY_UNCHANGED);
+
+    /* The longest catalogue map fits the settings packet. */
+    MpLobbySettings addon = {lobby.room, lobby.settings_revision, "maps\\addon2\\Level_06.map"};
+    uint8_t packet[64];
+    MpLobbySettings decoded;
+    int length = mp_lobby_settings_encode(packet, sizeof(packet), &addon);
+    CHECK(length > 0 && mp_lobby_settings_decode(packet, length, &decoded));
+    CHECK(!strcmp(decoded.map, addon.map));
 }
 
 static void check_start_barrier(void)
@@ -298,10 +352,12 @@ int main(void)
 {
     check_request_codecs();
     check_host_and_ready();
+    check_characters();
     check_start_barrier();
     check_cancellations();
     check_port_conflict();
-    puts("Lobby checks passed: codecs, host and ready rules, settings reset, start barrier, "
+    puts("Lobby checks passed: codecs, host and ready rules, settings reset, characters, start "
+         "barrier, "
          "duplicate start, load timeout, disconnect cancel, host leave and port conflict.");
     return 0;
 }

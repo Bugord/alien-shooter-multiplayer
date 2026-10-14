@@ -19,7 +19,7 @@ page for your task.
 | [asmp-server](../asmp-server/README.md) | Relay server: running it, its ready line, the room and what it validates |
 | [steam_profile.h](../asmp-dll/src/game/steam_profile.h) | Supported EXE hash, verified RVAs, offsets and layouts (comments record where each was confirmed) |
 | [protocol.h](../common/src/protocol.h) | State and shot packet codecs |
-| [lobby_protocol.h](../common/src/lobby_protocol.h) | Room snapshot and ready, settings, start and loaded request codecs |
+| [lobby_protocol.h](../common/src/lobby_protocol.h) | Room snapshot and ready, settings, start, loaded and character request codecs |
 | [monster_protocol.h](../common/src/monster_protocol.h) | Opt-in monster authority, state and explicit event codecs |
 | [monster_vids.h](../common/src/monster_vids.h) | Named native monster VIDs (40..90, armored and frozen forms) shared by protocol and game layer |
 

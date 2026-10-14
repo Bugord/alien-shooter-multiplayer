@@ -174,6 +174,12 @@ static void process_lobby_request_(MpServer* server, uint8_t sender, uint8_t typ
         if (mp_lobby_loaded_decode(data, length, &request))
             result = lobby_mark_loaded(&server->lobby, sender, p->session, &request);
     }
+    else if (type == MPT_C_LOBBY_PROFILE)
+    {
+        MpLobbyProfile request;
+        if (mp_lobby_profile_decode(data, length, &request))
+            result = lobby_set_character(&server->lobby, sender, p->session, &request);
+    }
 
     if (result == LOBBY_CHANGED)
         server->lobby_dirty = true;
@@ -377,6 +383,7 @@ static void process_received_packets_(MpServer* server)
             case MPT_C_LOBBY_SETTINGS:
             case MPT_C_LOBBY_START:
             case MPT_C_LOBBY_LOADED:
+            case MPT_C_LOBBY_PROFILE:
             {
                 process_lobby_request_(server, sender, ev.data.packet.pkt_type, ev.data.packet.data,
                                        length);

@@ -11,6 +11,10 @@ typedef void(__fastcall* LoadMap)(void*, void*, char*);
 typedef void(__fastcall* SetAnimation)(void*, void*, unsigned int);
 typedef void(__fastcall* DrawRect)(void*, void*, float, float, float, float, uint32_t);
 typedef void(__fastcall* DrawLabel)(void*, void*, float, float, const char*, uint32_t);
+typedef int(__fastcall* EntityAction)(void*, void*, unsigned int, intptr_t, intptr_t, intptr_t);
+
+/* The native string object handed to STEXT text actions; see ui.h for ownership. */
+static char* text_argument;
 
 /* Validates the native signatures used by this module. Returns 1 on success; later
    calls fail while unbound. */
@@ -128,6 +132,43 @@ void ui_button(uintptr_t entity, int disabled)
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
     }
+}
+
+/* Puts `text` into the shared native string object and runs one STEXT text action
+   with it. The entity must still be an STEXT of the current menu. */
+static int run_text_action(uintptr_t entity, unsigned int action, const char* text)
+{
+    if (!base || !entity || !text)
+        return 0;
+    __try
+    {
+        if (*(uintptr_t*)entity != base + STEAM_STEXT_VTABLE_RVA)
+            return 0;
+
+        /* Create and assign share one signature: (string object, text). */
+        unsigned int rva = text_argument ? STEAM_STRING_ASSIGN_RVA : STEAM_STRING_CREATE_RVA;
+        ((StringCreate)(base + rva))(&text_argument, NULL, text);
+        if (!text_argument)
+            return 0;
+
+        EntityAction run = (EntityAction)(base + STEAM_STEXT_ACTION_RVA);
+        run((void*)entity, NULL, action, (intptr_t)&text_argument, 0, 0);
+        return 1;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return 0;
+    }
+}
+
+int ui_set_text(uintptr_t entity, const char* text)
+{
+    return run_text_action(entity, STEAM_ACT_SET_TEXT, text);
+}
+
+int ui_set_text_file(uintptr_t entity, const char* path)
+{
+    return run_text_action(entity, STEAM_ACT_SET_FILE, path);
 }
 
 /* Loads `map` through the MAP load slot. The native string is created here and owned

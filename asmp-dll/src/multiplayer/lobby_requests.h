@@ -18,17 +18,25 @@ typedef struct LobbySender
     int (*ready)(void* context, const MpLobbyReady* request);
     int (*start)(void* context, const MpLobbyStart* request);
     int (*loaded)(void* context, const MpLobbyLoaded* request);
+    int (*settings)(void* context, const MpLobbySettings* request);
+    int (*profile)(void* context, const MpLobbyProfile* request);
 } LobbySender;
+
+/* When a request of one kind was last sent; `sent` is 0 until the first one. */
+typedef struct RequestTimer
+{
+    int sent;
+    DWORD sent_at;
+} RequestTimer;
 
 typedef struct LobbyRequests
 {
     unsigned int generation; /* Timers restart with each connection. */
-    DWORD ready_sent_at;
-    DWORD start_sent_at;
-    DWORD loaded_sent_at;
-    int ready_sent;
-    int start_sent;
-    int loaded_sent;
+    RequestTimer ready;
+    RequestTimer start;
+    RequestTimer loaded;
+    RequestTimer settings;
+    RequestTimer profile;
 } LobbyRequests;
 
 /* Decides which requests to send now for this snapshot. `local_id` is this client's

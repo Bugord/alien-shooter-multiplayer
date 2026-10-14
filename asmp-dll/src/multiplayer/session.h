@@ -58,11 +58,32 @@ enum MenuStatus
     SM_LOBBY_HOST_CAN_START = 25,
     SM_LOBBY_STARTING = 26,
     SM_LOBBY_IN_PROGRESS = 27,
-    SM_RETURN_LOBBY = 28 /* root menu bridge: go back to the room */
+    SM_RETURN_LOBBY = 28,    /* root menu bridge: go back to the room */
+    SM_LOBBY_MODE_PREV = 30, /* request: host steps the game mode */
+    SM_LOBBY_MODE_NEXT = 31,
+    SM_LOBBY_MISSION_PREV = 32, /* request: host steps the mission */
+    SM_LOBBY_MISSION_NEXT = 33,
+    SM_LOBBY_HERO_MALE = 34, /* request: this player's character */
+    SM_LOBBY_HERO_FEMALE = 35,
+    SM_LOBBY_SETUP = 40,           /* request: + SM_SETUP_* flags, once per room menu */
+    SM_RELEASE_MISSION_BASE = 100, /* + mode * SM_RELEASE_MODE_STRIDE + mission */
+    SM_RELEASE_MISSION_LAST = 179
 };
 
+/* SM_LOBBY_SETUP flags: which add-on maps this copy has (the script checks the files)
+   and the character the player last picked (save://common/PlayerSex). */
+#define SM_SETUP_ADDON  1
+#define SM_SETUP_ADDON2 2
+#define SM_SETUP_FEMALE 4
+#define SM_SETUP_LAST   (SM_LOBBY_SETUP + 7)
+
+/* Release codes tell the script which mode and mission the room starts, so it can
+   save the GameType and LevelNumber the level scripts read. */
+#define SM_RELEASE_MODE_STRIDE 20
+
 /* Native menu and drawing functions (game/ui.c in production, mocks in tests).
-   draw_text may be NULL; then the room panel is not drawn. */
+   draw_text may be NULL; then the loading hint is not drawn. set_text and
+   set_text_file may be NULL; then the menus show no texts from the DLL. */
 typedef struct SessionEngine
 {
     uintptr_t (*menu_item)(uintptr_t, unsigned int, unsigned int);
@@ -71,6 +92,8 @@ typedef struct SessionEngine
     void (*button)(uintptr_t, int);
     int (*load_map)(uintptr_t, const char*);
     void (*draw_text)(float x, float y, const char* text, uint32_t color);
+    int (*set_text)(uintptr_t, const char*);
+    int (*set_text_file)(uintptr_t, const char*);
 } SessionEngine;
 
 enum SessionCommand
@@ -113,6 +136,7 @@ typedef struct SessionLink
     int lobby_known;
     MpLobby lobby;
     uint32_t local_id;
+    char local_address[16]; /* Host: this PC's LAN IPv4 for the room header, or "". */
 } SessionLink;
 
 /* Game -> worker: what the room should become. The worker repeats requests until
@@ -128,6 +152,10 @@ typedef struct LobbyIntent
     uint32_t start_revision;
     uint32_t loaded_room;
     uint32_t loaded_run_epoch; /* 0: nothing loaded */
+    int settings_wanted;       /* Host: the room should use settings_map. */
+    char settings_map[MP_MAX_MAP_NAME_LEN];
+    int character_wanted; /* 1 when character_value is meaningful */
+    uint32_t character_value;
 } LobbyIntent;
 
 int session_enable(uintptr_t base);
@@ -147,7 +175,7 @@ int session_read_intent(LobbyIntent* intent);
    the map. Returns 1 when it loaded a map, 0 otherwise, -1 after a native fault. */
 int session_tick(const Snapshot*, enum ProbeResult, DWORD now);
 
-/* Game thread, from the display hook: draws the room panel while in the room. */
+/* Game thread, from the display hook: draws the hint while waiting for players. */
 void session_draw(void);
 
 void session_stop(void);

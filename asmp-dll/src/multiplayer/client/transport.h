@@ -54,6 +54,11 @@ struct Transport
    socket failure; the caller frees it with transport_destroy. */
 Transport* transport_udp_connect(const char* host, unsigned short port);
 
+/* Writes this PC's IPv4 address on the local network (a private address when there is
+   one, else the first that is not loopback or link-local), or "" when none is found.
+   Needs Winsock started, so call it while a UDP transport exists. */
+void transport_udp_lan_address(char* out, size_t capacity);
+
 /* Thin wrappers that accept NULL so the client can call them without checks. */
 void transport_update(Transport* transport, double seconds);
 int transport_poll(Transport* transport, TransportEvent* out);
