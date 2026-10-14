@@ -24,7 +24,7 @@ $netIncludes = @("/I$repo\common\epnet\include", "/I$repo\common\epnet\src\commo
 $netCommon = @(Get-ChildItem "$repo\common\epnet\src\common\*.c" | ForEach-Object FullName)
 $netClient = @("$repo\common\epnet\src\client\epnet_client.c")
 $actorSources = @("$repo\asmp-dll\src\game\actor.c", "$repo\asmp-dll\src\game\actor_api.c")
-$multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", "$repo\asmp-dll\src\game\action_hook.c", "$repo\asmp-dll\src\game\ui.c", "$repo\asmp-dll\src\game\display_hook.c", "$repo\asmp-dll\src\multiplayer\session.c", "$repo\asmp-dll\src\multiplayer\server_process.c", "$repo\asmp-dll\src\multiplayer\lobby_requests.c")
+$multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", "$repo\asmp-dll\src\game\action_hook.c", "$repo\asmp-dll\src\game\ui.c", "$repo\asmp-dll\src\game\display_hook.c", "$repo\asmp-dll\src\multiplayer\session.c", "$repo\asmp-dll\src\multiplayer\server_process.c", "$repo\asmp-dll\src\multiplayer\lobby_requests.c", "$repo\asmp-dll\src\multiplayer\map_catalog.c", "$repo\asmp-dll\src\multiplayer\menu_view.c", "$repo\asmp-dll\src\multiplayer\menu_texts.c")
 $hookSources = @("$repo\asmp-dll\src\game\slot_hook.c", "$repo\asmp-dll\src\game\tick_hook.c", "$repo\asmp-dll\src\game\world_hook.c")
 $runtimeSource = "$repo\asmp-dll\src\multiplayer\runtime.c"
 $monsterCoordinator = "$repo\asmp-dll\src\multiplayer\monster_sync.c"
@@ -83,6 +83,12 @@ try {
         Compile ($flags + @("$root\tests\lobby_requests_test.c", "$repo\asmp-dll\src\multiplayer\lobby_requests.c", '/Fe:lobby-requests-test.exe', '/link', '/MACHINE:X86'))
         & .\lobby-requests-test.exe
         if ($LASTEXITCODE) { throw 'Lobby request checks failed.' }
+        Compile ($flags + @("$root\tests\map_catalog_test.c", "$repo\asmp-dll\src\multiplayer\map_catalog.c", '/Fe:map-catalog-test.exe', '/link', '/MACHINE:X86'))
+        & .\map-catalog-test.exe
+        if ($LASTEXITCODE) { throw 'Map catalogue checks failed.' }
+        Compile ($flags + @("$root\tests\menu_view_test.c", "$repo\asmp-dll\src\multiplayer\menu_view.c", "$repo\asmp-dll\src\multiplayer\map_catalog.c", '/Fe:menu-view-test.exe', '/link', '/MACHINE:X86'))
+        & .\menu-view-test.exe
+        if ($LASTEXITCODE) { throw 'Menu view checks failed.' }
         & .\monster-transport-test.exe
         if ($LASTEXITCODE) { throw 'Monster transport checks failed.' }
         & .\state-sync-test.exe

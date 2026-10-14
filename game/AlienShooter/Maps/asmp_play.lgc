@@ -1,15 +1,16 @@
 // Steam adaptation of the original ASMP menu: FLoadData/FSaveData replace registry access.
 // Two menus talk to the DLL (asmp-dll/src/multiplayer/session.c) through the health
 // field of a status text: the connect form (asmp_play.men) and the room (asmp_lobby.men).
-// The script writes request codes; the DLL writes every other code for the script to show.
+// The script writes request codes; the DLL writes every other code and fills every text
+// the menus show (the strings live in the .men files, analysis/build_asmp_menus.py).
 static string asmpStrName;
 static string asmpStrAddress;
-static string asmpStrConnecting;
-static string asmpStrAction;
 
 static int targetEditbox = 0;
 static int asmpMenuKind = 0;
 static int asmpFormStatus = 0;
+static int asmpRoomCode = 0;        // The last room code the DLL showed.
+static int asmpArrowsRemoved = 0;   // A guest's settings selectors are gone.
 
 #define TARGET_EDITBOX_NONE    0
 #define TARGET_EDITBOX_NAME    1
@@ -27,11 +28,21 @@ static int asmpFormStatus = 0;
 #define ROOM_STATUS_NDIR 0
 
 #define BUTTON_VID       705
-#define BUTTON_NDIR_MAIN 1 // Form: connect. Room: ready or start.
+#define BUTTON_NDIR_MAIN 1 // Form: connect. Room: start, ready or cancel.
 #define BUTTON_NDIR_BACK 2 // Main menu; in the room it also leaves (mainmenu.lgc).
 #define BUTTON_NDIR_HOST 3 // Form: create a room on this PC.
 
 #define EDITBOX_VID 708
+
+// Room selectors (VID 716): even ndir points left, odd ndir right. Same values as
+// MENU_ARROW_NDIR_* in asmp-dll/src/multiplayer/menu_layout.h.
+#define ARROW_VID            716
+#define ARROW_NDIR_MODE      0
+#define ARROW_NDIR_MISSION   2
+#define ARROW_NDIR_HERO      4
+
+#define NAME_MAX_LENGTH    15 // MP_MAX_NAME_LEN
+#define ADDRESS_MAX_LENGTH 21 // "255.255.255.255:65535"
 
 // Same values as enum MenuStatus in asmp-dll/src/multiplayer/session.h.
 #define SPMS_IDLE               0
@@ -59,74 +70,36 @@ static int asmpFormStatus = 0;
 #define SPMS_LOBBY_STARTING     26
 #define SPMS_LOBBY_IN_PROGRESS  27
 #define SPMS_RETURN_LOBBY       28
+#define SPMS_LOBBY_MODE_PREV    30
+#define SPMS_LOBBY_MODE_NEXT    31
+#define SPMS_LOBBY_MISSION_PREV 32
+#define SPMS_LOBBY_MISSION_NEXT 33
+#define SPMS_LOBBY_HERO_MALE    34
+#define SPMS_LOBBY_HERO_FEMALE  35
+#define SPMS_LOBBY_SETUP        40 // + SETUP_* flags
+#define SPMS_RELEASE_MISSION    100 // + mode * RELEASE_MODE_STRIDE + mission
+#define SPMS_RELEASE_LAST       179
 
-#define CONNECTING_DOT_MS 250
+#define SETUP_ADDON  1
+#define SETUP_ADDON2 2
+#define SETUP_FEMALE 4
+
+// Release codes: the mode is enum CatalogMode of asmp-dll/src/multiplayer/map_catalog.h.
+#define RELEASE_MODE_STRIDE 20
+#define MODE_CAMPAIGN       0
+#define MODE_ADDON          1
+#define MODE_ADDON2         2
+#define MODE_SURVIVAL       3
+
+// GAME_TYPE_* of COMMON.LGC and the LevelNumber the native Survive menu saves.
+#define ASMP_GAME_TYPE_CAMPAIGN 0
+#define ASMP_GAME_TYPE_SURVIVE  1
+#define ASMP_GAME_TYPE_ADDON    2
+#define ASMP_GAME_TYPE_ADDON2   3
+#define SURVIVE_LEVEL_NUMBER    -10
 
 // The code the form shows when it opens (a failure from the room or a level).
 static int asmpReturnStatus = 0;
-
-int connectingAnimationTimer = 0;
-
-// Sets the status line for a connection failure code; other codes leave it alone.
-ShowFailureText(int code)
-{
-  if( code==SPMS_INVALID_NAME )
-  {
-    asmpStrConnecting = "Invalid name!";
-  }
-  else if( code==SPMS_INVALID_ADDRESS )
-  {
-    asmpStrConnecting = "Invalid address!";
-  }
-  else if( code==SPMS_CONNECTION_FAILED )
-  {
-    asmpStrConnecting = "Connection failed!";
-  }
-  else if( code==SPMS_CONNECTION_LOST )
-  {
-    asmpStrConnecting = "Connection lost!";
-  }
-  else if( code==SPMS_NO_ANSWER )
-  {
-    asmpStrConnecting = "No answer: address or firewall?";
-  }
-  else if( code==SPMS_INCOMPATIBLE )
-  {
-    asmpStrConnecting = "Incompatible server version!";
-  }
-  else if( code==SPMS_SERVER_MISSING )
-  {
-    asmpStrConnecting = "asmp-server.exe not found!";
-  }
-  else if( code==SPMS_PORT_IN_USE )
-  {
-    asmpStrConnecting = "Port is already in use!";
-  }
-  else if( code==SPMS_HOST_LEFT )
-  {
-    asmpStrConnecting = "The host closed the room.";
-  }
-  else if( code==SPMS_SERVER_FAILED )
-  {
-    asmpStrConnecting = "Server failed to start!";
-  }
-}
-
-AnimateConnectingText()
-{
-  if( ( GetTime()-connectingAnimationTimer ) > CONNECTING_DOT_MS )
-  {
-    connectingAnimationTimer = GetTime();
-    if( strlen(asmpStrConnecting) < strlen("connecting...") )
-    {
-      asmpStrConnecting += ".";
-    }
-    else
-    {
-      asmpStrConnecting = "connecting";
-    }
-  }
-}
 
 CreateMultiplayerMenu()
 {
@@ -134,12 +107,43 @@ CreateMultiplayerMenu()
   MenuLoad("maps\\asmp_play.men");
   asmpMenuKind = ASMP_MENU_FORM;
   targetEditbox = TARGET_EDITBOX_NONE;
-  asmpStrConnecting = "";
-  /* Male by default */
-  MenuAction(706,0,ANI_MENUSTANDUP);
+  if( asmpStrName=="" )
+  {
+    asmpStrName = FLoadData("save://common/"+"asmpName","");
+  }
+  if( asmpStrAddress=="" )
+  {
+    asmpStrAddress = FLoadData("save://common/"+"asmpAddress","");
+  }
 
   MenuAction(FORM_STATUS_VID, FORM_STATUS_NDIR, ACT_SET_HP, asmpReturnStatus);
   asmpReturnStatus = SPMS_IDLE;
+}
+
+// Which add-on maps this copy has, as the native Play menu checks, and the hero the
+// player picked last time.
+LobbySetupFlags()
+{
+  int flags;
+  int file;
+  flags = 0;
+  file = FOpen("maps\\addon\\Level_01.lgc");
+  if( file )
+  {
+    FClose(file);
+    flags = flags + SETUP_ADDON;
+  }
+  file = FOpen("maps\\addon2\\Level_01.lgc");
+  if( file )
+  {
+    FClose(file);
+    flags = flags + SETUP_ADDON2;
+  }
+  if( FLoadData("save://common/"+"PlayerSex","male")=="female" )
+  {
+    flags = flags + SETUP_FEMALE;
+  }
+  return flags;
 }
 
 CreateLobbyMenu()
@@ -148,8 +152,9 @@ CreateLobbyMenu()
   MenuLoad("maps\\asmp_lobby.men");
   asmpMenuKind = ASMP_MENU_LOBBY;
   targetEditbox = TARGET_EDITBOX_NONE;
-  asmpStrConnecting = "";
-  asmpStrAction = "";
+  asmpRoomCode = SPMS_IDLE;
+  asmpArrowsRemoved = 0;
+  MenuAction(ROOM_STATUS_VID, ROOM_STATUS_NDIR, ACT_SET_HP, SPMS_LOBBY_SETUP + LobbySetupFlags());
 }
 
 // Called by mainmenu.lgc before it leaves the multiplayer menu (button or Esc).
@@ -166,11 +171,7 @@ ProcessFormStatus()
 {
   asmpFormStatus = Action(MenuFind(FORM_STATUS_VID, FORM_STATUS_NDIR), ACT_GET_HP);
 
-  if( asmpFormStatus==SPMS_CONNECTING )
-  {
-    AnimateConnectingText();
-  }
-  else if( asmpFormStatus==SPMS_CONNECTED )
+  if( asmpFormStatus==SPMS_CONNECTED )
   {
     MenuRelease(); // Direct join: the DLL loads the map.
   }
@@ -178,13 +179,10 @@ ProcessFormStatus()
   {
     CreateLobbyMenu();
   }
-  else
-  {
-    ShowFailureText(asmpFormStatus);
-  }
 }
 
-// Writes a connect or create request unless one is already being handled.
+// Writes a connect or create request unless one is already being handled. The name
+// and the address are remembered for the next time.
 RequestFromForm(int code)
 {
   if( asmpFormStatus==SPMS_CONNECTING || asmpFormStatus==SPMS_CONNECT_PRESSED ||
@@ -192,24 +190,14 @@ RequestFromForm(int code)
   {
     return;
   }
+  FSaveData("save://common/"+"asmpName",asmpStrName);
+  FSaveData("save://common/"+"asmpAddress",asmpStrAddress);
   MenuAction(FORM_STATUS_VID, FORM_STATUS_NDIR, ACT_SET_HP, code);
 }
 
 HandleFormClick()
 {
-  if( MenuNVidUnderCursor()==706 )
-  {
-    MenuAction(706,0,ANI_MENUSTANDUP);
-    MenuAction(707,0,ANI_MENUSTANDDOWN);
-    FSaveData("save://common/"+"PlayerSex","male");
-  }
-  else if( MenuNVidUnderCursor()==707 )
-  {
-    MenuAction(707,0,ANI_MENUSTANDUP);
-    MenuAction(706,0,ANI_MENUSTANDDOWN);
-    FSaveData("save://common/"+"PlayerSex","female");
-  }
-  else if( MenuNVidUnderCursor()==BUTTON_VID )
+  if( MenuNVidUnderCursor()==BUTTON_VID )
   {
     if( MenuNDirUnderCursor()==BUTTON_NDIR_MAIN )
     {
@@ -241,7 +229,12 @@ HandleFormTyping()
     {
       asmpStrName[strlen(asmpStrName)-1] = 0;
     }
-    else if( GetKey() >= 32 && GetKey() <= 126 )
+    else if( GetKey() >= 'a' && GetKey() <= 'z' && strlen(asmpStrName) < NAME_MAX_LENGTH )
+    {
+      // Capitals only: the menu fonts draw lower case Latin in another style.
+      asmpStrName += Printf("%c",GetKey()-('a'-'A'));
+    }
+    else if( GetKey() >= 32 && GetKey() <= 126 && strlen(asmpStrName) < NAME_MAX_LENGTH )
     {
       asmpStrName += Printf("%c",GetKey());
     }
@@ -252,8 +245,9 @@ HandleFormTyping()
     {
       asmpStrAddress[strlen(asmpStrAddress)-1] = 0;
     }
-    else if( (GetKey() >= 48 && GetKey() <= 57) || // Numbers
-             GetKey()=='.' || GetKey()==':' )      // Dot, colon
+    else if( ( (GetKey() >= 48 && GetKey() <= 57) || // Numbers
+               GetKey()=='.' || GetKey()==':' ) &&   // Dot, colon
+             strlen(asmpStrAddress) < ADDRESS_MAX_LENGTH )
     {
       asmpStrAddress += Printf("%c",GetKey());
     }
@@ -274,51 +268,127 @@ TactFormMenu()
   HandleFormTyping();
 }
 
-// Shows the room code written by the DLL. A failure reopens the form with its reason.
+// Saves what the level scripts read at start (COMMON.LGC InitGame): the game type and
+// the mission number of the started map. `code` is mode * stride + mission.
+PrepareMission(int code)
+{
+  int mode;
+  int mission;
+  mode = code / RELEASE_MODE_STRIDE;
+  mission = code - mode * RELEASE_MODE_STRIDE;
+
+  if( mode==MODE_SURVIVAL )
+  {
+    FSaveData("save://common/"+"GameType",ASMP_GAME_TYPE_SURVIVE);
+    FSaveData("save://common/"+"LevelNumber",SURVIVE_LEVEL_NUMBER);
+    return;
+  }
+  if( mode==MODE_ADDON )
+  {
+    FSaveData("save://common/"+"GameType",ASMP_GAME_TYPE_ADDON);
+  }
+  else if( mode==MODE_ADDON2 )
+  {
+    FSaveData("save://common/"+"GameType",ASMP_GAME_TYPE_ADDON2);
+  }
+  else
+  {
+    FSaveData("save://common/"+"GameType",ASMP_GAME_TYPE_CAMPAIGN);
+  }
+  FSaveData("save://common/"+"LevelNumber",mission);
+}
+
+// Only the host picks the mode and the mission: a guest's arrows are removed.
+RemoveSettingsArrows()
+{
+  Destroy(MenuFind(ARROW_VID, ARROW_NDIR_MODE));
+  Destroy(MenuFind(ARROW_VID, ARROW_NDIR_MODE + 1));
+  Destroy(MenuFind(ARROW_VID, ARROW_NDIR_MISSION));
+  Destroy(MenuFind(ARROW_VID, ARROW_NDIR_MISSION + 1));
+  asmpArrowsRemoved = 1;
+}
+
+// Follows the room code written by the DLL. A start releases the menu; a failure
+// reopens the form with its reason.
 ProcessLobbyStatus()
 {
   int hp;
   hp = Action(MenuFind(ROOM_STATUS_VID, ROOM_STATUS_NDIR), ACT_GET_HP);
 
-  if( hp==SPMS_LOBBY_NOT_READY )
+  if( hp >= SPMS_RELEASE_MISSION && hp <= SPMS_RELEASE_LAST )
   {
-    asmpStrConnecting = "Press READY when you are set.";
-    asmpStrAction = "READY";
-  }
-  else if( hp==SPMS_LOBBY_READY )
-  {
-    asmpStrConnecting = "Ready: waiting for the host.";
-    asmpStrAction = "NOT READY";
-  }
-  else if( hp==SPMS_LOBBY_HOST_WAITING )
-  {
-    asmpStrConnecting = "Waiting for the players.";
-    asmpStrAction = "WAITING";
-  }
-  else if( hp==SPMS_LOBBY_CAN_START )
-  {
-    asmpStrConnecting = "Everyone is ready.";
-    asmpStrAction = "START";
-  }
-  else if( hp==SPMS_LOBBY_STARTING )
-  {
-    asmpStrConnecting = "Starting...";
-    asmpStrAction = "";
-  }
-  else if( hp==SPMS_LOBBY_IN_PROGRESS )
-  {
-    asmpStrConnecting = "Game in progress: wait for it.";
-    asmpStrAction = "";
+    PrepareMission(hp - SPMS_RELEASE_MISSION);
+    MenuRelease(); // The host started: the DLL loads the map.
   }
   else if( hp==SPMS_CONNECTED )
   {
-    MenuRelease(); // The host started: the DLL loads the map.
+    MenuRelease(); // A map outside the catalogue: the DLL loads it as it is.
   }
   else if( hp==SPMS_CONNECTION_FAILED || hp==SPMS_CONNECTION_LOST ||
            ( hp >= SPMS_NO_ANSWER && hp <= SPMS_HOST_LEFT ) || hp==SPMS_SERVER_FAILED )
   {
     asmpReturnStatus = hp;
     CreateMultiplayerMenu();
+  }
+  else if( hp >= SPMS_LOBBY_NOT_READY && hp <= SPMS_LOBBY_IN_PROGRESS )
+  {
+    asmpRoomCode = hp;
+    if( ( hp==SPMS_LOBBY_NOT_READY || hp==SPMS_LOBBY_READY ) && !asmpArrowsRemoved )
+    {
+      RemoveSettingsArrows();
+    }
+  }
+}
+
+// Writes one room request for the DLL.
+RequestFromRoom(int code)
+{
+  MenuAction(ROOM_STATUS_VID, ROOM_STATUS_NDIR, ACT_SET_HP, code);
+}
+
+// Switches the hero while the room allows it: the host while the room is open, a guest
+// until it is ready. The DLL checks the same rule. The level creates the local hero
+// from PlayerSex, so it is saved at once.
+ToggleHero()
+{
+  if( asmpRoomCode!=SPMS_LOBBY_NOT_READY && asmpRoomCode!=SPMS_LOBBY_HOST_WAITING &&
+      asmpRoomCode!=SPMS_LOBBY_CAN_START )
+  {
+    return;
+  }
+  if( FLoadData("save://common/"+"PlayerSex","male")=="male" )
+  {
+    FSaveData("save://common/"+"PlayerSex","female");
+    RequestFromRoom(SPMS_LOBBY_HERO_FEMALE);
+  }
+  else
+  {
+    FSaveData("save://common/"+"PlayerSex","male");
+    RequestFromRoom(SPMS_LOBBY_HERO_MALE);
+  }
+}
+
+HandleArrowClick(int ndir)
+{
+  if( ndir==ARROW_NDIR_MODE )
+  {
+    RequestFromRoom(SPMS_LOBBY_MODE_PREV);
+  }
+  else if( ndir==(ARROW_NDIR_MODE + 1) )
+  {
+    RequestFromRoom(SPMS_LOBBY_MODE_NEXT);
+  }
+  else if( ndir==ARROW_NDIR_MISSION )
+  {
+    RequestFromRoom(SPMS_LOBBY_MISSION_PREV);
+  }
+  else if( ndir==(ARROW_NDIR_MISSION + 1) )
+  {
+    RequestFromRoom(SPMS_LOBBY_MISSION_NEXT);
+  }
+  else if( ndir==ARROW_NDIR_HERO || ndir==(ARROW_NDIR_HERO + 1) )
+  {
+    ToggleHero();
   }
 }
 
@@ -329,9 +399,17 @@ TactLobbyMenu()
   {
     return; // A failure reopened the form.
   }
-  if( MenuLClick() && MenuNVidUnderCursor()==BUTTON_VID && MenuNDirUnderCursor()==BUTTON_NDIR_MAIN )
+  if( !MenuLClick() )
   {
-    MenuAction(ROOM_STATUS_VID, ROOM_STATUS_NDIR, ACT_SET_HP, SPMS_LOBBY_ACTION);
+    return;
+  }
+  if( MenuNVidUnderCursor()==BUTTON_VID && MenuNDirUnderCursor()==BUTTON_NDIR_MAIN )
+  {
+    RequestFromRoom(SPMS_LOBBY_ACTION);
+  }
+  else if( MenuNVidUnderCursor()==ARROW_VID )
+  {
+    HandleArrowClick(MenuNDirUnderCursor());
   }
 }
 

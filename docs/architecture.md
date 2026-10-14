@@ -115,8 +115,11 @@ When the host leaves, the server stays up for 500 ms so guests still receive the
 closed room, and is then terminated through the DLL's own handle.
 
 The relay keeps one room (`asmp-server/src/lobby.c`). The first registered
-player hosts; only the host starts. A settings change (`MPT_C_LOBBY_SETTINGS`, host only) resets every ready flag;
-the menu has no settings screen yet, so the map stays the server's.
+player hosts; only the host starts. The host picks the mode and mission in the room
+menu; the map travels in `MPT_C_LOBBY_SETTINGS` (host only) and every change resets
+the ready flags. Each player picks a character (`MPT_C_LOBBY_PROFILE`, male or
+female); a ready guest is locked until it cancels ready, and nobody changes it
+during a start.
 A start freezes the participants and issues a new run epoch; the room stays
 STARTING until every participant reports its level loaded (`MPT_C_LOBBY_LOADED`), then
 it is IN_GAME. A 30-second load timeout or a participant leaving cancels the
@@ -125,11 +128,12 @@ leaves the server opens a fresh room with a new id. The server broadcasts the
 room snapshot (`MPT_S_LOBBY`) on every change and every second. A snapshot
 carries room id, revision and settings revision, phase, host id and session,
 run epoch, mode, compatibility id, a notice (load timeout, player left),
-capacity, the map and every member's id, session, name and ready/participant/
-loaded flags.
+capacity, the map and every member's id, session, character, name and
+ready/participant/loaded flags (room protocol version 2).
 
 A room request is not sent just once. The game thread records what the
-room should become (`LobbyIntent`: ready value, start, loaded run), and the
+room should become (`LobbyIntent`: ready value, start, loaded run, the host's map,
+the character), and the
 worker repeats each request every 500 ms until the snapshot shows it
 (`lobby_requests.c`). A request made for an older settings revision or room
 revision is dropped, so a stale click can not start a changed room.
@@ -145,8 +149,31 @@ runtime publish state and shots. A cancelled start returns everyone to the room
 through the main menu; the host leaving or a lost link returns to the form with
 the reason. Failures are told apart so players can act on them: no answer
 (address, port forwarding or firewall), refused, lost, incompatible build,
-`asmp-server.exe` missing, port in use and server start failure. The room list
-is drawn by `session_draw` with `Render::DrawText` from the EndScene hook.
+`asmp-server.exe` missing, port in use and server start failure.
+
+The menus look like the game's own: every visible string is a menu text in the
+game's cp1251, generated into `asmp_play.men` and `asmp_lobby.men` by
+`analysis/build_asmp_menus.py`. The DLL never holds Russian text. It fills the
+room's texts through the native `ACT_SET_TEXT` of each menu text, found by font
+VID and direction byte (`menu_layout.h`, which the generator reads), and composes
+them from the menu's text bank (off-screen captions) plus ASCII names, numbers and
+addresses. `menu_view.c` builds what the menus show from the snapshot (pure,
+tested); `menu_texts.c` applies it. The mode and mission catalogue is
+`map_catalog.c`: campaign `maps\Level_NN.map`, the two add-ons under `maps\addon`
+and `maps\addon2` (offered only when this copy has them; the script checks the
+files) and survival `maps\survive_01.map`. A mission's briefing is its
+`Text\*.txt`: the game loads the file into a hidden menu text (`ACT_SET_FILE`),
+and the DLL shows its title and description paragraphs. Before a start the room
+code names the mode and mission, so the script saves the `GameType` and
+`LevelNumber` the level scripts read.
+
+The room menu's clicks (start or ready, mode and mission arrows, character) are
+request codes in the status entity; a guest's settings arrows are removed by the
+script. Player names travel in capitals: the menu fonts draw lower case Latin in
+another style. The status font (VID 2) has no Cyrillic, so the status line is a
+caption text and the status entity only carries codes. Not done yet: a remote
+player's replica still copies the local player's model, so the character choice
+shows only in the room.
 
 The network client reaches the relay only through `transport.h` (update, poll,
 send, local id, destroy). `transport_udp.c` is the epnet backend; a Steam

@@ -76,8 +76,21 @@ int main(void)
                                sig_assign[5] = {0x55, 0x8B, 0xEC, 0x53, 0x8B},
                                sig_anim[5] = {0x55, 0x8B, 0xEC, 0x51, 0x53};
     put(image, STEAM_LOAD_MAP_RVA, sig_load, 5);
-    put(image, STEAM_STRING_CREATE_RVA, sig_create, 5);
-    put(image, STEAM_STRING_ASSIGN_RVA, sig_assign, 5);
+    /* String create and the STEXT action record their arguments (ui_set_text). */
+    uintptr_t* created =
+        (uintptr_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 2 * sizeof(uintptr_t));
+    uintptr_t* acted =
+        (uintptr_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 5 * sizeof(uintptr_t));
+    if (!created || !acted)
+        return 2;
+    static const unsigned char action_prefix[5] = {0x55, 0x8B, 0xEC, 0x90, 0x90};
+    install_recorder(image, STEAM_STRING_CREATE_RVA, sig_create, 0x90, 1, created);
+    install_recorder(image, STEAM_STEXT_ACTION_RVA, action_prefix, 0x90, 4, acted);
+    uintptr_t* assigned =
+        (uintptr_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 2 * sizeof(uintptr_t));
+    if (!assigned)
+        return 2;
+    install_recorder(image, STEAM_STRING_ASSIGN_RVA, sig_assign, 0xC0, 1, assigned);
     put(image, STEAM_SET_ANIMATION_RVA, sig_anim, 5);
     *(uintptr_t*)(image + STEAM_GAME_VTABLE_RVA + STEAM_LOAD_MAP_SLOT * sizeof(uintptr_t)) =
         base + STEAM_LOAD_MAP_RVA;
@@ -115,6 +128,27 @@ int main(void)
     CHECK(*(float*)&rect[3] == 160.0f + 1.0f + 78.0f);
     ui_health_bar((uintptr_t)game, (uintptr_t)entity, 55, 0); /* unknown maximum */
     CHECK(*(float*)&rect[3] == 160.0f + 1.0f + 55.0f * 78.0f / 110.0f);
+
+    /* Menu text: only an STEXT gets the native ACT_SET_TEXT / ACT_SET_FILE, with the
+       address of the shared native string object as its argument. */
+    unsigned char* stext = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x100);
+    if (!stext)
+        return 2;
+    CHECK(!ui_set_text((uintptr_t)stext, "x")); /* Not an STEXT. */
+    CHECK(!acted[0]);
+    *(uintptr_t*)stext = base + STEAM_STEXT_VTABLE_RVA;
+    static const char room_text[] = "\xC8\xC3\xD0\xCE\xCA\xC8 1/4"; /* cp1251 */
+    CHECK(!ui_set_text((uintptr_t)stext, room_text)); /* The stub creates no string. */
+    CHECK(created[1] == (uintptr_t)room_text && !acted[0]);
+    /* A real create fills the object; the recorder does not, so fake it. */
+    static char native_copy[] = "fake";
+    *(char**)created[0] = native_copy;
+    CHECK(ui_set_text_file((uintptr_t)stext, "Text\\level_03.txt") == 1);
+    CHECK(acted[0] == (uintptr_t)stext && acted[1] == STEAM_ACT_SET_FILE);
+    CHECK(acted[2] == created[0] && !acted[3] && !acted[4]);
+    CHECK(assigned[0] == created[0] && !strcmp((const char*)assigned[1], "Text\\level_03.txt"));
+    CHECK(ui_set_text((uintptr_t)stext, room_text) == 1 && acted[1] == STEAM_ACT_SET_TEXT);
+    CHECK(assigned[1] == (uintptr_t)room_text);
 
     /* A missing render pointer is ignored. */
     memset(record, 0, 5 * sizeof(uintptr_t));

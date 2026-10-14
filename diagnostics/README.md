@@ -256,19 +256,23 @@ Steam account, then open the multiplayer menu:
 .\diagnostics\start-test.ps1 -ServerAddress <host-IPv4> -Port 27020 -Name Alice
 ```
 
-The host enters a nickname and presses **Create**. The address field may stay
-empty or hold `:port` (default 27020). The DLL starts `asmp-server.exe` from its
-own directory and joins it; the host's PC needs UDP on that port open to the
-guests (port forwarding over the internet). Guests enter a nickname and
-`host-IPv4[:port]` and press **Connect**. Both then see the room menu and the
-player list in the top-left corner. Guests press READY; when everyone is ready
-the host's button reads START. After START every participant loads the map and
-gameplay begins when all of them have loaded it.
+Everyone enters a player name (stored in capitals). The host presses
+**СОЗДАТЬ ИГРУ**; the address field may stay empty or hold `:port` (default 27020).
+The DLL starts `asmp-server.exe` from its own directory and joins it; the host's
+PC needs UDP on that port open to the guests (port forwarding over the internet).
+Guests enter `host-IPv4[:port]` and press **ПОДКЛЮЧИТЬСЯ**. The name and the
+address are remembered. The room shows the players (slot, name, character, host /
+ready / not ready), the host's address for friends, the character selector and
+the settings: game type and mission with the mission's title and description.
+Only the host has the settings arrows. Guests press **ГОТОВ!** (and **ОТМЕНИТЬ**);
+a settings change resets ready. **НАЧАТЬ ИГРУ** is enabled when every guest is
+ready (the host may also start alone). After the start every participant loads
+the map and gameplay begins when all of them have loaded it.
 
-The form explains failures: `No answer: address or firewall?` (nothing came
-back: wrong address, closed port or firewall), `Incompatible server version!`,
-`asmp-server.exe not found!`, `Port is already in use!`, `Server failed to start!`,
-`The host closed the room.` and `Connection lost!`. LEAVE or Esc leaves the room;
+The form explains failures in Russian: no answer (wrong address, closed port or
+firewall), incompatible server, `asmp-server.exe` missing, port in use, server
+start failure, the host closed the room and connection lost. **ПОКИНУТЬ** or Esc
+leaves the room;
 when the host leaves, the room closes for everyone. A start that times out
 (30 seconds) or loses a participant returns everyone to the room. Losing the
 connection in a level loads the main menu, opens Multiplayer and shows why.

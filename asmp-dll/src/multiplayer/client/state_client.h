@@ -80,4 +80,5 @@ int state_client_send_lobby_ready(StateClient*, const MpLobbyReady*);
 int state_client_send_lobby_settings(StateClient*, const MpLobbySettings*);
 int state_client_send_lobby_start(StateClient*, const MpLobbyStart*);
 int state_client_send_lobby_loaded(StateClient*, const MpLobbyLoaded*);
+int state_client_send_lobby_profile(StateClient*, const MpLobbyProfile*);
 #endif

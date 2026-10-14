@@ -32,11 +32,11 @@ ready flags, the start and the load barrier (see
 | --- | --- |
 | [src/main.c](src/main.c) | Entry point and tick loop |
 | [src/server.c](src/server.c) | Port check, hello/welcome handshake, roster and room broadcast, room requests, validation and relay |
-| [src/lobby.c](src/lobby.c) | The room without sockets: join/leave, host, ready, settings, start, load barrier and timeout |
+| [src/lobby.c](src/lobby.c) | The room without sockets: join/leave, host, ready, settings, characters, start, load barrier and timeout |
 
 Packet formats are in [common/src/protocol.h](../common/src/protocol.h): state, shot, hello, welcome and
 roster packets, and in [common/src/lobby_protocol.h](../common/src/lobby_protocol.h): the room
-snapshot and the ready, settings, start and loaded requests, each with explicit big-endian encoding. Rebuild the server
+snapshot and the ready, settings, start, loaded and character requests, each with explicit big-endian encoding. Rebuild the server
 together with all clients when the format changes. See
 [Architecture and behavior](../docs/architecture.md) for the protocol details.
 

@@ -3,6 +3,9 @@
    calls; packet validation stays in state_client.c. Worker thread only. Each backend
    instance owns one epnet client and one epnet_init reference. */
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "transport.h"
@@ -100,4 +103,46 @@ Transport* transport_udp_connect(const char* host, unsigned short port)
     }
     epnet_shutdown();
     return NULL;
+}
+
+/* 10.0.0.0/8, 172.16.0.0/12 and 192.168.0.0/16: where friends on the same network
+   can reach the host. */
+static int is_private(const unsigned char* octet)
+{
+    if (octet[0] == 10)
+        return 1;
+    if (octet[0] == 172 && octet[1] >= 16 && octet[1] <= 31)
+        return 1;
+    return octet[0] == 192 && octet[1] == 168;
+}
+
+/* Loopback (127/8) and link-local (169.254/16) addresses are useless to friends. */
+static int is_usable(const unsigned char* octet)
+{
+    return octet[0] != 127 && !(octet[0] == 169 && octet[1] == 254) && octet[0] != 0;
+}
+
+void transport_udp_lan_address(char* out, size_t capacity)
+{
+    char host[256];
+    struct addrinfo hints;
+    struct addrinfo* found = NULL;
+
+    out[0] = 0;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    if (gethostname(host, sizeof(host)) || getaddrinfo(host, NULL, &hints, &found))
+        return;
+
+    int have_private = 0;
+    for (struct addrinfo* item = found; item && !have_private; item = item->ai_next)
+    {
+        const struct sockaddr_in* address = (const struct sockaddr_in*)item->ai_addr;
+        const unsigned char* octet = (const unsigned char*)&address->sin_addr;
+        if (!is_usable(octet) || (out[0] && !is_private(octet)))
+            continue;
+        sprintf_s(out, capacity, "%u.%u.%u.%u", octet[0], octet[1], octet[2], octet[3]);
+        have_private = is_private(octet);
+    }
+    freeaddrinfo(found);
 }
