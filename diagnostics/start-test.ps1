@@ -96,7 +96,7 @@ if ($multiplayerMode) {
         }
     }
     $assets = Join-Path (Split-Path $PSScriptRoot -Parent) 'game\AlienShooter\Maps'
-    foreach ($file in @('asmp_play.lgc', 'asmp_play.men')) {
+    foreach ($file in @('asmp_play.lgc', 'asmp_play.men', 'asmp_lobby.men')) {
         Copy-Item -LiteralPath (Join-Path $assets $file) -Destination (Join-Path $maps $file) -Force
     }
     Copy-Item -LiteralPath (Join-Path $assets 'mainmenu.lgc') -Destination (Join-Path $maps 'MAINMENU.LGC') -Force

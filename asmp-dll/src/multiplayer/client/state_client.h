@@ -3,9 +3,27 @@
 #include <stdio.h>
 #include "../../../../common/src/protocol.h"
 #include "../../../../common/src/monster_protocol.h"
+#include "../../../../common/src/lobby_protocol.h"
+#include "transport.h"
 typedef struct StateClient StateClient;
+
+/* What the connection has reached so far, and how it ended. */
+typedef enum ClientLink
+{
+    LINK_NONE = 0,
+    LINK_CONNECTING,  /* Waiting for the transport to answer. */
+    LINK_HANDSHAKE,   /* Transport connected; waiting for the welcome. */
+    LINK_READY,       /* Welcomed by the relay. */
+    LINK_NO_ANSWER,   /* The address never answered (address, NAT or firewall). */
+    LINK_REFUSED,     /* Answered, then dropped before the welcome. */
+    LINK_LOST,        /* Was ready, then disconnected. */
+    LINK_INCOMPATIBLE /* The relay is another build (lobby compat word differs). */
+} ClientLink;
+
 StateClient* state_client_create(const char* host, unsigned short port, const char* name,
                                  FILE* log);
+/* Takes ownership of an already connecting transport (any backend). */
+StateClient* state_client_create_with_transport(Transport* transport, const char* name, FILE* log);
 void state_client_destroy(StateClient* client);
 /* All operations belong to the worker thread, never the game hook. */
 void state_client_publish(StateClient* client, const MpState* state, unsigned long now);
@@ -53,4 +71,13 @@ int state_client_monster_at(const StateClient*, unsigned int slot, unsigned long
 int state_client_monster(const StateClient*, unsigned long now, MonsterState*);
 int state_client_send_monster_event(StateClient*, const MpMonsterEvent*, unsigned long now);
 int state_client_take_monster_event(StateClient*, MonsterEvent*);
+/* Lobby: the latest room snapshot and requests to the relay. Requests return 0 when
+   the client is not welcomed yet; the caller repeats them until the snapshot shows
+   the result. `local_id` receives this client's relay id. */
+ClientLink state_client_link(const StateClient*);
+int state_client_lobby(const StateClient*, MpLobby* out, uint32_t* local_id);
+int state_client_send_lobby_ready(StateClient*, const MpLobbyReady*);
+int state_client_send_lobby_settings(StateClient*, const MpLobbySettings*);
+int state_client_send_lobby_start(StateClient*, const MpLobbyStart*);
+int state_client_send_lobby_loaded(StateClient*, const MpLobbyLoaded*);
 #endif

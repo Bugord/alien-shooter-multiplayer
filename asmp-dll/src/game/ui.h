@@ -16,6 +16,9 @@ int ui_text(uintptr_t entity, char* out, unsigned int capacity);
 void ui_menu_status(uintptr_t entity, int status);
 void ui_button(uintptr_t entity, int disabled);
 int ui_load_map(uintptr_t game, const char* map);
+/* Draws ASCII text at screen pixel (x, y) with Render::DrawText; display hook only.
+   The text is borrowed for the call. */
+void ui_screen_text(float x, float y, const char* text, uint32_t color);
 /* Draws a name above the entity; call from the display hook, before EndScene. */
 void ui_name_label(uintptr_t game, uintptr_t entity, const char* name);
 /* Shows every weapon icon and ammo bar of the native state bar (they stay hidden

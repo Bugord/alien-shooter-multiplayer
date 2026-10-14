@@ -6,10 +6,10 @@ and running it, see [Build, test and review](../diagnostics/README.md).
 | Layer | Responsibilities |
 | --- | --- |
 | `asmp-dll/src/game/` | Verified Steam EXE layout/probe (`steam_profile.h`), actor factory/destructor, movement/combat API, map/text/menu bindings, shared slot helper, MAP tick/load, MAN action and D3D9/display hooks |
-| `asmp-dll/src/multiplayer/client/state_client.*` | epnet connection, hello/welcome handshake, roster names, packet validation, peer state/names and shot queues; no native entities |
-| `asmp-dll/src/multiplayer/` | Production startup/rollback/shutdown and worker loop, session and remote-player state machines, game-thread application, bounded worker handoff |
-| `common/src/protocol.h` | Explicit state, shot, hello, welcome and roster codecs, and normalized map keys |
-| `common/epnet/`, `asmp-server/` | Existing transport and server, with validated state/shot relays |
+| `asmp-dll/src/multiplayer/client/` | `state_client.*`: hello/welcome handshake, link state, roster names, room snapshots and room requests, packet validation, peer state/names and shot queues; `transport*.c`: the transport boundary and its UDP (epnet) backend; no native entities |
+| `asmp-dll/src/multiplayer/` | Production startup/rollback/shutdown and worker loop, owned relay server process, session (menu, room, load barrier) and remote-player state machines, room request retries, game-thread application, bounded worker handoff |
+| `common/src/protocol.h`, `lobby_protocol.h` | Explicit state, shot, hello, welcome, roster and room codecs, and normalized map keys |
+| `common/epnet/`, `asmp-server/` | Existing transport and server, with validated state/shot relays and the room (`lobby.c`) |
 | `diagnostics/src/` | Test DLL configuration and logging, frame observer/queue, read-only/dummy harness, launcher and optional test peer |
 
 Remote replicas have explicit idle, waiting, spawning, spawned, backoff and
@@ -42,7 +42,7 @@ event carries sequence, map key/generation, weapon and aim coordinates. The
 server prefixes each relayed packet with sender ID and connection generation.
 Rebuild the server and all clients together; older packet versions are rejected.
 
-Each packet family has its own version: state 3, shot 1, handshake 1. After the
+Each packet family has its own version: state 4, shot 1, handshake 1, room 1. After the
 transport connects, the client repeats `MPT_C_HELLO` (version, length-prefixed
 name of 1..15 printable ASCII characters) until the server answers
 `MPT_S_WELCOME` (version, client id, capacity, validated level path). A client
@@ -102,3 +102,53 @@ The existing transport is unreliable: separate
 shot events avoid snapshot loss of short-lived attacks but do not guarantee
 delivery under packet loss. Each PC still simulates its own world.
 
+## Room and session
+
+A player either joins an address or presses Create in the multiplayer menu. Create
+starts `asmp-server.exe` from the DLL's directory (`server_process.c`): hidden,
+suspended until it is placed in a kill-on-close job object, with only its output
+pipe inherited. The server first checks that the port is free with an exclusive
+bind (epnet itself binds with `SO_REUSEADDR`, which would share the port
+silently), then prints `ASMP_SERVER_READY port=N`, `ASMP_SERVER_PORT_IN_USE` or
+`ASMP_SERVER_FAILED`. The DLL connects to 127.0.0.1 only after the ready line.
+When the host leaves, the server stays up for 500 ms so guests still receive the
+closed room, and is then terminated through the DLL's own handle.
+
+The relay keeps one room (`asmp-server/src/lobby.c`). The first registered
+player hosts; only the host starts. A settings change (`MPT_C_LOBBY_SETTINGS`, host only) resets every ready flag;
+the menu has no settings screen yet, so the map stays the server's.
+A start freezes the participants and issues a new run epoch; the room stays
+STARTING until every participant reports its level loaded (`MPT_C_LOBBY_LOADED`), then
+it is IN_GAME. A 30-second load timeout or a participant leaving cancels the
+start back to OPEN. The host leaving closes the room; when the last player
+leaves the server opens a fresh room with a new id. The server broadcasts the
+room snapshot (`MPT_S_LOBBY`) on every change and every second. A snapshot
+carries room id, revision and settings revision, phase, host id and session,
+run epoch, mode, compatibility id, a notice (load timeout, player left),
+capacity, the map and every member's id, session, name and ready/participant/
+loaded flags.
+
+A room request is not sent just once. The game thread records what the
+room should become (`LobbyIntent`: ready value, start, loaded run), and the
+worker repeats each request every 500 ms until the snapshot shows it
+(`lobby_requests.c`). A request made for an older settings revision or room
+revision is dropped, so a stale click can not start a changed room.
+
+`session.c` drives the menu and the level load. The menu scripts and the DLL
+talk through the health field of the status text (VID 2, direction byte 0) that
+both menus have. The room menu is told apart by its action label (VID 3, the
+button label font, direction byte 5), which the script never looks up. Codes are
+`enum MenuStatus` in `session.h` and `SPMS_*` in `asmp_play.lgc`. The session
+waits in the room until the host's start reaches it, loads the map, reports it
+loaded and keeps gameplay off until the room is IN_GAME: only then does the
+runtime publish state and shots. A cancelled start returns everyone to the room
+through the main menu; the host leaving or a lost link returns to the form with
+the reason. Failures are told apart so players can act on them: no answer
+(address, port forwarding or firewall), refused, lost, incompatible build,
+`asmp-server.exe` missing, port in use and server start failure. The room list
+is drawn by `session_draw` with `Render::DrawText` from the EndScene hook.
+
+The network client reaches the relay only through `transport.h` (update, poll,
+send, local id, destroy). `transport_udp.c` is the epnet backend; a Steam
+networking backend can be added behind the same boundary without touching the
+session or the room.

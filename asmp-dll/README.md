@@ -7,8 +7,8 @@ diagnostic launcher; see [Build, test and review](../diagnostics/README.md).
 | Path | Contents |
 | --- | --- |
 | [src/game/](src/game) | Engine API: verified addresses and layouts ([steam_profile.h](src/game/steam_profile.h)), probe, `world_list.h` (read-only native list access), `entity_class.h` (entity class to vtable), actor factory and combat API, menu/text bindings, and the vtable hooks (tick, world load, action, display) |
-| [src/multiplayer/](src/multiplayer) | Production runtime ([runtime.c](src/multiplayer/runtime.c)), session state machine ([session.c](src/multiplayer/session.c)) and remote-player coordinator ([multiplayer.c](src/multiplayer/multiplayer.c)) with its position interpolation ([pose_buffer.c](src/multiplayer/pose_buffer.c)); retry timing shared by the coordinators is in [retry_policy.h](src/multiplayer/retry_policy.h) |
-| [src/multiplayer/client/](src/multiplayer/client) | Connection, packet validation and peer state; no native game entities |
+| [src/multiplayer/](src/multiplayer) | Production runtime ([runtime.c](src/multiplayer/runtime.c)), session state machine for the menu, room and load barrier ([session.c](src/multiplayer/session.c)), room request retries ([lobby_requests.c](src/multiplayer/lobby_requests.c)), the owned relay server process for Create ([server_process.c](src/multiplayer/server_process.c)) and remote-player coordinator ([multiplayer.c](src/multiplayer/multiplayer.c)) with its position interpolation ([pose_buffer.c](src/multiplayer/pose_buffer.c)); retry timing shared by the coordinators is in [retry_policy.h](src/multiplayer/retry_policy.h) |
+| [src/multiplayer/client/](src/multiplayer/client) | Connection and room state ([state_client.c](src/multiplayer/client/state_client.c)) behind the transport boundary ([transport.h](src/multiplayer/client/transport.h), UDP backend [transport_udp.c](src/multiplayer/client/transport_udp.c)), packet validation and peer state; no native game entities |
 
 `game/` does not include `multiplayer/` headers; it receives callbacks instead.
 Layers, threading and replica lifecycle are described in

@@ -1,12 +1,24 @@
 /* Production runtime: validates the EXE profile, installs the hooks in a fixed order,
-   runs the worker loop (network, session requests) and dispatches the game tick, then
-   shuts everything down in reverse order. Layer: multiplayer/ (orchestration). Start,
-   worker_step and stop run on the worker thread; runtime_game_tick on the game thread. */
+   runs the worker loop (session commands, the hosting player's own server, network,
+   room requests) and dispatches the game tick, then shuts everything down in reverse
+   order. Layer: multiplayer/ (orchestration). Start, worker_step and stop run on the
+   worker thread; runtime_game_tick on the game thread. */
 
 #include <string.h>
 #include "runtime.h"
+#include "server_process.h"
+#include "lobby_requests.h"
 #include "../game/world_hook.h"
 #include "../game/ui.h"
+
+/* A connection that never gets the welcome gives up after this time. */
+#define RUNTIME_CONNECT_TIMEOUT_MS 10000u
+
+/* After the host disconnects, its server runs this long so guests receive the
+   closed-room snapshot before the process ends. */
+#define SERVER_LINGER_MS 500u
+
+#define RUNTIME_STATS_MS 5000u
 enum RuntimeStage
 {
     ST_NONE,
@@ -21,8 +33,10 @@ enum RuntimeStage
 enum NetworkState
 {
     NS_OFF,
+    NS_HOSTING, /* Our server is starting; the client connects when it is ready. */
     NS_CONNECTING,
-    NS_CONNECTED
+    NS_CONNECTED,
+    NS_FAILED /* The failure is published; waiting for the next session command. */
 };
 static struct
 {
@@ -34,6 +48,15 @@ static struct
     RuntimeBindings bindings;
     StateClient* client;
     enum NetworkState network;
+    enum SessionFailure failure;
+    ConnectionRequest command;
+    LobbyRequests requests;
+    struct
+    {
+        ServerProcess process;
+        int lingering; /* Stop at `stop_at`; the host already left. */
+        DWORD stop_at;
+    } server;
     unsigned int generation, display_ticks;
     DWORD connecting_at, stats_at, monster_sent_at;
     RuntimeFrame latest;
@@ -49,6 +72,13 @@ static void on_tick(void* game, LONG tick, DWORD now)
     frame.tick = tick;
     frame.milliseconds = now;
     runtime_game_tick(game, &frame);
+}
+
+/* Display hook callback (game thread): replica bars and names, then the room panel. */
+static void draw_overlays(void)
+{
+    multiplayer_draw();
+    session_draw();
 }
 
 /* Current lifecycle state; thread-safe. */
@@ -186,7 +216,7 @@ void runtime_game_tick(void* game, RuntimeFrame* out)
         if (runtime.display == DISPLAY_PENDING && ++runtime.display_ticks >= 30u)
         {
             runtime.display_ticks = 0;
-            runtime.display = runtime.bindings.display_install(runtime.base, multiplayer_draw);
+            runtime.display = runtime.bindings.display_install(runtime.base, draw_overlays);
         }
     }
     out->session = session_state();
@@ -209,7 +239,8 @@ static void publish_frame(const RuntimeFrame* frame)
 {
     const Snapshot* sample = &frame->snapshot;
     MpState state = {0};
-    if (probe_in_level(sample, frame->result))
+    /* Before the room's load barrier the player stays inactive for everyone else. */
+    if (probe_in_level(sample, frame->result) && frame->session == SS_IN_GAME)
     {
         state.world_low = sample->world_low;
         state.world_high = sample->world_high;
@@ -234,105 +265,309 @@ static void publish_frame(const RuntimeFrame* frame)
     state_client_publish(runtime.client, &state, frame->milliseconds);
 }
 
-/* One worker-thread step: serves session connect requests and pumps the network client. */
+/* Stops our server now, including one still lingering after the host left. */
+static void stop_server(void)
+{
+    server_process_stop(&runtime.server.process, runtime.config.log);
+    runtime.server.lingering = 0;
+}
+
+/* Lets our server outlive the host's disconnect briefly (see SERVER_LINGER_MS). */
+static void linger_server(DWORD now)
+{
+    if (runtime.server.process.state == SERVER_IDLE)
+        return;
+    runtime.server.lingering = 1;
+    runtime.server.stop_at = now + SERVER_LINGER_MS;
+}
+
+static void stop_lingering_server(DWORD now)
+{
+    if (runtime.server.lingering && (LONG)(now - runtime.server.stop_at) >= 0)
+        stop_server();
+}
+
+/* Ends the current connection with a reason the session will show. */
+static void fail_connection(enum SessionFailure failure)
+{
+    state_client_destroy(runtime.client);
+    runtime.client = NULL;
+    runtime.network = NS_FAILED;
+    runtime.failure = failure;
+    stop_server();
+}
+
+static void open_client(const char* host, unsigned short port)
+{
+    runtime.client = state_client_create(host, port, runtime.command.name, runtime.config.log);
+    if (runtime.client)
+        runtime.network = NS_CONNECTING;
+    else
+        fail_connection(SF_NO_ANSWER); /* Unresolvable address or socket failure. */
+}
+
+/* Starts our own relay server for a host command; the client follows when it is ready. */
+static void start_server(DWORD now)
+{
+    wchar_t path[MAX_PATH];
+    stop_server(); /* A server lingering from an earlier room holds the port. */
+    if (!server_process_default_path(path, MAX_PATH) ||
+        !server_process_start(&runtime.server.process, path, runtime.command.port, now,
+                              runtime.config.log))
+    {
+        fail_connection(SF_SERVER_MISSING);
+        return;
+    }
+    runtime.network = NS_HOSTING;
+}
+
+/* Serves a new session command: closes the old connection and opens the new one. */
+static void serve_session_request(DWORD now)
+{
+    ConnectionRequest command;
+    if (!session_take_request(&command))
+        return;
+
+    state_client_destroy(runtime.client);
+    runtime.client = NULL;
+    runtime.network = NS_OFF;
+    linger_server(now);
+
+    runtime.command = command;
+    runtime.generation = command.generation;
+    runtime.connecting_at = now;
+    runtime.failure = SF_NONE;
+    if (command.command == SESSION_CONNECT)
+        open_client(command.host, command.port);
+    else if (command.command == SESSION_HOST)
+        start_server(now);
+}
+
+static enum SessionFailure server_failure(enum ServerProcessState state)
+{
+    if (state == SERVER_PORT_IN_USE)
+        return SF_PORT_IN_USE;
+    if (state == SERVER_MISSING)
+        return SF_SERVER_MISSING;
+    return SF_SERVER_FAILED;
+}
+
+/* Waits for our server to become ready, and notices when it ends while in use. */
+static void advance_server(DWORD now)
+{
+    enum ServerProcessState state =
+        server_process_poll(&runtime.server.process, now, runtime.config.log);
+
+    if (runtime.network == NS_HOSTING)
+    {
+        if (state == SERVER_READY)
+            open_client(runtime.command.host, runtime.command.port);
+        else if (state != SERVER_STARTING)
+            fail_connection(server_failure(state));
+        return;
+    }
+    if (runtime.server.lingering)
+        return;
+    int in_use = runtime.network == NS_CONNECTING || runtime.network == NS_CONNECTED;
+    if (in_use && (state == SERVER_EXITED || state == SERVER_PORT_IN_USE))
+        fail_connection(SF_LOST);
+}
+
+/* True once the client's link can no longer become ready. */
+static int link_ended(ClientLink link)
+{
+    return link == LINK_NO_ANSWER || link == LINK_REFUSED || link == LINK_LOST ||
+           link == LINK_INCOMPATIBLE;
+}
+
+/* Maps how the client's link ended to the reason shown in the menu. */
+static enum SessionFailure link_failure(ClientLink link)
+{
+    if (link == LINK_INCOMPATIBLE)
+        return SF_INCOMPATIBLE;
+    if (link == LINK_NO_ANSWER)
+        return SF_NO_ANSWER;
+    if (link == LINK_REFUSED)
+        return SF_REFUSED;
+    return SF_LOST;
+}
+
+/* Promotes a welcomed client to connected, or fails a link that ended or never
+   finished the handshake. */
+static void track_connection(DWORD now)
+{
+    if (runtime.network != NS_CONNECTING && runtime.network != NS_CONNECTED)
+        return;
+
+    ClientLink link = state_client_link(runtime.client);
+    if (link == LINK_INCOMPATIBLE)
+    {
+        fail_connection(SF_INCOMPATIBLE);
+        return;
+    }
+    if (state_client_connected(runtime.client))
+    {
+        runtime.network = NS_CONNECTED;
+        return;
+    }
+    if (runtime.network == NS_CONNECTED || link_ended(link))
+    {
+        fail_connection(runtime.network == NS_CONNECTED ? SF_LOST : link_failure(link));
+        return;
+    }
+    if (now - runtime.connecting_at >= RUNTIME_CONNECT_TIMEOUT_MS)
+    {
+        /* Answered but never welcomed: an older build or not an ASMP server. */
+        fail_connection(link == LINK_HANDSHAKE ? SF_INCOMPATIBLE : SF_NO_ANSWER);
+    }
+}
+
+/* Publishes the current link (connection, failure and room) to the session. */
+static void publish_link(void)
+{
+    if (!runtime.generation || runtime.command.command == SESSION_DISCONNECT)
+        return;
+
+    SessionLink link;
+    memset(&link, 0, sizeof(link));
+    link.connected = runtime.network == NS_CONNECTED;
+    link.failure = runtime.failure;
+    const char* map = state_client_map(runtime.client);
+    if (map)
+        strcpy_s(link.map, sizeof(link.map), map);
+    link.lobby_known = state_client_lobby(runtime.client, &link.lobby, &link.local_id);
+    session_publish_link(runtime.generation, &link);
+}
+
+static int send_ready(void* context, const MpLobbyReady* request)
+{
+    return state_client_send_lobby_ready(context, request);
+}
+
+static int send_start(void* context, const MpLobbyStart* request)
+{
+    return state_client_send_lobby_start(context, request);
+}
+
+static int send_loaded(void* context, const MpLobbyLoaded* request)
+{
+    return state_client_send_lobby_loaded(context, request);
+}
+
+/* Repeats the room requests of the game thread until the snapshot shows them. */
+static void send_lobby_requests(DWORD now)
+{
+    MpLobby lobby;
+    uint32_t local_id = 0;
+    LobbyIntent intent;
+    if (runtime.network != NS_CONNECTED || !runtime.command.lobby)
+        return;
+    if (!state_client_lobby(runtime.client, &lobby, &local_id) || !session_read_intent(&intent))
+        return;
+    if (intent.generation != runtime.generation)
+        return;
+
+    LobbySender sender = {runtime.client, send_ready, send_start, send_loaded};
+    lobby_requests_step(&runtime.requests, &intent, &lobby, local_id, now, &sender);
+}
+
+/* Remote players: latest peer states to the game thread, shots in both directions. */
+static void exchange_players(DWORD now)
+{
+    PeerState peers[MP_MAX_PEERS];
+    for (unsigned int id = 0; id < MP_MAX_PEERS; ++id)
+        state_client_peer_info(runtime.client, id, now, &peers[id]);
+    multiplayer_publish(peers, now);
+
+    ShotEvent received;
+    while (state_client_take_shot(runtime.client, &received))
+        multiplayer_receive_shot(&received, now);
+
+    MpShot outgoing;
+    while (multiplayer_take_local_shot(&outgoing))
+        state_client_send_shot(runtime.client, &outgoing, now);
+}
+
+/* Opt-in monster authority: states and events between the coordinator and the relay. */
+static void exchange_monsters(DWORD now)
+{
+    uint32_t authority_id, authority_session;
+    int is_local = 0;
+    state_client_monster_authority(runtime.client, &authority_id, &authority_session, &is_local);
+    for (unsigned int slot = 0; slot < MP_MONSTER_CAPACITY; ++slot)
+    {
+        MonsterState source = {0};
+        state_client_monster_at(runtime.client, slot, now, &source);
+        monster_sync_publish_at(slot, &source, is_local, now);
+    }
+
+    MonsterEvent event;
+    while (state_client_take_monster_event(runtime.client, &event))
+        monster_sync_receive(&event, now);
+
+    MpMonsterState outgoing_state;
+    if (now - runtime.monster_sent_at >= MP_STATE_SEND_MS)
+    {
+        for (unsigned int count = 0;
+             count < MP_MONSTER_CAPACITY && monster_sync_take_state(&outgoing_state); ++count)
+            state_client_publish_monster(runtime.client, &outgoing_state, now);
+        runtime.monster_sent_at = now;
+    }
+
+    MpMonsterEvent outgoing_event;
+    while (monster_sync_take_event(&outgoing_event))
+        state_client_send_monster_event(runtime.client, &outgoing_event, now);
+}
+
+/* Logs display/session changes and periodic network statistics. */
+static void log_changes(const RuntimeFrame* frame, DWORD now)
+{
+    if (runtime.config.log && frame->display != runtime.logged_display)
+    {
+        fprintf(runtime.config.log, "# DISPLAY result=%d\n", frame->display);
+        runtime.logged_display = frame->display;
+    }
+    if (runtime.config.log && frame->session != runtime.logged_session)
+    {
+        fprintf(runtime.config.log, "# SESSION state=%d\n", frame->session);
+        runtime.logged_session = frame->session;
+    }
+    if (now - runtime.stats_at >= RUNTIME_STATS_MS)
+    {
+        state_client_stats(runtime.client);
+        runtime.stats_at = now;
+    }
+}
+
+/* One worker-thread step: session commands, our server, the network client, the room
+   and the gameplay exchanges. */
 void runtime_worker_step(DWORD now)
 {
     if (runtime_state() != RT_RUNNING || GetCurrentThreadId() != runtime.worker_thread)
         return;
-    ConnectionRequest command;
-    if (session_take_request(&command))
-    {
-        state_client_destroy(runtime.client);
-        runtime.client = NULL;
-        runtime.network = NS_OFF;
-        runtime.generation = command.generation;
-        runtime.connecting_at = now;
-        if (command.connect)
-        {
-            runtime.client =
-                state_client_create(command.host, command.port, command.name, runtime.config.log);
-            if (runtime.client)
-                runtime.network = NS_CONNECTING;
-            else
-                session_result(runtime.generation, 0, NULL);
-        }
-    }
+
+    serve_session_request(now);
+    advance_server(now);
+    stop_lingering_server(now);
+
     RuntimeFrame frame;
     AcquireSRWLockShared(&frame_lock);
     frame = runtime.latest;
     ReleaseSRWLockShared(&frame_lock);
     if (frame.tick)
         publish_frame(&frame);
+
     state_client_update(runtime.client, now);
     if (runtime.config.monster_role == MONSTER_HOST)
         state_client_monster_claim(runtime.client);
-    if (runtime.client && state_client_connected(runtime.client))
-    {
-        /* Publish once per connection; the session keeps the result. */
-        if (runtime.network != NS_CONNECTED)
-            session_result(runtime.generation, 1, state_client_map(runtime.client));
-        runtime.network = NS_CONNECTED;
-    }
-    else if (runtime.network == NS_CONNECTED ||
-             (runtime.network == NS_CONNECTING && now - runtime.connecting_at >= 10000u))
-    {
-        session_result(runtime.generation, 0, NULL);
-        state_client_destroy(runtime.client);
-        runtime.client = NULL;
-        runtime.network = NS_OFF;
-    }
-    PeerState peers[MP_MAX_PEERS];
-    for (unsigned int id = 0; id < MP_MAX_PEERS; ++id)
-        state_client_peer_info(runtime.client, id, now, &peers[id]);
-    multiplayer_publish(peers, now);
-    ShotEvent received;
-    while (state_client_take_shot(runtime.client, &received))
-        multiplayer_receive_shot(&received, now);
-    MpShot outgoing;
-    while (multiplayer_take_local_shot(&outgoing))
-        state_client_send_shot(runtime.client, &outgoing, now);
+    track_connection(now);
+    publish_link();
+    send_lobby_requests(now);
+
+    exchange_players(now);
     if (runtime.config.monster_role)
-    {
-        uint32_t authority_id, authority_session;
-        int is_local = 0;
-        state_client_monster_authority(runtime.client, &authority_id, &authority_session,
-                                       &is_local);
-        for (unsigned int slot = 0; slot < MP_MONSTER_CAPACITY; ++slot)
-        {
-            MonsterState source = {0};
-            state_client_monster_at(runtime.client, slot, now, &source);
-            monster_sync_publish_at(slot, &source, is_local, now);
-        }
-        MonsterEvent event;
-        while (state_client_take_monster_event(runtime.client, &event))
-            monster_sync_receive(&event, now);
-        MpMonsterState outgoing_state;
-        if (now - runtime.monster_sent_at >= MP_STATE_SEND_MS)
-        {
-            for (unsigned int count = 0;
-                 count < MP_MONSTER_CAPACITY && monster_sync_take_state(&outgoing_state); ++count)
-                state_client_publish_monster(runtime.client, &outgoing_state, now);
-            runtime.monster_sent_at = now;
-        }
-        MpMonsterEvent outgoing_event;
-        while (monster_sync_take_event(&outgoing_event))
-            state_client_send_monster_event(runtime.client, &outgoing_event, now);
-    }
-    if (runtime.config.log && frame.display != runtime.logged_display)
-    {
-        fprintf(runtime.config.log, "# DISPLAY result=%d\n", frame.display);
-        runtime.logged_display = frame.display;
-    }
-    if (runtime.config.log && frame.session != runtime.logged_session)
-    {
-        fprintf(runtime.config.log, "# SESSION state=%d\n", frame.session);
-        runtime.logged_session = frame.session;
-    }
-    if (now - runtime.stats_at >= 5000u)
-    {
-        state_client_stats(runtime.client);
-        runtime.stats_at = now;
-    }
+        exchange_monsters(now);
+    log_changes(&frame, now);
 }
 
 /* Stops the coordinators on the game thread first, then unhooks in reverse order. A timeout
@@ -363,6 +598,7 @@ int runtime_stop(DWORD timeout_ms)
                 state_client_destroy(runtime.client);
                 runtime.client = NULL;
                 runtime.network = NS_OFF;
+                stop_server();
                 return 0;
             }
             Sleep(1);
@@ -383,6 +619,7 @@ int runtime_stop(DWORD timeout_ms)
     state_client_destroy(runtime.client);
     runtime.client = NULL;
     runtime.network = NS_OFF;
+    stop_server();
     if (runtime.config.log)
         fprintf(runtime.config.log, "# HOOK_RESTORE action=%d display=%d world=%d tick=%d\n",
                 action_ok, display_ok, world_ok, tick_result);

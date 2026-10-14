@@ -1,151 +1,348 @@
 // Steam adaptation of the original ASMP menu: FLoadData/FSaveData replace registry access.
+// Two menus talk to the DLL (asmp-dll/src/multiplayer/session.c) through the health
+// field of a status text: the connect form (asmp_play.men) and the room (asmp_lobby.men).
+// The script writes request codes; the DLL writes every other code for the script to show.
 static string asmpStrName;
 static string asmpStrAddress;
 static string asmpStrConnecting;
+static string asmpStrAction;
 
 static int targetEditbox = 0;
+static int asmpMenuKind = 0;
+static int asmpFormStatus = 0;
 
 #define TARGET_EDITBOX_NONE    0
 #define TARGET_EDITBOX_NAME    1
 #define TARGET_EDITBOX_ADDRESS 2
 
-#define STATUS_BAR_VID 2
-#define STATUS_BAR_NDIR 0
+#define ASMP_MENU_FORM  0
+#define ASMP_MENU_LOBBY 1
 
-#define SPMS_IDLE 0
-#define SPMS_CONNECT_PRESSED 1
-#define SPMS_INVALID_NAME 2
-#define SPMS_INVALID_ADDRESS 3
-#define SPMS_CONNECTING 4
-#define SPMS_CONNECTION_FAILED 5
-#define SPMS_CONNECTED 6
-#define SPMS_CONNECTION_LOST 7
-// C MenuStatus: 0 idle, 1 request, 2 bad name, 3 bad address,
-// 4 connecting, 5 failed, 6 release menu, 7 connection lost.
+// MenuFind takes ndir; the menu files store the byte ndir*256/10. Both menus keep
+// their status text at ndir 0 (a text at ndir 1 was not found live); the DLL tells
+// the room menu apart by its action label.
+#define FORM_STATUS_VID  2
+#define FORM_STATUS_NDIR 0
+#define ROOM_STATUS_VID  2
+#define ROOM_STATUS_NDIR 0
+
+#define BUTTON_VID       705
+#define BUTTON_NDIR_MAIN 1 // Form: connect. Room: ready or start.
+#define BUTTON_NDIR_BACK 2 // Main menu; in the room it also leaves (mainmenu.lgc).
+#define BUTTON_NDIR_HOST 3 // Form: create a room on this PC.
+
+#define EDITBOX_VID 708
+
+// Same values as enum MenuStatus in asmp-dll/src/multiplayer/session.h.
+#define SPMS_IDLE               0
+#define SPMS_CONNECT_PRESSED    1
+#define SPMS_INVALID_NAME       2
+#define SPMS_INVALID_ADDRESS    3
+#define SPMS_CONNECTING         4
+#define SPMS_CONNECTION_FAILED  5
+#define SPMS_CONNECTED          6
+#define SPMS_CONNECTION_LOST    7
+#define SPMS_HOST_PRESSED       8
+#define SPMS_NO_ANSWER          9
+#define SPMS_INCOMPATIBLE       10
+#define SPMS_SERVER_MISSING     11
+#define SPMS_PORT_IN_USE        12
+#define SPMS_HOST_LEFT          13
+#define SPMS_ENTER_LOBBY        14
+#define SPMS_SERVER_FAILED      15
+#define SPMS_LOBBY_ACTION       20
+#define SPMS_LOBBY_LEAVE        21
+#define SPMS_LOBBY_NOT_READY    22
+#define SPMS_LOBBY_READY        23
+#define SPMS_LOBBY_HOST_WAITING 24
+#define SPMS_LOBBY_CAN_START    25
+#define SPMS_LOBBY_STARTING     26
+#define SPMS_LOBBY_IN_PROGRESS  27
+#define SPMS_RETURN_LOBBY       28
+
+#define CONNECTING_DOT_MS 250
+
+// The code the form shows when it opens (a failure from the room or a level).
 static int asmpReturnStatus = 0;
 
 int connectingAnimationTimer = 0;
-ProcessConnectingText()
-{
-  int hp;
-  hp = Action(MenuFind(STATUS_BAR_VID, STATUS_BAR_NDIR), ACT_GET_HP);
-  //MenuAction(2,0,ACT_GET_HP);
 
-  if( hp==SPMS_INVALID_NAME)
+// Sets the status line for a connection failure code; other codes leave it alone.
+ShowFailureText(int code)
+{
+  if( code==SPMS_INVALID_NAME )
   {
-    asmpStrConnecting="Invalid name!";
+    asmpStrConnecting = "Invalid name!";
   }
-  else if( hp==SPMS_INVALID_ADDRESS )
+  else if( code==SPMS_INVALID_ADDRESS )
   {
-    asmpStrConnecting="Invalid address!";
+    asmpStrConnecting = "Invalid address!";
   }
-  else if( hp==SPMS_CONNECTING )
+  else if( code==SPMS_CONNECTION_FAILED )
   {
-    if( ( GetTime()-connectingAnimationTimer ) > 250 )
+    asmpStrConnecting = "Connection failed!";
+  }
+  else if( code==SPMS_CONNECTION_LOST )
+  {
+    asmpStrConnecting = "Connection lost!";
+  }
+  else if( code==SPMS_NO_ANSWER )
+  {
+    asmpStrConnecting = "No answer: address or firewall?";
+  }
+  else if( code==SPMS_INCOMPATIBLE )
+  {
+    asmpStrConnecting = "Incompatible server version!";
+  }
+  else if( code==SPMS_SERVER_MISSING )
+  {
+    asmpStrConnecting = "asmp-server.exe not found!";
+  }
+  else if( code==SPMS_PORT_IN_USE )
+  {
+    asmpStrConnecting = "Port is already in use!";
+  }
+  else if( code==SPMS_HOST_LEFT )
+  {
+    asmpStrConnecting = "The host closed the room.";
+  }
+  else if( code==SPMS_SERVER_FAILED )
+  {
+    asmpStrConnecting = "Server failed to start!";
+  }
+}
+
+AnimateConnectingText()
+{
+  if( ( GetTime()-connectingAnimationTimer ) > CONNECTING_DOT_MS )
+  {
+    connectingAnimationTimer = GetTime();
+    if( strlen(asmpStrConnecting) < strlen("connecting...") )
     {
-      connectingAnimationTimer = GetTime();
-      if( strlen(asmpStrConnecting) < strlen("connecting...") )
-      {
-        asmpStrConnecting+=".";
-      }
-      else
-      {
-        asmpStrConnecting="connecting";
-      }
+      asmpStrConnecting += ".";
     }
-  }
-  else if( hp==SPMS_CONNECTION_FAILED )
-  {
-    asmpStrConnecting="Connection failed!";
-  }
-  else if( hp==SPMS_CONNECTION_LOST )
-  {
-    asmpStrConnecting="Connection lost!";
-  }
-  else if( hp==SPMS_CONNECTED )
-  {
-    MenuRelease();
+    else
+    {
+      asmpStrConnecting = "connecting";
+    }
   }
 }
 
 CreateMultiplayerMenu()
 {
-  int menu;
   MenuRelease();
   MenuLoad("maps\\asmp_play.men");
+  asmpMenuKind = ASMP_MENU_FORM;
+  targetEditbox = TARGET_EDITBOX_NONE;
   asmpStrConnecting = "";
   /* Male by default */
   MenuAction(706,0,ANI_MENUSTANDUP);
 
-  MenuAction(STATUS_BAR_VID, STATUS_BAR_NDIR, ACT_SET_HP, asmpReturnStatus);
+  MenuAction(FORM_STATUS_VID, FORM_STATUS_NDIR, ACT_SET_HP, asmpReturnStatus);
   asmpReturnStatus = SPMS_IDLE;
 }
 
-TactMultiplayerMenu()
+CreateLobbyMenu()
 {
-  ProcessConnectingText();
+  MenuRelease();
+  MenuLoad("maps\\asmp_lobby.men");
+  asmpMenuKind = ASMP_MENU_LOBBY;
+  targetEditbox = TARGET_EDITBOX_NONE;
+  asmpStrConnecting = "";
+  asmpStrAction = "";
+}
 
-  if( MenuLClick() )
+// Called by mainmenu.lgc before it leaves the multiplayer menu (button or Esc).
+LeaveMultiplayerMenu()
+{
+  if( asmpMenuKind==ASMP_MENU_LOBBY )
   {
-    if( MenuNVidUnderCursor()==706 )
+    MenuAction(ROOM_STATUS_VID, ROOM_STATUS_NDIR, ACT_SET_HP, SPMS_LOBBY_LEAVE);
+  }
+  asmpMenuKind = ASMP_MENU_FORM;
+}
+
+ProcessFormStatus()
+{
+  asmpFormStatus = Action(MenuFind(FORM_STATUS_VID, FORM_STATUS_NDIR), ACT_GET_HP);
+
+  if( asmpFormStatus==SPMS_CONNECTING )
   {
-      MenuAction(706,0,ANI_MENUSTANDUP);
-      MenuAction(707,0,ANI_MENUSTANDDOWN);
-      FSaveData("save://common/"+"PlayerSex","male");
-    }
-    else if( MenuNVidUnderCursor()==707 )
+    AnimateConnectingText();
+  }
+  else if( asmpFormStatus==SPMS_CONNECTED )
+  {
+    MenuRelease(); // Direct join: the DLL loads the map.
+  }
+  else if( asmpFormStatus==SPMS_ENTER_LOBBY )
+  {
+    CreateLobbyMenu();
+  }
+  else
+  {
+    ShowFailureText(asmpFormStatus);
+  }
+}
+
+// Writes a connect or create request unless one is already being handled.
+RequestFromForm(int code)
+{
+  if( asmpFormStatus==SPMS_CONNECTING || asmpFormStatus==SPMS_CONNECT_PRESSED ||
+      asmpFormStatus==SPMS_HOST_PRESSED || asmpFormStatus==SPMS_ENTER_LOBBY )
+  {
+    return;
+  }
+  MenuAction(FORM_STATUS_VID, FORM_STATUS_NDIR, ACT_SET_HP, code);
+}
+
+HandleFormClick()
+{
+  if( MenuNVidUnderCursor()==706 )
+  {
+    MenuAction(706,0,ANI_MENUSTANDUP);
+    MenuAction(707,0,ANI_MENUSTANDDOWN);
+    FSaveData("save://common/"+"PlayerSex","male");
+  }
+  else if( MenuNVidUnderCursor()==707 )
+  {
+    MenuAction(707,0,ANI_MENUSTANDUP);
+    MenuAction(706,0,ANI_MENUSTANDDOWN);
+    FSaveData("save://common/"+"PlayerSex","female");
+  }
+  else if( MenuNVidUnderCursor()==BUTTON_VID )
+  {
+    if( MenuNDirUnderCursor()==BUTTON_NDIR_MAIN )
     {
-      MenuAction(707,0,ANI_MENUSTANDUP);
-      MenuAction(706,0,ANI_MENUSTANDDOWN);
-      FSaveData("save://common/"+"PlayerSex","female");
+      RequestFromForm(SPMS_CONNECT_PRESSED);
     }
-
-
-    if( MenuNVidUnderCursor()==705 ) // Button
-  {
-    if( MenuNDirUnderCursor() == 1 ) // Connect
+    else if( MenuNDirUnderCursor()==BUTTON_NDIR_HOST )
     {
-        MenuAction(STATUS_BAR_VID, STATUS_BAR_NDIR, ACT_SET_HP, SPMS_CONNECT_PRESSED);
+      RequestFromForm(SPMS_HOST_PRESSED);
     }
   }
-    else if( MenuNVidUnderCursor()==708 ) // EditBox
+  else if( MenuNVidUnderCursor()==EDITBOX_VID )
+  {
+    if( MenuNDirUnderCursor()==0 ) // Name
     {
-      if( MenuNDirUnderCursor() == 0 ) // Name
-      {
-        //asmpStrName = "Name";
-        targetEditbox = TARGET_EDITBOX_NAME;
-      }
-      else if( MenuNDirUnderCursor() == 1 ) // Address
-      {
-        //asmpStrAddress = "Address";
-        targetEditbox = TARGET_EDITBOX_ADDRESS;
-      }
+      targetEditbox = TARGET_EDITBOX_NAME;
+    }
+    else if( MenuNDirUnderCursor()==1 ) // Address
+    {
+      targetEditbox = TARGET_EDITBOX_ADDRESS;
     }
   }
+}
 
-  if( targetEditbox == TARGET_EDITBOX_NAME )
+HandleFormTyping()
+{
+  if( targetEditbox==TARGET_EDITBOX_NAME )
   {
-    // Handle backspace
     if( GetKey()==VK_BACK && strlen(asmpStrName) >= 1 )
     {
       asmpStrName[strlen(asmpStrName)-1] = 0;
     }
     else if( GetKey() >= 32 && GetKey() <= 126 )
     {
-        asmpStrName += Printf("%c",GetKey());
+      asmpStrName += Printf("%c",GetKey());
     }
   }
-  else if ( targetEditbox == TARGET_EDITBOX_ADDRESS )
+  else if( targetEditbox==TARGET_EDITBOX_ADDRESS )
   {
-    // Handle backspace
     if( GetKey()==VK_BACK && strlen(asmpStrAddress) >= 1 )
     {
       asmpStrAddress[strlen(asmpStrAddress)-1] = 0;
     }
-    else if( (GetKey() >= 48 && GetKey() <= 57) || // Handle numbers
-             GetKey() == '.' || GetKey() == ':')   // Handle dot, colon
+    else if( (GetKey() >= 48 && GetKey() <= 57) || // Numbers
+             GetKey()=='.' || GetKey()==':' )      // Dot, colon
     {
       asmpStrAddress += Printf("%c",GetKey());
     }
+  }
+}
+
+TactFormMenu()
+{
+  ProcessFormStatus();
+  if( asmpMenuKind!=ASMP_MENU_FORM )
+  {
+    return; // The room menu replaced the form.
+  }
+  if( MenuLClick() )
+  {
+    HandleFormClick();
+  }
+  HandleFormTyping();
+}
+
+// Shows the room code written by the DLL. A failure reopens the form with its reason.
+ProcessLobbyStatus()
+{
+  int hp;
+  hp = Action(MenuFind(ROOM_STATUS_VID, ROOM_STATUS_NDIR), ACT_GET_HP);
+
+  if( hp==SPMS_LOBBY_NOT_READY )
+  {
+    asmpStrConnecting = "Press READY when you are set.";
+    asmpStrAction = "READY";
+  }
+  else if( hp==SPMS_LOBBY_READY )
+  {
+    asmpStrConnecting = "Ready: waiting for the host.";
+    asmpStrAction = "NOT READY";
+  }
+  else if( hp==SPMS_LOBBY_HOST_WAITING )
+  {
+    asmpStrConnecting = "Waiting for the players.";
+    asmpStrAction = "WAITING";
+  }
+  else if( hp==SPMS_LOBBY_CAN_START )
+  {
+    asmpStrConnecting = "Everyone is ready.";
+    asmpStrAction = "START";
+  }
+  else if( hp==SPMS_LOBBY_STARTING )
+  {
+    asmpStrConnecting = "Starting...";
+    asmpStrAction = "";
+  }
+  else if( hp==SPMS_LOBBY_IN_PROGRESS )
+  {
+    asmpStrConnecting = "Game in progress: wait for it.";
+    asmpStrAction = "";
+  }
+  else if( hp==SPMS_CONNECTED )
+  {
+    MenuRelease(); // The host started: the DLL loads the map.
+  }
+  else if( hp==SPMS_CONNECTION_FAILED || hp==SPMS_CONNECTION_LOST ||
+           ( hp >= SPMS_NO_ANSWER && hp <= SPMS_HOST_LEFT ) || hp==SPMS_SERVER_FAILED )
+  {
+    asmpReturnStatus = hp;
+    CreateMultiplayerMenu();
+  }
+}
+
+TactLobbyMenu()
+{
+  ProcessLobbyStatus();
+  if( asmpMenuKind!=ASMP_MENU_LOBBY )
+  {
+    return; // A failure reopened the form.
+  }
+  if( MenuLClick() && MenuNVidUnderCursor()==BUTTON_VID && MenuNDirUnderCursor()==BUTTON_NDIR_MAIN )
+  {
+    MenuAction(ROOM_STATUS_VID, ROOM_STATUS_NDIR, ACT_SET_HP, SPMS_LOBBY_ACTION);
+  }
+}
+
+TactMultiplayerMenu()
+{
+  if( asmpMenuKind==ASMP_MENU_LOBBY )
+  {
+    TactLobbyMenu();
+  }
+  else
+  {
+    TactFormMenu();
   }
 }

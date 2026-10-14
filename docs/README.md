@@ -7,18 +7,19 @@ page for your task.
 
 | Page | Contents |
 | --- | --- |
-| [Build, test and review](../diagnostics/README.md) | Build, preparing test copies and isolated DLL pairs, Git Bash server/two-client launch, managed two-client session (start, stop, restart, live checklist), one-PC Mirror test, two-copy launch verification, multiplayer menu and two-PC sessions, window and diagnostic modes, what the automated tests cover |
+| [Build, test and review](../diagnostics/README.md) | Build, preparing test copies and isolated DLL pairs, Git Bash server/two-client launch, managed two-client session (start, stop, restart, live checklist), one-PC Mirror test, two-copy launch verification, multiplayer menu, room (Create/Connect, ready, start) and two-PC sessions, window and diagnostic modes, what the automated tests cover |
 | [Monster checkpoints](monster-sync-stages.md) | Authoritative game-host design, ground/flying UNIT control, corpse/gib and freeze/armor forms, client impact prediction and correction, paired gallery tests |
 
 ## How it works
 
 | Page | Contents |
 | --- | --- |
-| [Architecture and behavior](architecture.md) | Layers, remote-player states, shots and aim, wire protocol, relay validation, world identity, health ownership, known limits |
+| [Architecture and behavior](architecture.md) | Layers, remote-player states, shots and aim, wire protocol, relay validation, world identity, health ownership, known limits, room and session (owned server, start barrier, transport boundary) |
 | [asmp-dll](../asmp-dll/README.md) | Client DLL source layout: engine API (`game/`) and multiplayer runtime (`multiplayer/`) |
-| [asmp-server](../asmp-server/README.md) | Relay server: running it and what it validates |
+| [asmp-server](../asmp-server/README.md) | Relay server: running it, its ready line, the room and what it validates |
 | [steam_profile.h](../asmp-dll/src/game/steam_profile.h) | Supported EXE hash, verified RVAs, offsets and layouts (comments record where each was confirmed) |
 | [protocol.h](../common/src/protocol.h) | State and shot packet codecs |
+| [lobby_protocol.h](../common/src/lobby_protocol.h) | Room snapshot and ready, settings, start and loaded request codecs |
 | [monster_protocol.h](../common/src/monster_protocol.h) | Opt-in monster authority, state and explicit event codecs |
 | [monster_vids.h](../common/src/monster_vids.h) | Named native monster VIDs (40..90, armored and frozen forms) shared by protocol and game layer |
 

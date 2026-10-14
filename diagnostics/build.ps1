@@ -24,7 +24,7 @@ $netIncludes = @("/I$repo\common\epnet\include", "/I$repo\common\epnet\src\commo
 $netCommon = @(Get-ChildItem "$repo\common\epnet\src\common\*.c" | ForEach-Object FullName)
 $netClient = @("$repo\common\epnet\src\client\epnet_client.c")
 $actorSources = @("$repo\asmp-dll\src\game\actor.c", "$repo\asmp-dll\src\game\actor_api.c")
-$multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", "$repo\asmp-dll\src\game\action_hook.c", "$repo\asmp-dll\src\game\ui.c", "$repo\asmp-dll\src\game\display_hook.c", "$repo\asmp-dll\src\multiplayer\session.c")
+$multiplayerSources = @("$repo\asmp-dll\src\multiplayer\multiplayer.c", "$repo\asmp-dll\src\multiplayer\pose_buffer.c", "$repo\asmp-dll\src\game\action_hook.c", "$repo\asmp-dll\src\game\ui.c", "$repo\asmp-dll\src\game\display_hook.c", "$repo\asmp-dll\src\multiplayer\session.c", "$repo\asmp-dll\src\multiplayer\server_process.c", "$repo\asmp-dll\src\multiplayer\lobby_requests.c")
 $hookSources = @("$repo\asmp-dll\src\game\slot_hook.c", "$repo\asmp-dll\src\game\tick_hook.c", "$repo\asmp-dll\src\game\world_hook.c")
 $runtimeSource = "$repo\asmp-dll\src\multiplayer\runtime.c"
 $monsterCoordinator = "$repo\asmp-dll\src\multiplayer\monster_sync.c"
@@ -34,8 +34,8 @@ try {
     # Compile the existing networking library separately with its warning level.
     Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $netCommon + $netClient)
     $netObjects = @($netCommon + $netClient | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
-    Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $monsterSources + @($runtimeSource, $monsterCoordinator) + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\diag_tick.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'winmm.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
-    Compile ($flags + $netIncludes + @("$root\src\state_peer.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:state-peer.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+    Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $monsterSources + @($runtimeSource, $monsterCoordinator) + $netIncludes + @('/LD', "$root\src\diag.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\multiplayer\client\transport.c", "$repo\asmp-dll\src\multiplayer\client\transport_udp.c", "$repo\asmp-dll\src\game\probe.c", "$root\src\diag_tick.c", "$root\src\dummy_actor.c", "$root\src\hash.c", '/Fe:asmp-diag.dll') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'winmm.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
+    Compile ($flags + $netIncludes + @("$root\src\state_peer.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\multiplayer\client\transport.c", "$repo\asmp-dll\src\multiplayer\client\transport_udp.c", '/Fe:state-peer.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
     Compile ($flags + @("$root\src\launcher.c", "$root\src\window_mode.c", "$root\src\hash.c", '/Fe:asmp-diag-launch.exe', '/link', 'bcrypt.lib', 'user32.lib', '/MACHINE:X86', '/INCREMENTAL:NO'))
     if (!$SkipTests) {
         Compile ($flags + @("$root\tests\unit_puppet_test.c", "$repo\asmp-dll\src\game\unit_puppet.c", "$repo\asmp-dll\src\game\slot_hook.c", '/Fe:unit-puppet-test.exe', '/link', '/MACHINE:X86'))
@@ -65,11 +65,24 @@ try {
         Compile ($flags + @("$root\tests\window_mode_test.c", "$root\src\window_mode.c", '/Fe:window-mode-test.exe', '/link', '/MACHINE:X86'))
         & .\window-mode-test.exe
         if ($LASTEXITCODE) { throw 'Window mode checks failed.' }
-        $serverSupport = @("$repo\asmp-server\src\server.c", "$repo\common\epnet\src\server\epnet_server.c", "$repo\common\src\utils\mem\mem.c", "$repo\common\src\utils\time\time.c")
+        $serverSupport = @("$repo\asmp-server\src\server.c", "$repo\asmp-server\src\lobby.c","$repo\common\epnet\src\server\epnet_server.c", "$repo\common\src\utils\mem\mem.c", "$repo\common\src\utils\time\time.c")
         Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN', '/c') + $netIncludes + $serverSupport)
         $serverObjects = @($serverSupport | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' })
-        Compile ($flags + $netIncludes + @("$root\tests\state_sync_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:state-sync-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
-        Compile ($flags + $netIncludes + @("$root\tests\monster_transport_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:monster-transport-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        Compile ($flags + $netIncludes + @("$root\tests\state_sync_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\multiplayer\client\transport.c", "$repo\asmp-dll\src\multiplayer\client\transport_udp.c", '/Fe:state-sync-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        Compile ($flags + $netIncludes + @("$root\tests\monster_transport_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\multiplayer\client\transport.c", "$repo\asmp-dll\src\multiplayer\client\transport_udp.c", '/Fe:monster-transport-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        Compile ($flags + $netIncludes + @("$root\tests\lobby_test.c", '/Fe:lobby-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        & .\lobby-test.exe
+        if ($LASTEXITCODE) { throw 'Lobby checks failed.' }
+        Compile ($flags + $netIncludes + @("$root\tests\lobby_transport_test.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\multiplayer\client\transport.c", "$repo\asmp-dll\src\multiplayer\client\transport_udp.c", '/Fe:lobby-transport-test.exe') + $netObjects + $serverObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        & .\lobby-transport-test.exe
+        if ($LASTEXITCODE) { throw 'Lobby transport checks failed.' }
+        Compile ($flags + @("$root\tests\server_process_child.c", '/Fe:server-process-child.exe', '/link', '/MACHINE:X86'))
+        Compile ($flags + @("$root\tests\server_process_test.c", "$repo\asmp-dll\src\multiplayer\server_process.c", '/Fe:server-process-test.exe', '/link', '/MACHINE:X86'))
+        & .\server-process-test.exe
+        if ($LASTEXITCODE) { throw 'Server process checks failed.' }
+        Compile ($flags + @("$root\tests\lobby_requests_test.c", "$repo\asmp-dll\src\multiplayer\lobby_requests.c", '/Fe:lobby-requests-test.exe', '/link', '/MACHINE:X86'))
+        & .\lobby-requests-test.exe
+        if ($LASTEXITCODE) { throw 'Lobby request checks failed.' }
         & .\monster-transport-test.exe
         if ($LASTEXITCODE) { throw 'Monster transport checks failed.' }
         & .\state-sync-test.exe
@@ -83,7 +96,7 @@ try {
         Compile ($flags + $actorSources + @("$root\tests\dummy_actor_test.c", "$root\src\dummy_actor.c", '/Fe:dummy-actor-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\multiplayer_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:multiplayer-test.exe', '/link', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\session_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:session-test.exe', '/link', '/MACHINE:X86'))
-        Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $netIncludes + $monsterSources + @($monsterCoordinator, $runtimeSource, "$root\tests\runtime_test.c", "$repo\asmp-dll\src\game\probe.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", '/Fe:runtime-test.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        Compile ($flags + $actorSources + $multiplayerSources + $hookSources + $netIncludes + $monsterSources + @($monsterCoordinator, $runtimeSource, "$root\tests\runtime_test.c", "$repo\asmp-dll\src\game\probe.c", "$repo\asmp-dll\src\multiplayer\client\state_client.c", "$repo\asmp-dll\src\multiplayer\client\transport.c", "$repo\asmp-dll\src\multiplayer\client\transport_udp.c", '/Fe:runtime-test.exe') + $netObjects + @('/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
         Compile ($flags + $actorSources + $multiplayerSources + $hookSources + @("$root\tests\hooks_test.c", "$repo\asmp-dll\src\game\probe.c", '/Fe:hooks-test.exe', '/link', '/MACHINE:X86'))
         & .\hooks-test.exe
         if ($LASTEXITCODE) { throw 'Hook lifecycle checks failed.' }
@@ -116,6 +129,11 @@ try {
         $includeDirs = @($sourceDirs) + @($sourceDirs | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -Directory } | ForEach-Object FullName) + "$repo\common\epnet\include"
         $includes = @($includeDirs | Select-Object -Unique | ForEach-Object { '/I' + $_ })
         Compile (@('/nologo', '/std:c11', '/W3', '/O2', '/MT', '/DWIN32_LEAN_AND_MEAN') + $includes + $files + @('/Fe:asmp-server.exe', '/link', 'ws2_32.lib', 'advapi32.lib', '/MACHINE:X86'))
+        if (!$SkipTests) {
+            # The real server against the process owner: readiness and port conflict.
+            & .\server-process-test.exe "$build\asmp-server.exe"
+            if ($LASTEXITCODE) { throw 'Real server process checks failed.' }
+        }
     }
 } finally { Pop-Location }
 Write-Output "Built x86 diagnostics in $build"
